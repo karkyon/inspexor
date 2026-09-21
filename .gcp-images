@@ -1,0 +1,2 @@
+WEB_IMAGE=asia-northeast1-docker.pkg.dev/inspexor-jadeworks-dev/inspexor/web:latest
+WORKER_IMAGE=asia-northeast1-docker.pkg.dev/inspexor-jadeworks-dev/inspexor/worker:latest

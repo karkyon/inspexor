@@ -1,0 +1,76 @@
+# インフラ・運用設計書 v5.1 10章「CI/CDジョブ順」のスケルトン。
+# いずれかのjobが失敗すれば後続を実行しない（fail-fast）。
+# 各stepの実処理はG0以降、対象パッケージの実装に合わせて追加する。
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    name: checkout / lockfile / secret-scan / lint / typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "pnpm"
+      - run: pnpm install --frozen-lockfile
+      # TODO(G0): secret/license/dependency scan
+      - run: pnpm format --check || true
+      - run: pnpm lint
+      - run: pnpm typecheck
+
+  unit_and_contract:
+    name: unit+golden / openapi drift / schema diff
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "pnpm"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm contract:check
+      - run: pnpm migration:check
+
+  integration_e2e:
+    name: integration (Postgres16) / Playwright
+    needs: unit_and_contract
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: inspexor
+          POSTGRES_PASSWORD: inspexor_ci
+          POSTGRES_DB: inspexor_ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U inspexor"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "pnpm"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:integration
+        env:
+          DATABASE_URL: postgresql://inspexor:inspexor_ci@localhost:5432/inspexor_ci
+      - run: npx playwright install --with-deps
+      - run: pnpm test:e2e
+
+  # TODO(G8以降): container build/scan/SBOM/sign, Terraform fmt/validate/plan,
+  #               staging deploy/smoke, production approval/tag/digest deploy

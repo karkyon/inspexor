@@ -1,0 +1,26 @@
+# インフラ・運用設計書 v5.1 準拠
+# - project name: inspexor-dev (docker compose -p inspexor-dev)
+# - container_name は固定しない（複数worktree/複数案件との衝突回避）
+# - host port はこのファイルへ直書きせず .env.local の DB_HOST_PORT から注入する
+#   （着手前に `pnpm ports:audit` 等で空きportを棚卸しし、.env.local に記録すること）
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-inspexor}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-inspexor_local_only}
+      POSTGRES_DB: ${DB_NAME:-inspexor_dev}
+    ports:
+      # 127.0.0.1限定bind（DB hostを外部に公開しない方針）
+      - "127.0.0.1:${DB_HOST_PORT:-55432}:5432"
+    volumes:
+      - inspexor_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-inspexor}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  inspexor_pg_data:

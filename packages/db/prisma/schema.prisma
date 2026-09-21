@@ -1,0 +1,739 @@
+// INSPEXOR Prisma Schema — G0-MIGRATION
+// 正本: schema.sql（00契約 8章「DB=schema.sql」）。本ファイルはそこからの機械的な変換であり、
+// 業務値・カラム・制約の推測追加は行っていない。
+//
+// 【重要: Prismaで表現できない制約（別途マイグレーションSQLで補う）】
+// schema.prisma / Prisma Migrateは以下を表現できないため、
+// `prisma migrate dev --create-only` で生成したSQLに、schema.sqlの該当行をそのまま追記する運用とする
+// （G0-MIGRATION内の別タスクとして migrations/<ts>_init/migration.sql に手動追記し、
+//   `pnpm migration:check` で schema.sql との diff 0 を確認する）。
+//   1. 全CHECK制約（例: failed_attempts>=0, quantity>0, end_at>start_at 等）
+//   2. GIST EXCLUDE制約（rate_no_overlap, transport_no_overlap）
+//   3. current_revision_id の DEFERRABLE INITIALLY DEFERRED FK
+//   4. 不変トリガー（work_revision_immutable, delivery_revision_immutable, audit_append_only）とその関数
+
+generator client {
+  provider = "prisma-client-js"
+  previewFeatures = ["multiSchema"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  schemas  = ["app"]
+}
+
+// ============ Enums (schema.sql 5-11行目) ============
+
+enum UserStatus {
+  ACTIVE
+  LOCKED
+  INACTIVE
+
+  @@map("user_status")
+  @@schema("app")
+}
+
+enum RoleCode {
+  FIELD
+  OFFICE
+  ADMIN
+  AUDITOR
+
+  @@map("role_code")
+  @@schema("app")
+}
+
+enum RecordStatus {
+  DRAFT
+  CONFIRMED
+  SUBMITTED
+  APPROVED
+  REJECTED
+  REVOKED
+  BILLING_LOCKED
+
+  @@map("record_status")
+  @@schema("app")
+}
+
+enum SettlementType {
+  QUANTITY
+  TIME
+
+  @@map("settlement_type")
+  @@schema("app")
+}
+
+enum TransportType {
+  ALLOCATED
+  PER_TRIP
+  MONTHLY_FIXED
+  NONE
+
+  @@map("transport_type")
+  @@schema("app")
+}
+
+enum BillingStatus {
+  OPEN
+  CALCULATING
+  CALCULATED
+  NEEDS_REVIEW
+  REVIEWED
+  FINALIZED
+  ISSUED
+  SENT
+  VOIDED
+
+  @@map("billing_status")
+  @@schema("app")
+}
+
+enum JobStatus {
+  QUEUED
+  PROCESSING
+  GENERATED
+  SENDING
+  SENT
+  FAILED_RETRYABLE
+  FAILED_FINAL
+
+  @@map("job_status")
+  @@schema("app")
+}
+
+// ============ 1. users ============
+model User {
+  id             String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  loginId        String     @unique @map("login_id") @db.VarChar(100)
+  passwordHash   String     @map("password_hash") @db.Text
+  displayName    String     @map("display_name") @db.VarChar(100)
+  status         UserStatus @default(ACTIVE)
+  failedAttempts Int        @default(0) @map("failed_attempts") // CHECK >=0
+  lockedUntil    DateTime?  @map("locked_until") @db.Timestamptz(6)
+  version        Int        @default(1)
+  createdAt      DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime   @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  roles                   UserRole[]
+  ownedWorkReports        WorkReport[]        @relation("WorkReportOwner")
+  reportedWorkRevisions   WorkReportRevision[] @relation("WorkRevisionReporter")
+  ownedDeliveryReports    DeliveryReport[]     @relation("DeliveryReportOwner")
+  approvalsActed          Approval[]           @relation("ApprovalActor")
+  billingWarningsResolved BillingWarning[]     @relation("BillingWarningResolver")
+  auditEvents             AuditEvent[]         @relation("AuditActor")
+  idempotencyRecords      IdempotencyRecord[]  @relation("IdempotencyActor")
+
+  @@map("users")
+  @@schema("app")
+}
+
+// ============ 2. user_roles ============
+model UserRole {
+  userId String   @map("user_id") @db.Uuid
+  role   RoleCode
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@id([userId, role])
+  @@map("user_roles")
+  @@schema("app")
+}
+
+// ============ 3. customers ============
+model Customer {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code       String   @unique @db.VarChar(30)
+  name       String   @db.VarChar(200)
+  closingDay Int      @default(31) @map("closing_day") @db.SmallInt // CHECK 1-31
+  active     Boolean  @default(true)
+  version    Int      @default(1)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  contacts          CustomerContact[]
+  products          Product[]
+  workRevisions     WorkReportRevision[]
+  deliveryRevisions DeliveryReportRevision[]
+  billingRuns       BillingRun[]
+
+  @@map("customers")
+  @@schema("app")
+}
+
+// ============ 4. customer_contacts ============
+model CustomerContact {
+  id          String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  customerId  String  @map("customer_id") @db.Uuid
+  code        String  @db.VarChar(30)
+  name        String  @db.VarChar(100)
+  email       String  @db.VarChar(320)
+  sendDaily   Boolean @default(false) @map("send_daily")
+  sendInvoice Boolean @default(false) @map("send_invoice")
+  active      Boolean @default(true)
+
+  customer     Customer         @relation(fields: [customerId], references: [id])
+  productLinks ProductContact[]
+
+  @@unique([customerId, code])
+  @@map("customer_contacts")
+  @@schema("app")
+}
+
+// ============ 5. workers ============
+model Worker {
+  id     String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code   String  @unique @db.VarChar(30)
+  name   String  @db.VarChar(100)
+  active Boolean @default(true)
+
+  workRevisionAssignments  WorkReportWorker[]
+  deliveryRevisionsAsDriver DeliveryReportRevision[]
+
+  @@map("workers")
+  @@schema("app")
+}
+
+// ============ 6. products ============
+model Product {
+  id             String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  customerId     String         @map("customer_id") @db.Uuid
+  code           String         @db.VarChar(80)
+  name           String         @db.VarChar(200)
+  settlementType SettlementType @map("settlement_type")
+  lotRequired    Boolean        @default(false) @map("lot_required")
+  active         Boolean        @default(true)
+
+  customer         Customer             @relation(fields: [customerId], references: [id])
+  contacts         ProductContact[]
+  workTypes        WorkType[]
+  defectTypes      DefectType[]
+  rateRules        RateRule[]
+  transportRules   TransportRule[]
+  fixedChargeRules FixedChargeRule[]
+  workRevisions    WorkReportRevision[]
+  deliveryItems    DeliveryItem[]
+
+  @@unique([customerId, code])
+  @@map("products")
+  @@schema("app")
+}
+
+// ============ 7. product_contacts ============
+model ProductContact {
+  productId String @map("product_id") @db.Uuid
+  contactId String @map("contact_id") @db.Uuid
+  purpose   String @db.VarChar(20) // CHECK IN('DAILY','INVOICE')
+
+  product Product         @relation(fields: [productId], references: [id])
+  contact CustomerContact @relation(fields: [contactId], references: [id])
+
+  @@id([productId, contactId, purpose])
+  @@map("product_contacts")
+  @@schema("app")
+}
+
+// ============ 8. work_types ============
+model WorkType {
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId String  @map("product_id") @db.Uuid
+  code      String  @db.VarChar(50)
+  name      String  @db.VarChar(200)
+  active    Boolean @default(true)
+
+  product        Product              @relation(fields: [productId], references: [id])
+  rateRules      RateRule[]
+  transportRules TransportRule[]
+  workRevisions  WorkReportRevision[]
+
+  @@unique([productId, code])
+  @@map("work_types")
+  @@schema("app")
+}
+
+// ============ 9. defect_types ============
+model DefectType {
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId String  @map("product_id") @db.Uuid
+  code      String  @db.VarChar(50)
+  name      String  @db.VarChar(100)
+  sortOrder Int     @default(0) @map("sort_order")
+  active    Boolean @default(true)
+
+  product       Product        @relation(fields: [productId], references: [id])
+  defectResults DefectResult[]
+
+  @@unique([productId, code])
+  @@map("defect_types")
+  @@schema("app")
+}
+
+// ============ 10. holidays ============
+model Holiday {
+  holidayDate DateTime @id @map("holiday_date") @db.Date
+  name        String   @db.VarChar(100)
+
+  @@map("holidays")
+  @@schema("app")
+}
+
+// ============ 11. rate_rules ============
+// GIST EXCLUDE制約(rate_no_overlap)は補助migrationで追加（Prisma未対応）
+model RateRule {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId          String    @map("product_id") @db.Uuid
+  workTypeId         String?   @map("work_type_id") @db.Uuid
+  unitPrice          Decimal   @map("unit_price") @db.Decimal(18, 4) // CHECK >=0
+  overtimeMultiplier Decimal   @default(1.25) @map("overtime_multiplier") @db.Decimal(8, 4) // CHECK >=1
+  validFrom          DateTime  @map("valid_from") @db.Date
+  validTo            DateTime? @map("valid_to") @db.Date
+
+  product  Product   @relation(fields: [productId], references: [id])
+  workType WorkType? @relation(fields: [workTypeId], references: [id])
+
+  @@map("rate_rules")
+  @@schema("app")
+}
+
+// ============ 12. transport_rules ============
+// GIST EXCLUDE制約(transport_no_overlap)は補助migrationで追加（Prisma未対応）
+model TransportRule {
+  id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId       String        @map("product_id") @db.Uuid
+  workTypeId      String?       @map("work_type_id") @db.Uuid
+  type            TransportType
+  amountYen       BigInt        @default(0) @map("amount_yen") // CHECK >=0
+  allocationGroup String?       @map("allocation_group") @db.VarChar(50)
+  validFrom       DateTime      @map("valid_from") @db.Date
+  validTo         DateTime?     @map("valid_to") @db.Date
+
+  product  Product   @relation(fields: [productId], references: [id])
+  workType WorkType? @relation(fields: [workTypeId], references: [id])
+
+  @@map("transport_rules")
+  @@schema("app")
+}
+
+// ============ 13. fixed_charge_rules ============
+model FixedChargeRule {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId String    @map("product_id") @db.Uuid
+  label     String    @db.VarChar(200)
+  amountYen BigInt    @map("amount_yen") // CHECK >=0
+  validFrom DateTime  @map("valid_from") @db.Date
+  validTo   DateTime? @map("valid_to") @db.Date
+
+  product Product @relation(fields: [productId], references: [id])
+
+  @@map("fixed_charge_rules")
+  @@schema("app")
+}
+
+// ============ 14. work_reports ============
+// current_revision_id の DEFERRABLE INITIALLY DEFERRED FK は補助migrationで追加（Prisma未対応）
+model WorkReport {
+  id                String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  reportNo          String       @unique @map("report_no") @db.VarChar(30)
+  currentRevisionId String?      @map("current_revision_id") @db.Uuid
+  status            RecordStatus @default(DRAFT)
+  ownerId           String       @map("owner_id") @db.Uuid
+  version           Int          @default(1)
+  createdAt         DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime     @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  owner     User                 @relation("WorkReportOwner", fields: [ownerId], references: [id])
+  revisions WorkReportRevision[] @relation("WorkReportToRevisions")
+
+  @@index([status, updatedAt], map: "report_status")
+  @@map("work_reports")
+  @@schema("app")
+}
+
+// ============ 15. work_report_revisions ============
+model WorkReportRevision {
+  id                    String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  reportId              String    @map("report_id") @db.Uuid
+  parentRevisionId      String?   @map("parent_revision_id") @db.Uuid
+  revisionNo            Int       @map("revision_no")
+  workDate              DateTime  @map("work_date") @db.Date
+  reporterId            String    @map("reporter_id") @db.Uuid
+  customerId            String    @map("customer_id") @db.Uuid
+  productId             String    @map("product_id") @db.Uuid
+  workTypeId            String    @map("work_type_id") @db.Uuid
+  lotNo                 String?   @map("lot_no") @db.VarChar(100)
+  startAt               DateTime  @map("start_at") @db.Timestamptz(6)
+  endAt                 DateTime  @map("end_at") @db.Timestamptz(6) // CHECK end_at>start_at
+  breakMinutes          Int       @map("break_minutes") // CHECK >=0
+  regularMinutes        Int       @map("regular_minutes") // CHECK >=0
+  overtimeMinutes       Int       @map("overtime_minutes") // CHECK >=0
+  regularPersonMinutes  Int       @map("regular_person_minutes") // CHECK >=0
+  overtimePersonMinutes Int       @map("overtime_person_minutes") // CHECK >=0
+  quantity              Int // CHECK >=0
+  confirmedAt           DateTime? @map("confirmed_at") @db.Timestamptz(6)
+
+  report         WorkReport           @relation("WorkReportToRevisions", fields: [reportId], references: [id])
+  parentRevision WorkReportRevision?  @relation("WorkRevisionParent", fields: [parentRevisionId], references: [id])
+  childRevisions WorkReportRevision[] @relation("WorkRevisionParent")
+  reporter       User                 @relation("WorkRevisionReporter", fields: [reporterId], references: [id])
+  customer       Customer             @relation(fields: [customerId], references: [id])
+  product        Product              @relation(fields: [productId], references: [id])
+  workType       WorkType             @relation(fields: [workTypeId], references: [id])
+  workers        WorkReportWorker[]
+  defectResults  DefectResult[]
+
+  @@unique([reportId, revisionNo])
+  @@index([workDate, customerId, productId], map: "work_revision_search")
+  @@map("work_report_revisions")
+  @@schema("app")
+}
+
+// ============ 16. work_report_workers ============
+model WorkReportWorker {
+  revisionId String @map("revision_id") @db.Uuid
+  workerId   String @map("worker_id") @db.Uuid
+
+  revision WorkReportRevision @relation(fields: [revisionId], references: [id])
+  worker   Worker             @relation(fields: [workerId], references: [id])
+
+  @@id([revisionId, workerId])
+  @@map("work_report_workers")
+  @@schema("app")
+}
+
+// ============ 17. defect_results ============
+model DefectResult {
+  revisionId   String @map("revision_id") @db.Uuid
+  defectTypeId String @map("defect_type_id") @db.Uuid
+  quantity     Int // CHECK >=0
+
+  revision   WorkReportRevision @relation(fields: [revisionId], references: [id])
+  defectType DefectType         @relation(fields: [defectTypeId], references: [id])
+
+  @@id([revisionId, defectTypeId])
+  @@map("defect_results")
+  @@schema("app")
+}
+
+// ============ 18. delivery_reports ============
+// current_revision_id の DEFERRABLE INITIALLY DEFERRED FK は補助migrationで追加（Prisma未対応）
+model DeliveryReport {
+  id                String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  reportNo          String       @unique @map("report_no") @db.VarChar(30)
+  currentRevisionId String?      @map("current_revision_id") @db.Uuid
+  status            RecordStatus @default(DRAFT)
+  ownerId           String       @map("owner_id") @db.Uuid
+  version           Int          @default(1)
+  createdAt         DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime     @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  owner     User                     @relation("DeliveryReportOwner", fields: [ownerId], references: [id])
+  revisions DeliveryReportRevision[] @relation("DeliveryReportToRevisions")
+
+  @@index([status, updatedAt], map: "delivery_status")
+  @@map("delivery_reports")
+  @@schema("app")
+}
+
+// ============ 19. delivery_report_revisions ============
+model DeliveryReportRevision {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  reportId         String    @map("report_id") @db.Uuid
+  parentRevisionId String?   @map("parent_revision_id") @db.Uuid
+  revisionNo       Int       @map("revision_no")
+  deliveryDate     DateTime  @map("delivery_date") @db.Date
+  driverId         String    @map("driver_id") @db.Uuid
+  customerId       String    @map("customer_id") @db.Uuid
+  confirmedAt      DateTime? @map("confirmed_at") @db.Timestamptz(6)
+
+  report         DeliveryReport           @relation("DeliveryReportToRevisions", fields: [reportId], references: [id])
+  parentRevision DeliveryReportRevision?  @relation("DeliveryRevisionParent", fields: [parentRevisionId], references: [id])
+  childRevisions DeliveryReportRevision[] @relation("DeliveryRevisionParent")
+  driver         Worker                   @relation(fields: [driverId], references: [id])
+  customer       Customer                 @relation(fields: [customerId], references: [id])
+  items          DeliveryItem[]
+
+  @@unique([reportId, revisionNo])
+  @@index([deliveryDate, customerId], map: "delivery_revision_search")
+  @@map("delivery_report_revisions")
+  @@schema("app")
+}
+
+// ============ 20. delivery_items ============
+model DeliveryItem {
+  id                 String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  deliveryRevisionId String  @map("delivery_revision_id") @db.Uuid
+  productId          String  @map("product_id") @db.Uuid
+  quantity           Int // CHECK >0
+  allocationEligible Boolean @default(false) @map("allocation_eligible")
+
+  deliveryRevision DeliveryReportRevision @relation(fields: [deliveryRevisionId], references: [id])
+  product          Product                @relation(fields: [productId], references: [id])
+
+  @@unique([deliveryRevisionId, productId])
+  @@map("delivery_items")
+  @@schema("app")
+}
+
+// ============ 21. approvals ============
+model Approval {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  entityType String   @map("entity_type") @db.VarChar(20) // CHECK IN('WORK','DELIVERY')
+  revisionId String   @map("revision_id") @db.Uuid
+  result     String   @db.VarChar(20) // CHECK IN('APPROVE','REJECT','REVOKE')
+  reason     String?  @db.Text // CHECK: result='APPROVE' OR length(trim(reason))>0
+  actorId    String   @map("actor_id") @db.Uuid
+  actedAt    DateTime @default(now()) @map("acted_at") @db.Timestamptz(6)
+
+  actor User @relation("ApprovalActor", fields: [actorId], references: [id])
+
+  @@map("approvals")
+  @@schema("app")
+}
+
+// ============ 22. billing_runs ============
+model BillingRun {
+  id          String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  customerId  String        @map("customer_id") @db.Uuid
+  periodStart DateTime      @map("period_start") @db.Date
+  periodEnd   DateTime      @map("period_end") @db.Date
+  status      BillingStatus @default(OPEN)
+  calcVersion Int           @default(1) @map("calc_version")
+  ruleHash    String?       @map("rule_hash") @db.Char(64)
+  version     Int           @default(1)
+  createdAt   DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  finalizedAt DateTime?     @map("finalized_at") @db.Timestamptz(6)
+
+  customer Customer         @relation(fields: [customerId], references: [id])
+  lines    BillingLine[]
+  warnings BillingWarning[]
+  invoices Invoice[]
+
+  @@unique([customerId, periodStart, periodEnd, calcVersion])
+  @@map("billing_runs")
+  @@schema("app")
+}
+
+// ============ 23. billing_lines ============
+model BillingLine {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  billingRunId     String   @map("billing_run_id") @db.Uuid
+  sourceType       String   @map("source_type") @db.VarChar(30)
+  sourceRevisionId String?  @map("source_revision_id") @db.Uuid
+  lineType         String   @map("line_type") @db.VarChar(30)
+  description      String   @db.VarChar(300)
+  rawQuantity      Decimal? @map("raw_quantity") @db.Decimal(18, 4)
+  unit             String?  @db.VarChar(20)
+  unitPrice        Decimal? @map("unit_price") @db.Decimal(18, 4)
+  multiplier       Decimal? @db.Decimal(8, 4)
+  unroundedAmount  Decimal  @map("unrounded_amount") @db.Decimal(18, 4)
+  amountYen        BigInt   @map("amount_yen")
+  ruleSnapshot     Json     @map("rule_snapshot") @db.JsonB
+  calculation      Json     @db.JsonB
+
+  billingRun BillingRun @relation(fields: [billingRunId], references: [id])
+
+  @@map("billing_lines")
+  @@schema("app")
+}
+
+// ============ 24. billing_warnings ============
+model BillingWarning {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  billingRunId     String    @map("billing_run_id") @db.Uuid
+  code             String    @db.VarChar(80)
+  sourceType       String?   @map("source_type") @db.VarChar(30)
+  sourceRevisionId String?   @map("source_revision_id") @db.Uuid
+  message          String    @db.VarChar(500)
+  resolution       String?   @db.VarChar(30) // CHECK IN('ACCEPT','EXCLUDE','CORRECT_SOURCE')
+  reason           String?   @db.Text
+  resolvedBy       String?   @map("resolved_by") @db.Uuid
+  resolvedAt       DateTime? @map("resolved_at") @db.Timestamptz(6)
+  // CHECK (resolution IS NULL) = (resolved_at IS NULL) は補助migrationで追加
+
+  billingRun BillingRun @relation(fields: [billingRunId], references: [id])
+  resolver   User?      @relation("BillingWarningResolver", fields: [resolvedBy], references: [id])
+
+  @@index([billingRunId], map: "billing_warning_open") // 元はresolved_at IS NULLの部分index。補助migrationでWHERE句を追加
+  @@map("billing_warnings")
+  @@schema("app")
+}
+
+// ============ 25. invoices ============
+model Invoice {
+  id               String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  billingRunId     String        @map("billing_run_id") @db.Uuid
+  invoiceNo        String        @map("invoice_no") @db.VarChar(30)
+  revision         Int
+  status           BillingStatus
+  customerSnapshot Json          @map("customer_snapshot") @db.JsonB
+  subtotalYen      BigInt        @map("subtotal_yen")
+  taxYen           BigInt        @map("tax_yen")
+  totalYen         BigInt        @map("total_yen")
+  taxRate          Decimal       @default(0.10) @map("tax_rate") @db.Decimal(8, 4)
+  createdAt        DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  billingRun BillingRun         @relation(fields: [billingRunId], references: [id])
+  recipients InvoiceRecipient[]
+
+  @@unique([invoiceNo, revision])
+  @@map("invoices")
+  @@schema("app")
+}
+
+// ============ 26. invoice_recipients ============
+model InvoiceRecipient {
+  invoiceId       String @map("invoice_id") @db.Uuid
+  email           String @db.VarChar(320)
+  recipientType   String @map("recipient_type") @db.VarChar(10) // CHECK IN('TO','CC','BCC')
+  contactSnapshot Json   @map("contact_snapshot") @db.JsonB
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id])
+
+  @@id([invoiceId, email, recipientType])
+  @@map("invoice_recipients")
+  @@schema("app")
+}
+
+// ============ 27. files ============
+model FileAsset {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  storageKey     String   @unique @map("storage_key") @db.Text
+  mimeType       String   @map("mime_type") @db.VarChar(100)
+  sizeBytes      BigInt   @map("size_bytes") // CHECK >=0
+  sha256         String   @db.Char(64)
+  classification String   @db.VarChar(30)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  documentJobs DocumentJob[]
+
+  @@map("files")
+  @@schema("app")
+}
+
+// ============ 28. template_versions ============
+model TemplateVersion {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  templateType       String    @map("template_type") @db.VarChar(40)
+  version            String    @db.VarChar(30)
+  providerTemplateId String    @map("provider_template_id") @db.Text
+  sha256             String    @db.Char(64)
+  activeFrom         DateTime  @map("active_from") @db.Timestamptz(6)
+  retiredAt          DateTime? @map("retired_at") @db.Timestamptz(6)
+
+  @@unique([templateType, version])
+  @@map("template_versions")
+  @@schema("app")
+}
+
+// ============ 29. document_jobs ============
+model DocumentJob {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  documentType    String    @map("document_type") @db.VarChar(30)
+  sourceType      String    @map("source_type") @db.VarChar(30)
+  sourceId        String    @map("source_id") @db.Uuid
+  templateVersion String    @map("template_version") @db.VarChar(30)
+  status          JobStatus @default(QUEUED)
+  idempotencyKey  String    @unique @map("idempotency_key") @db.VarChar(300)
+  fileId          String?   @map("file_id") @db.Uuid
+  attempts        Int       @default(0)
+  errorCode       String?   @map("error_code") @db.VarChar(80)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  file     FileAsset? @relation(fields: [fileId], references: [id])
+  mailJobs MailJob[]
+
+  @@map("document_jobs")
+  @@schema("app")
+}
+
+// ============ 30. mail_jobs ============
+model MailJob {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  documentJobId     String    @map("document_job_id") @db.Uuid
+  recipients        Json      @db.JsonB
+  subject           String    @db.VarChar(200)
+  status            JobStatus @default(QUEUED)
+  sendRevision      Int       @default(1) @map("send_revision")
+  idempotencyKey    String    @unique @map("idempotency_key") @db.VarChar(300)
+  providerMessageId String?   @map("provider_message_id") @db.VarChar(300)
+  attempts          Int       @default(0)
+  errorCode         String?   @map("error_code") @db.VarChar(80)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  documentJob DocumentJob @relation(fields: [documentJobId], references: [id])
+
+  @@map("mail_jobs")
+  @@schema("app")
+}
+
+// ============ 31. outbox_events ============
+model OutboxEvent {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventType     String   @map("event_type") @db.VarChar(100)
+  aggregateType String   @map("aggregate_type") @db.VarChar(50)
+  aggregateId   String   @map("aggregate_id") @db.Uuid
+  payload       Json     @db.JsonB
+  status        String   @default("PENDING") @db.VarChar(20)
+  attempts      Int      @default(0)
+  availableAt   DateTime @default(now()) @map("available_at") @db.Timestamptz(6)
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([status, availableAt], map: "outbox_ready")
+  @@map("outbox_events")
+  @@schema("app")
+}
+
+// ============ 32. processed_events ============
+model ProcessedEvent {
+  consumer    String   @db.VarChar(100)
+  eventId     String   @map("event_id") @db.Uuid
+  processedAt DateTime @default(now()) @map("processed_at") @db.Timestamptz(6)
+
+  @@id([consumer, eventId])
+  @@map("processed_events")
+  @@schema("app")
+}
+
+// ============ 33. idempotency_records ============
+model IdempotencyRecord {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  actorId        String   @map("actor_id") @db.Uuid
+  route          String   @db.VarChar(200)
+  idempotencyKey String   @map("idempotency_key") @db.VarChar(100)
+  requestHash    String   @map("request_hash") @db.Char(64)
+  responseStatus Int?     @map("response_status")
+  responseBody   Json?    @map("response_body") @db.JsonB
+  status         String   @db.VarChar(20) // CHECK IN('PROCESSING','COMPLETED','FAILED')
+  expiresAt      DateTime @map("expires_at") @db.Timestamptz(6)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  actor User @relation("IdempotencyActor", fields: [actorId], references: [id])
+
+  @@unique([actorId, route, idempotencyKey])
+  @@index([expiresAt], map: "idempotency_expiry")
+  @@map("idempotency_records")
+  @@schema("app")
+}
+
+// ============ 34. audit_events ============
+model AuditEvent {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  actorId       String?  @map("actor_id") @db.Uuid
+  action        String   @db.VarChar(80)
+  targetType    String   @map("target_type") @db.VarChar(50)
+  targetId      String   @map("target_id") @db.Uuid
+  beforeData    Json?    @map("before_data") @db.JsonB
+  afterData     Json?    @map("after_data") @db.JsonB
+  reason        String?  @db.Text
+  correlationId String   @map("correlation_id") @db.Uuid
+  occurredAt    DateTime @default(now()) @map("occurred_at") @db.Timestamptz(6)
+
+  actor User? @relation("AuditActor", fields: [actorId], references: [id])
+
+  @@index([targetType, targetId, occurredAt(sort: Desc)], map: "audit_target")
+  @@map("audit_events")
+  @@schema("app")
+}

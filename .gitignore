@@ -1,0 +1,36 @@
+# Node
+node_modules/
+.pnpm-store/
+npm-debug.log*
+
+# Next.js
+apps/web/.next/
+apps/web/out/
+
+# Prisma
+packages/db/generated/
+packages/db/prisma/dev.db
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.gcp-sql-connection-name
+
+# Build
+dist/
+build/
+*.tsbuildinfo
+
+# Logs
+/tmp/*.log
+*.log
+
+# OS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
