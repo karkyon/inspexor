@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "2.0",
+  "timezone": "Asia/Tokyo",
+  "rounding": "HALF_UP",
+  "currency": "JPY",
+  "cases": [
+    { "id": "G-TIME-001", "input": { "date": "2026-09-07", "start": "09:30", "end": "11:25", "workers": 2 }, "expected": { "breakMinutes": 0, "regularMinutes": 115, "overtimeMinutes": 0, "regularPersonMinutes": 230, "overtimePersonMinutes": 0 } },
+    { "id": "G-TIME-002", "input": { "date": "2026-09-07", "start": "11:30", "end": "13:30", "workers": 1 }, "expected": { "breakMinutes": 60, "regularMinutes": 60, "overtimeMinutes": 0, "regularPersonMinutes": 60, "overtimePersonMinutes": 0 } },
+    { "id": "G-TIME-003", "input": { "date": "2026-09-07", "start": "16:30", "end": "18:00", "workers": 2 }, "expected": { "breakMinutes": 0, "regularMinutes": 30, "overtimeMinutes": 60, "regularPersonMinutes": 60, "overtimePersonMinutes": 120 } },
+    { "id": "G-TIME-004", "input": { "date": "2026-09-05", "start": "09:00", "end": "11:00", "workers": 1 }, "expected": { "breakMinutes": 0, "regularMinutes": 0, "overtimeMinutes": 120, "regularPersonMinutes": 0, "overtimePersonMinutes": 120 } },
+    { "id": "G-QTY-001", "input": { "quantity": 1600, "unitPrice": "4.4" }, "expected": { "raw": "7040.0", "amountYen": 7040 } },
+    { "id": "G-BILL-001", "input": { "regularPersonMinutes": 60, "overtimePersonMinutes": 120, "unitPrice": "1980", "multiplier": "1.25" }, "expected": { "regularRaw": "1980", "overtimeRaw": "4950", "amountYen": 6930 } },
+    { "id": "G-ALLOC-001", "input": { "feeYen": 2500, "productCodes": ["A", "B", "C", "D"] }, "expected": { "A": 625, "B": 625, "C": 625, "D": 625, "sum": 2500 } },
+    { "id": "G-ALLOC-002", "input": { "feeYen": 2500, "productCodes": ["C", "A", "B"] }, "expected": { "A": 834, "B": 833, "C": 833, "sum": 2500 } },
+    { "id": "G-TAX-001", "input": { "subtotalYen": 73546, "taxRate": "0.10" }, "expected": { "taxYen": 7355, "totalYen": 80901 } },
+    { "id": "G-TIME-005", "input": { "date": "2026-09-07", "start": "12:30", "end": "17:30", "workers": 1 }, "expected": { "breakMinutes": 30, "regularMinutes": 240, "overtimeMinutes": 30, "regularPersonMinutes": 240, "overtimePersonMinutes": 30 } },
+    { "id": "G-TIME-006", "input": { "date": "2026-09-06", "start": "11:30", "end": "13:30", "workers": 2 }, "expected": { "breakMinutes": 60, "regularMinutes": 0, "overtimeMinutes": 60, "regularPersonMinutes": 0, "overtimePersonMinutes": 120 } },
+    { "id": "G-ALLOC-003", "input": { "feeYen": 2500, "productCodes": ["B", "A", "A"] }, "expected": { "A": 1250, "B": 1250, "sum": 2500, "distinctCount": 2 } },
+    { "id": "G-ROUND-001", "input": { "quantity": 1, "unitPrice": "0.5" }, "expected": { "amountYen": 1 } },
+    { "id": "G-TAX-002", "input": { "subtotalYen": 5, "taxRate": "0.10" }, "expected": { "taxYen": 1, "totalYen": 6 } }
+  ],
+  "algorithmVersion": "BILL-2026-09-05"
+}
