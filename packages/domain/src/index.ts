@@ -7,3 +7,4 @@ export * from './record-status';
 export * from './billing-status';
 export * from './error-codes';
 export * from './idempotency';
+export * from './auth-lockout';
