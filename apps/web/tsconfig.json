@@ -4,7 +4,39 @@
     "jsx": "preserve",
     "module": "ESNext",
     "moduleResolution": "Bundler",
-    "plugins": [{ "name": "next" }]
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ]
   },
-  "include": ["app", "src", "next-env.d.ts"]
+  "include": [
+    "app",
+    "app/api/auth/login/route.ts",
+    "app/api/auth/logout/route.ts",
+    "app/api/auth/me/route.ts",
+    "app/api/health/route.ts",
+    "app/layout.tsx",
+    "app/page.tsx",
+    "lib/auth/argon2-password-hasher.test.ts",
+    "lib/auth/argon2-password-hasher.ts",
+    "lib/auth/login-handler.test.ts",
+    "lib/auth/login-handler.ts",
+    "lib/auth/login-request-schema.ts",
+    "lib/auth/logout-handler.test.ts",
+    "lib/auth/logout-handler.ts",
+    "lib/auth/me-handler.test.ts",
+    "lib/auth/me-handler.ts",
+    "lib/auth/prisma-user-repository.test.ts",
+    "lib/auth/prisma-user-repository.ts",
+    "lib/auth/session-cookie.ts",
+    "lib/auth/session-secret.ts",
+    "lib/auth/session-token.test.ts",
+    "lib/auth/session-token.ts",
+    "lib/db/prisma-client.ts",
+    "lib/security/csrf.test.ts",
+    "lib/security/csrf.ts",
+    "next-env.d.ts",
+    "src"
+  ]
 }

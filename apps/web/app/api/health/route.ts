@@ -2,7 +2,7 @@ import { Pool } from "pg";
 
 // 本エンドポイントはG0以前の「環境が実際に稼働しているか」の確認専用。
 // 業務ロジックは含まない。DATABASE_URLへの実接続をSELECT 1で検証する。
-export async function GET() {
+export async function GET(): Promise<Response> {
   const startedAt = Date.now();
   const result: { app: string; db: "ok" | "ng"; error?: string; latencyMs?: number } = {
     app: "ok",
