@@ -26,11 +26,16 @@ afterAll(async () => {
 });
 
 describe('fresh DB', () => {
-  it('schema.sql から app スキーマ34テーブルが作成される', async () => {
+  it('schema.sql から app スキーマ業務34テーブルが作成される', async () => {
     const r = await db.pool.query<{ n: string }>(
-      `SELECT count(*)::text AS n FROM information_schema.tables WHERE table_schema = 'app'`,
+      `SELECT count(*)::text AS n FROM information_schema.tables WHERE table_schema = 'app' AND table_name <> 'schema_migrations'`,
     );
     expect(r.rows[0]?.n).toBe('34');
+  });
+
+  it('追記migration（CHG-001）が適用・記録されている', async () => {
+    const r = await db.pool.query<{ id: string }>(`SELECT id FROM app.schema_migrations ORDER BY id`);
+    expect(r.rows.map((row) => row.id)).toContain('0001_chg001_master_columns');
   });
 });
 

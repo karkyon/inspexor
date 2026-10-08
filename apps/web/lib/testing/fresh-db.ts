@@ -4,6 +4,7 @@
  */
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { readdirSync as listDir } from 'node:fs';
 import { Pool } from 'pg';
 
 function findRepoRoot(start: string): string {
@@ -52,7 +53,18 @@ export async function createFreshDatabase(label: string): Promise<FreshDatabase>
   const url = new URL(adminUrl);
   url.pathname = `/${name}`;
   const pool = new Pool({ connectionString: url.toString(), max: 5 });
-  await pool.query(readFileSync(findSpecFile('schema.sql', 'SCHEMA_SQL_PATH'), 'utf8'));
+  const schemaPath = findSpecFile('schema.sql', 'SCHEMA_SQL_PATH');
+  await pool.query(readFileSync(schemaPath, 'utf8'));
+  // 追記migration（docs/spec/migrations/*.sql、rollback除く）を番号順に適用
+  const migrationsDir = join(dirname(schemaPath), 'migrations');
+  if (existsSync(migrationsDir)) {
+    const files = listDir(migrationsDir)
+      .filter((f) => f.endsWith('.sql') && !f.endsWith('.rollback.sql'))
+      .sort();
+    for (const file of files) {
+      await pool.query(readFileSync(join(migrationsDir, file), 'utf8'));
+    }
+  }
 
   return {
     pool,

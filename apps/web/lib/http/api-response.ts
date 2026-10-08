@@ -10,6 +10,8 @@ export interface ErrorOptions {
   readonly retryable?: boolean;
   readonly fields?: readonly ErrorField[];
   readonly setCookie?: string;
+  /** API設計書 §共通例: 409 の currentVersion / changedFields 等 */
+  readonly extra?: Readonly<Record<string, unknown>>;
 }
 
 // openapi components.schemas.Error 準拠: {error:{code,message,correlationId,retryable,fields?}}
@@ -28,6 +30,7 @@ export function errorResponse(
         correlationId,
         retryable: options.retryable ?? false,
         ...(options.fields !== undefined ? { fields: options.fields } : {}),
+        ...(options.extra ?? {}),
       },
     },
     { status, headers: { [CORRELATION_ID_HEADER]: correlationId } },

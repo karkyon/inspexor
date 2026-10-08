@@ -1,4 +1,7 @@
-import { Pool, type PoolClient, type QueryResult, type QueryResultRow } from 'pg';
+import { Pool, types, type PoolClient, type QueryResult, type QueryResultRow } from 'pg';
+
+// PostgreSQL date（OID 1082）は JS Date に変換すると timezone でずれるため 'YYYY-MM-DD' 文字列のまま扱う
+types.setTypeParser(1082, (value: string) => value);
 
 /**
  * 業務テーブルへの書込は schema.sql（仕様正本 DB）の列名で parameterized SQL を発行する（SEC-008）。
