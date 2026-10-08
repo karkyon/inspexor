@@ -35,3 +35,5 @@ build/
 .vscode/
 .idea/
 g0_*.sh
+playwright-report/
+test-results/

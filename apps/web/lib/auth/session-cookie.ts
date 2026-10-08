@@ -1,4 +1,5 @@
-export const SESSION_COOKIE_NAME = 'inspexor_session';
+// openapi securitySchemes.cookieAuth.name 準拠（__Secure- prefix はSecure属性必須）
+export const SESSION_COOKIE_NAME = '__Secure-inspexor.session';
 
 export function readSessionCookie(request: Request): string | null {
   const header = request.headers.get('cookie');

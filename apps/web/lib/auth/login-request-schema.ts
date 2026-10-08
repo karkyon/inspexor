@@ -1,10 +1,10 @@
 import { z } from 'zod';
 
-// API-001 POST /auth/login の LoginRequest。未知field拒否（.strict）、文字列trim。
+// openapi LoginRequest: loginId 1-100、password 8-128、additionalProperties:false。文字列trim（API設計書）。
 export const loginRequestSchema = z
   .object({
-    loginId: z.string().trim().min(1).max(255),
-    password: z.string().min(1).max(128),
+    loginId: z.string().trim().min(1).max(100),
+    password: z.string().min(8).max(128),
   })
   .strict();
 

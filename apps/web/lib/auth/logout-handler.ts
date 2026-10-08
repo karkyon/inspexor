@@ -1,6 +1,8 @@
 import { checkSessionValidity } from '@inspexor/domain';
-import { verifySessionToken } from './session-token';
 import { verifyCsrfToken } from '../security/csrf';
+import { resolveCorrelationId, CORRELATION_ID_HEADER } from '../http/correlation-id';
+import { errorResponse } from '../http/api-response';
+import { verifySessionToken } from './session-token';
 import { readSessionCookie, clearSessionCookieHeader } from './session-cookie';
 
 export interface LogoutHandlerDeps {
@@ -8,51 +10,34 @@ export interface LogoutHandlerDeps {
   readonly now: () => Date;
 }
 
-function unauthenticated(correlationId: string): Response {
-  const response = Response.json(
-    { error: { code: 'AUTH_REQUIRED', message: '認証が必要です。', correlationId, retryable: false } },
-    { status: 401 },
-  );
-  response.headers.append('Set-Cookie', clearSessionCookieHeader());
-  return response;
-}
-
-function csrfInvalid(correlationId: string): Response {
-  return Response.json(
-    { error: { code: 'CSRF_INVALID', message: 'CSRFトークンが無効です。', correlationId, retryable: false } },
-    { status: 403 },
-  );
-}
-
 export async function handleLogoutRequest(request: Request, deps: LogoutHandlerDeps): Promise<Response> {
-  const correlationId = request.headers.get('x-correlation-id') ?? 'no-correlation-id';
+  const correlationId = resolveCorrelationId(request);
+  const unauthenticated = (): Response =>
+    errorResponse(401, 'AUTH_REQUIRED', '認証が必要です。', correlationId, { setCookie: clearSessionCookieHeader() });
 
   const token = readSessionCookie(request);
   if (!token) {
-    return unauthenticated(correlationId);
+    return unauthenticated();
   }
-
   const payload = verifySessionToken(token, deps.sessionSecret);
   if (!payload) {
-    return unauthenticated(correlationId);
+    return unauthenticated();
   }
-
-  const now = deps.now();
-  const validity = checkSessionValidity(
+  const valid = checkSessionValidity(
     { issuedAt: new Date(payload.issuedAt), lastActivityAt: new Date(payload.lastActivityAt) },
-    now,
-  );
-  if (!validity.valid) {
-    return unauthenticated(correlationId);
+    deps.now(),
+  ).valid;
+  if (!valid) {
+    return unauthenticated();
   }
 
-  // SEC-005: state-changing API（logout）はCSRFトークン必須。X-CSRF-Tokenヘッダで受け取る。
+  // 00契約 不変条件2: 認証 → CSRF の順。SEC-005: state-changing APIはCSRF必須
   const csrfToken = request.headers.get('x-csrf-token');
   if (!csrfToken || !verifyCsrfToken(csrfToken, payload.sessionId, deps.sessionSecret)) {
-    return csrfInvalid(correlationId);
+    return errorResponse(403, 'CSRF_INVALID', 'CSRFトークンが無効です。', correlationId);
   }
 
-  const response = new Response(null, { status: 204, headers: { 'x-correlation-id': correlationId } });
+  const response = new Response(null, { status: 204, headers: { [CORRELATION_ID_HEADER]: correlationId } });
   response.headers.append('Set-Cookie', clearSessionCookieHeader());
   return response;
 }

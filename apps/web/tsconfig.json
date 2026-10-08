@@ -32,6 +32,7 @@
     "components/LoginForm.tsx",
     "components/LoginPageClient.tsx",
     "components/LogoutButton.tsx",
+    "e2e/login.e2e.ts",
     "lib/auth/argon2-password-hasher.test.ts",
     "lib/auth/argon2-password-hasher.ts",
     "lib/auth/login-handler.test.ts",
@@ -51,10 +52,15 @@
     "lib/auth/session-secret.ts",
     "lib/auth/session-token.test.ts",
     "lib/auth/session-token.ts",
+    "lib/contract/openapi-contract.test.ts",
     "lib/db/prisma-client.ts",
+    "lib/http/api-response.ts",
+    "lib/http/correlation-id.test.ts",
+    "lib/http/correlation-id.ts",
     "lib/security/csrf.test.ts",
     "lib/security/csrf.ts",
     "next-env.d.ts",
+    "playwright.config.ts",
     "src"
   ],
   "exclude": [

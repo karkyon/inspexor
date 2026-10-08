@@ -44,3 +44,10 @@ export interface SessionCookieAttributes {
 export function sessionCookieAttributes(): SessionCookieAttributes {
   return { httpOnly: true, secure: true, sameSite: 'lax', path: '/', maxAge: sessionCookieMaxAgeSeconds() };
 }
+
+/** API Session.expiresAt: idle期限とabsolute期限の早い方（SEC-001）。 */
+export function sessionExpiresAt(timestamps: SessionTimestamps): Date {
+  const absolute = timestamps.issuedAt.getTime() + SESSION_ABSOLUTE_TIMEOUT_HOURS * 60 * 60_000;
+  const idle = timestamps.lastActivityAt.getTime() + SESSION_IDLE_TIMEOUT_MINUTES * 60_000;
+  return new Date(Math.min(absolute, idle));
+}

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { handleLoginRequest } from './login-handler';
 import { verifySessionToken } from './session-token';
+import { SESSION_COOKIE_NAME } from './session-cookie';
 import type { UserRecord, UserRepository, PasswordHasher } from '@inspexor/application';
 
 const SECRET = 'a'.repeat(32);
@@ -36,7 +37,7 @@ describe('handleLoginRequest', () => {
     };
     const passwordHasher: PasswordHasher = { verify: vi.fn().mockResolvedValue(true) };
 
-    const response = await handleLoginRequest(makeRequest({ loginId: 'tanaka', password: 'correct' }), {
+    const response = await handleLoginRequest(makeRequest({ loginId: 'tanaka', password: 'correct-password' }), {
       userRepository,
       passwordHasher,
       sessionSecret: SECRET,
@@ -51,12 +52,12 @@ describe('handleLoginRequest', () => {
     expect(typeof body.data.csrfToken).toBe('string');
 
     const setCookie = response.headers.get('set-cookie');
-    expect(setCookie).toContain('inspexor_session=');
+    expect(setCookie).toContain(`${SESSION_COOKIE_NAME}=`);
     expect(setCookie).toContain('HttpOnly');
     expect(setCookie).toContain('Secure');
     expect(setCookie).toContain('SameSite=Lax');
 
-    const token = setCookie?.split('inspexor_session=')[1]?.split(';')[0] ?? '';
+    const token = setCookie?.split(`${SESSION_COOKIE_NAME}=`)[1]?.split(';')[0] ?? '';
     const payload = verifySessionToken(token, SECRET);
     expect(payload?.userId).toBe('u-1');
     expect(userRepository.updateLockoutState).toHaveBeenCalledWith('u-1', { failedAttempts: 0, lockedUntil: null });
@@ -69,7 +70,7 @@ describe('handleLoginRequest', () => {
     };
     const passwordHasher: PasswordHasher = { verify: vi.fn().mockResolvedValue(false) };
 
-    const response = await handleLoginRequest(makeRequest({ loginId: 'tanaka', password: 'wrong' }), {
+    const response = await handleLoginRequest(makeRequest({ loginId: 'tanaka', password: 'wrong-password' }), {
       userRepository,
       passwordHasher,
       sessionSecret: SECRET,
@@ -91,7 +92,7 @@ describe('handleLoginRequest', () => {
     };
     const passwordHasher: PasswordHasher = { verify: vi.fn() };
 
-    const response = await handleLoginRequest(makeRequest({ loginId: 'tanaka', password: 'x' }), {
+    const response = await handleLoginRequest(makeRequest({ loginId: 'tanaka', password: 'locked-password' }), {
       userRepository,
       passwordHasher,
       sessionSecret: SECRET,
@@ -110,7 +111,7 @@ describe('handleLoginRequest', () => {
     };
     const passwordHasher: PasswordHasher = { verify: vi.fn() };
 
-    const response = await handleLoginRequest(makeRequest({ loginId: 'nobody', password: 'x' }), {
+    const response = await handleLoginRequest(makeRequest({ loginId: 'nobody', password: 'nobody-password' }), {
       userRepository,
       passwordHasher,
       sessionSecret: SECRET,
@@ -127,7 +128,7 @@ describe('handleLoginRequest', () => {
     const passwordHasher: PasswordHasher = { verify: vi.fn() };
 
     const response = await handleLoginRequest(
-      makeRequest({ loginId: 'tanaka', password: 'x', extra: 'not-allowed' }),
+      makeRequest({ loginId: 'tanaka', password: 'locked-password', extra: 'not-allowed' }),
       { userRepository, passwordHasher, sessionSecret: SECRET, now: () => NOW },
     );
 

@@ -1,7 +1,8 @@
-import { ZodError } from 'zod';
 import { login, type LoginDeps, type UserRepository, type PasswordHasher } from '@inspexor/application';
-import { sessionCookieAttributes } from '@inspexor/domain';
+import { sessionCookieAttributes, sessionExpiresAt } from '@inspexor/domain';
 import { issueCsrfToken } from '../security/csrf';
+import { resolveCorrelationId } from '../http/correlation-id';
+import { errorResponse, dataResponse } from '../http/api-response';
 import { loginRequestSchema } from './login-request-schema';
 import { issueSessionToken, generateSessionId, type SessionPayload } from './session-token';
 import { sessionCookieHeader } from './session-cookie';
@@ -13,12 +14,8 @@ export interface LoginHandlerDeps {
   readonly now: () => Date;
 }
 
-function errorResponse(status: number, code: string, message: string, correlationId: string): Response {
-  return Response.json({ error: { code, message, correlationId, retryable: false } }, { status });
-}
-
 export async function handleLoginRequest(request: Request, deps: LoginHandlerDeps): Promise<Response> {
-  const correlationId = request.headers.get('x-correlation-id') ?? generateSessionId();
+  const correlationId = resolveCorrelationId(request);
 
   let rawBody: unknown;
   try {
@@ -29,22 +26,13 @@ export async function handleLoginRequest(request: Request, deps: LoginHandlerDep
 
   const parsed = loginRequestSchema.safeParse(rawBody);
   if (!parsed.success) {
-    const zodError: ZodError = parsed.error;
-    return Response.json(
-      {
-        error: {
-          code: 'VALIDATION_ERROR',
-          message: '入力値が不正です。',
-          fields: zodError.issues.map((issue) => ({
-            path: `/${issue.path.join('/')}`,
-            message: issue.message,
-          })),
-          correlationId,
-          retryable: false,
-        },
-      },
-      { status: 422 },
-    );
+    return errorResponse(422, 'VALIDATION_ERROR', '入力値が不正です。', correlationId, {
+      fields: parsed.error.issues.map((issue) => ({
+        path: `/${issue.path.map(String).join('/')}`,
+        code: String(issue.code),
+        message: issue.message,
+      })),
+    });
   }
 
   const now = deps.now();
@@ -53,11 +41,10 @@ export async function handleLoginRequest(request: Request, deps: LoginHandlerDep
     passwordHasher: deps.passwordHasher,
     now,
   };
-
   const result = await login(parsed.data, loginDeps);
 
   if (!result.ok) {
-    // 存在秘匿: AUTH_REQUIRED/ACCOUNT_LOCKEDいずれも詳細を返さない（FR-001失敗時要件）。
+    // 存在秘匿: 詳細理由は返さない（FR-001失敗時要件）
     const status = result.errorCode === 'ACCOUNT_LOCKED' ? 423 : 401;
     return errorResponse(status, result.errorCode, '認証に失敗しました。', correlationId);
   }
@@ -71,21 +58,14 @@ export async function handleLoginRequest(request: Request, deps: LoginHandlerDep
     lastActivityAt: now.toISOString(),
   };
   const token = issueSessionToken(sessionPayload, deps.sessionSecret);
-  const cookieAttrs = sessionCookieAttributes();
   const csrfToken = issueCsrfToken(sessionPayload.sessionId, deps.sessionSecret);
+  const expiresAt = sessionExpiresAt({ issuedAt: now, lastActivityAt: now }).toISOString();
 
-  const response = Response.json(
-    {
-      data: {
-        userId: result.userId,
-        displayName: result.displayName,
-        roles: result.roles,
-        csrfToken,
-      },
-      meta: null,
-    },
-    { status: 200, headers: { 'x-correlation-id': correlationId } },
+  // Session + csrfToken（GAP-009: CSRFトークンをログイン応答で配布）
+  return dataResponse(
+    200,
+    { userId: result.userId, displayName: result.displayName, roles: result.roles, expiresAt, csrfToken },
+    correlationId,
+    sessionCookieHeader(token, sessionCookieAttributes().maxAge),
   );
-  response.headers.append('Set-Cookie', sessionCookieHeader(token, cookieAttrs.maxAge));
-  return response;
 }

@@ -1,5 +1,5 @@
 // apps/web/tsconfig.json 補正:
-//  (1) app/lib/components/scripts 配下の .ts/.tsx を "include" にリテラル追記（glob有無に関係なく）
+//  (1) app/lib/components/e2e 配下＋playwright.config.tsの .ts/.tsx を "include" にリテラル追記（glob有無に関係なく）
 //  (2) 実在しないリテラルパスを "include" から除去（ルート移設で消えたファイル対策）
 //  (3) compilerOptions.lib に DOM / DOM.Iterable を追加（extends 連鎖から既存libを継承した上で）
 const fs = require('fs');
@@ -50,9 +50,12 @@ function walk(dir, results) {
   }
 }
 const found = [];
-for (const base of ['app', 'lib', 'components']) {
+for (const base of ['app', 'lib', 'components', 'e2e']) {
   const d = path.join(appDir, base);
   if (fs.existsSync(d)) walk(d, found);
+}
+for (const rootFile of ['playwright.config.ts']) {
+  if (fs.existsSync(path.join(appDir, rootFile))) found.push(path.join(appDir, rootFile));
 }
 const rel = found.map((p) => path.relative(appDir, p).split(path.sep).join('/'));
 

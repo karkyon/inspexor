@@ -1,4 +1,6 @@
-import { checkSessionValidity, sessionCookieAttributes } from '@inspexor/domain';
+import { checkSessionValidity, sessionCookieAttributes, sessionExpiresAt } from '@inspexor/domain';
+import { resolveCorrelationId } from '../http/correlation-id';
+import { errorResponse, dataResponse } from '../http/api-response';
 import { verifySessionToken, issueSessionToken, refreshLastActivity } from './session-token';
 import { readSessionCookie, sessionCookieHeader, clearSessionCookieHeader } from './session-cookie';
 
@@ -7,47 +9,32 @@ export interface MeHandlerDeps {
   readonly now: () => Date;
 }
 
-function unauthenticated(correlationId: string): Response {
-  const response = Response.json(
-    { error: { code: 'AUTH_REQUIRED', message: '認証が必要です。', correlationId, retryable: false } },
-    { status: 401 },
-  );
-  response.headers.append('Set-Cookie', clearSessionCookieHeader());
-  return response;
-}
-
 export async function handleMeRequest(request: Request, deps: MeHandlerDeps): Promise<Response> {
-  const correlationId = request.headers.get('x-correlation-id') ?? 'no-correlation-id';
+  const correlationId = resolveCorrelationId(request);
+  const unauthenticated = (): Response =>
+    errorResponse(401, 'AUTH_REQUIRED', '認証が必要です。', correlationId, { setCookie: clearSessionCookieHeader() });
+
   const token = readSessionCookie(request);
   if (!token) {
-    return unauthenticated(correlationId);
+    return unauthenticated();
   }
-
   const payload = verifySessionToken(token, deps.sessionSecret);
   if (!payload) {
-    return unauthenticated(correlationId);
+    return unauthenticated();
   }
 
   const now = deps.now();
-  const validity = checkSessionValidity(
-    { issuedAt: new Date(payload.issuedAt), lastActivityAt: new Date(payload.lastActivityAt) },
-    now,
-  );
-  if (!validity.valid) {
-    return unauthenticated(correlationId);
+  const issuedAt = new Date(payload.issuedAt);
+  if (!checkSessionValidity({ issuedAt, lastActivityAt: new Date(payload.lastActivityAt) }, now).valid) {
+    return unauthenticated();
   }
 
   const refreshed = refreshLastActivity(payload, now);
-  const refreshedToken = issueSessionToken(refreshed, deps.sessionSecret);
-  const cookieAttrs = sessionCookieAttributes();
-
-  const response = Response.json(
-    {
-      data: { userId: payload.userId, displayName: payload.displayName, roles: payload.roles },
-      meta: null,
-    },
-    { status: 200, headers: { 'x-correlation-id': correlationId } },
+  const expiresAt = sessionExpiresAt({ issuedAt, lastActivityAt: now }).toISOString();
+  return dataResponse(
+    200,
+    { userId: payload.userId, displayName: payload.displayName, roles: payload.roles, expiresAt },
+    correlationId,
+    sessionCookieHeader(issueSessionToken(refreshed, deps.sessionSecret), sessionCookieAttributes().maxAge),
   );
-  response.headers.append('Set-Cookie', sessionCookieHeader(refreshedToken, cookieAttrs.maxAge));
-  return response;
 }
