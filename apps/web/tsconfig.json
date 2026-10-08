@@ -8,25 +8,43 @@
       {
         "name": "next"
       }
+    ],
+    "allowJs": true,
+    "noEmit": true,
+    "incremental": true,
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
     ]
   },
   "include": [
+    ".next/types/**/*.ts",
     "app",
-    "app/api/auth/login/route.ts",
-    "app/api/auth/logout/route.ts",
-    "app/api/auth/me/route.ts",
     "app/api/health/route.ts",
+    "app/api/v1/auth/login/route.ts",
+    "app/api/v1/auth/logout/route.ts",
+    "app/api/v1/me/route.ts",
     "app/layout.tsx",
+    "app/login/page.tsx",
     "app/page.tsx",
+    "components/HomeClient.tsx",
+    "components/LoginForm.tsx",
+    "components/LoginPageClient.tsx",
+    "components/LogoutButton.tsx",
     "lib/auth/argon2-password-hasher.test.ts",
     "lib/auth/argon2-password-hasher.ts",
     "lib/auth/login-handler.test.ts",
     "lib/auth/login-handler.ts",
     "lib/auth/login-request-schema.ts",
+    "lib/auth/login-response.test.ts",
+    "lib/auth/login-response.ts",
     "lib/auth/logout-handler.test.ts",
     "lib/auth/logout-handler.ts",
     "lib/auth/me-handler.test.ts",
     "lib/auth/me-handler.ts",
+    "lib/auth/me-response.test.ts",
+    "lib/auth/me-response.ts",
     "lib/auth/prisma-user-repository.test.ts",
     "lib/auth/prisma-user-repository.ts",
     "lib/auth/session-cookie.ts",
@@ -38,5 +56,8 @@
     "lib/security/csrf.ts",
     "next-env.d.ts",
     "src"
+  ],
+  "exclude": [
+    "node_modules"
   ]
 }
