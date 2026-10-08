@@ -34,3 +34,4 @@ build/
 # Editor
 .vscode/
 .idea/
+g0_*.sh
