@@ -1,0 +1,84 @@
+/* 管理画面（SCR-13 ほか）— 画面UX設計書・ワイヤーフレーム v6.0 のトークン/寸法に準拠。クラスは ix- 接頭辞で衝突回避。 */
+body:has(.ix-shell){margin:0}
+:root{--ix-nav:#102a43;--ix-nav2:#173f5f;--ix-blue:#1769aa;--ix-cyan:#11a3a5;--ix-ink:#172b3a;--ix-muted:#5d6e7c;--ix-line:#dce5eb;--ix-bg:#eef3f6;--ix-green:#15936d;--ix-amber:#b06e00;--ix-red:#b93636;--ix-shadow:0 3px 12px #173a5010}
+.ix-shell *{box-sizing:border-box}
+.ix-shell{min-height:100vh;display:grid;grid-template-columns:252px 1fr;background:#dfe7ec;color:var(--ix-ink);font:14px/1.45 "Noto Sans JP",system-ui,sans-serif}
+.ix-shell button,.ix-shell input,.ix-shell select,.ix-shell textarea{font:inherit}
+.ix-shell a{color:var(--ix-blue)}
+.ix-shell :focus-visible{outline:3px solid #f2b705;outline-offset:2px}
+.ix-sidenav{background:linear-gradient(180deg,var(--ix-nav),#0d2437);color:#fff;position:sticky;top:0;height:100vh;overflow:auto;padding:22px 14px}
+.ix-brand{display:flex;gap:11px;align-items:center;padding:0 8px 20px}
+.ix-brandmark{width:40px;height:40px;border-radius:12px;background:linear-gradient(145deg,#26c6b9,#1683c6);display:grid;place-items:center;font-weight:900}
+.ix-brand b{font-size:19px;letter-spacing:.05em}.ix-brand small{display:block;color:#a9c0d2}
+.ix-navitem{display:grid;grid-template-columns:56px 1fr;align-items:center;color:#c6d5df!important;text-decoration:none;padding:9px;border-radius:10px;margin:2px 0}
+.ix-navitem span{font-size:10px;color:#87a5b9}.ix-navitem b{font-size:12px}
+.ix-navitem.active,.ix-navitem:hover{background:#ffffff16;color:#fff!important}
+.ix-content{min-width:0}
+.ix-appbar{height:66px;background:#fff;border-bottom:1px solid var(--ix-line);display:flex;align-items:center;padding:0 26px;position:sticky;top:0;z-index:20}
+.ix-appbar>b{font-size:16px}.ix-spacer{flex:1}
+.ix-user{display:flex;align-items:center;gap:9px}
+.ix-user i{width:34px;height:34px;border-radius:50%;background:#d8edf3;display:grid;place-items:center;font-style:normal;font-weight:800;color:#17617a}
+.ix-viewport{padding:26px;min-height:calc(100vh - 66px)}
+.ix-page{max-width:1360px;margin:auto}
+.ix-pagehead{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;margin-bottom:20px}
+.ix-pagehead h1{margin:2px 0;font-size:26px}.ix-pagehead p{margin:0;color:var(--ix-muted)}
+.ix-btn{display:inline-flex;align-items:center;gap:6px;border:1px solid #b9c8d3;background:#fff;color:#294253!important;border-radius:9px;padding:10px 15px;font-weight:700;text-decoration:none;cursor:pointer;min-height:44px}
+.ix-btn.primary{background:var(--ix-blue);color:#fff!important;border-color:var(--ix-blue)}
+.ix-btn.danger{color:var(--ix-red)!important;border-color:#efb8b8}
+.ix-btn:disabled{opacity:.55;cursor:not-allowed}
+.ix-panel{background:#fff;border:1px solid var(--ix-line);border-radius:13px;box-shadow:var(--ix-shadow);padding:25px}
+.ix-notice{background:#dff6ec;color:#086148;border:1px solid #a9e3cb;border-radius:9px;padding:10px 14px}
+.ix-error,.ix-fielderror{color:var(--ix-red)}
+.ix-muted{color:var(--ix-muted)}.ix-small{font-size:12px}
+.ix-req{display:inline-block;margin-left:6px;font-size:10px;font-weight:800;color:#fff;background:var(--ix-red);border-radius:4px;padding:1px 5px;vertical-align:middle}
+.ix-visually-hidden{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.ix-masterlayout{display:grid;grid-template-columns:220px 1fr;gap:16px}
+.ix-masternav{background:#fff;border-radius:12px;padding:8px;align-self:start}
+.ix-masternav a{display:flex;justify-content:space-between;padding:11px;border-radius:8px;color:var(--ix-ink);text-decoration:none}
+.ix-masternav a.active{background:#e8f2f8;color:var(--ix-blue);font-weight:700}
+.ix-masternav a:hover{background:#f2f7fa}
+.ix-searchbar{display:flex;gap:9px;margin-bottom:14px}
+.ix-searchbar input{flex:1}
+.ix-searchbar input,.ix-searchbar select{border:1px solid #aebfcb;background:#fff;border-radius:9px;padding:10px 14px;min-height:44px}
+.ix-datatable{background:#fff;border:1px solid var(--ix-line);border-radius:13px;box-shadow:var(--ix-shadow);overflow:hidden}
+.ix-tablewrap{overflow:auto;position:relative}
+.ix-datatable table{width:100%;border-collapse:collapse}
+.ix-datatable th,.ix-datatable td{padding:11px 15px;border-bottom:1px solid var(--ix-line);text-align:left;white-space:nowrap}
+.ix-datatable th{background:#f5f7f9;color:var(--ix-muted);font-size:11px}
+.ix-datatable .num{text-align:right}
+.ix-datatable>footer{display:flex;justify-content:space-between;align-items:center;padding:12px 18px}
+.ix-datatable>footer button{border:1px solid var(--ix-line);background:#fff;border-radius:6px;min-width:36px;min-height:36px;margin:0 4px}
+.ix-datatable>p,.ix-empty{padding:24px 18px;margin:0}
+.ix-pill{display:inline-flex;border-radius:999px;padding:4px 9px;font-size:11px;font-weight:800}
+.ix-pill.approved{background:#dff6ec;color:#087154}.ix-pill.draft{background:#edf1f4;color:#4f5f6b}
+.ix-editor{max-width:980px}
+.ix-form{display:grid;gap:20px}
+.ix-formgrid{display:grid;grid-template-columns:1fr 1fr;gap:18px 22px}
+.ix-field{display:flex;flex-direction:column;gap:6px}
+.ix-field>label,.ix-field>span{font-weight:700}
+.ix-field input:not([type=checkbox]),.ix-field select,.ix-field textarea{min-height:44px;border:1px solid #aebfcb;border-radius:9px;padding:10px 12px;background:#fff}
+.ix-field textarea{min-height:90px}
+.ix-field input:disabled,.ix-field select:disabled{background:#f3f6f8;color:#60717f}
+.ix-field.check{flex-direction:row-reverse;justify-content:flex-end;align-items:center;gap:10px;flex-wrap:wrap}
+.ix-field.check input{width:22px;height:22px}
+.ix-field.has-error input,.ix-field.has-error select,.ix-field.has-error textarea,.ix-field [aria-invalid=true]{border-color:var(--ix-red);background:#fff8f8}
+.ix-checklist{border:1px solid var(--ix-line);border-radius:9px;padding:10px;max-height:220px;overflow:auto;display:grid;gap:6px;margin:0}
+.ix-checklist label{display:flex;gap:8px;align-items:center;font-weight:400}
+.ix-actions{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.ix-actions>div{display:flex;gap:10px;flex-wrap:wrap}
+.ix-conflict,.ix-errorsummary{border-radius:12px;padding:14px 17px;margin-bottom:15px}
+.ix-conflict{background:#fff6df;border:1px solid #f0d184}
+.ix-errorsummary{background:#fde7e7;border:1px solid #efb8b8}
+.ix-errorsummary a{color:var(--ix-red)}
+.ix-impact{background:#f2f7f9;border:1px solid var(--ix-line);border-radius:9px;padding:12px 14px}
+.ix-impact.warn{background:#fff6df;border-color:#f0d184}
+.ix-impact dl{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:6px 0 0}.ix-impact dd{margin:0}
+.ix-dialog{border:0;border-radius:14px;padding:24px;max-width:520px;width:calc(100% - 32px);box-shadow:0 12px 34px #183b5640}
+.ix-dialog::backdrop{background:#0d243780}
+.ix-dialog textarea{width:100%;min-height:90px;border:1px solid #aebfcb;border-radius:9px;padding:10px}
+@media(max-width:900px){.ix-shell{grid-template-columns:78px 1fr}.ix-brand b,.ix-brand small,.ix-navitem b{display:none}.ix-navitem{grid-template-columns:1fr;text-align:center}.ix-viewport{padding:14px}.ix-masterlayout{grid-template-columns:1fr}.ix-masternav{display:flex;overflow:auto}.ix-masternav a{min-width:140px}.ix-formgrid{grid-template-columns:1fr}}
+@media(max-width:600px){.ix-shell{display:block}.ix-sidenav{position:fixed;z-index:50;left:0;right:0;bottom:0;top:auto;height:70px;display:flex;padding:7px}.ix-brand{display:none}.ix-sidenav nav{display:flex}.ix-navitem{min-width:80px;padding:6px}.ix-appbar{height:58px;padding:0 12px}.ix-user span{display:none}.ix-viewport{padding:9px 9px 80px}.ix-pagehead{flex-direction:column;align-items:flex-start}.ix-pagehead h1{font-size:21px}.ix-searchbar{flex-wrap:wrap}}
+.ix-masterlayout>*{min-width:0}
+.ix-dialog label{display:block;margin:14px 0 6px;font-weight:700}
+.ix-dialog .ix-actions{margin-top:14px}
+@media(max-width:600px){.ix-navitem b{display:block}.ix-navitem span{display:none}.ix-user i{display:none}}

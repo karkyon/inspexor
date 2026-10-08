@@ -8,6 +8,7 @@ import { errorResponse, dataResponse } from '../http/api-response';
 import { MASTER_DEFS, isMasterType, type MasterType } from './definitions';
 import { writeSchema, updateSchema, commandSchema } from './schemas';
 import { MasterError, type MasterService } from './master-service';
+import { zodIssueMessageJa, type ZodIssueLike } from '../http/zod-messages';
 
 const UUID_RE = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 
@@ -75,7 +76,7 @@ function zodFields(issues: ReadonlyArray<{ path: ReadonlyArray<PropertyKey>; cod
   return issues.map((issue) => ({
     path: `/${issue.path.map(String).join('/')}`,
     code: String(issue.code),
-    message: issue.message,
+    message: zodIssueMessageJa(issue as unknown as ZodIssueLike),
   }));
 }
 

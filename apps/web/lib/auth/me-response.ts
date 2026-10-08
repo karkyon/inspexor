@@ -2,6 +2,7 @@ export interface MeData {
   readonly userId: string;
   readonly displayName: string;
   readonly roles: readonly string[];
+  readonly csrfToken?: string;
 }
 
 export type MeOutcome =

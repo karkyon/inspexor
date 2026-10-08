@@ -7,6 +7,9 @@ export default defineConfig({
   testMatch: '**/*.e2e.ts',
   timeout: 60_000,
   retries: 0,
+  // dev-admin 1アカウント・開発DB 1つを共有するため直列（ロック回数・作成データの干渉を防ぐ）
+  workers: 1,
+  fullyParallel: false,
   reporter: [['list'], ['html', { open: 'never', outputFolder: 'playwright-report' }]],
   use: {
     baseURL: process.env['E2E_BASE_URL'] ?? 'http://localhost:3000',

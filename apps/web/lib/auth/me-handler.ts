@@ -1,5 +1,6 @@
 import { checkSessionValidity, sessionCookieAttributes, sessionExpiresAt } from '@inspexor/domain';
 import { resolveCorrelationId } from '../http/correlation-id';
+import { issueCsrfToken } from '../security/csrf';
 import { errorResponse, dataResponse } from '../http/api-response';
 import { verifySessionToken, issueSessionToken, refreshLastActivity } from './session-token';
 import { readSessionCookie, sessionCookieHeader, clearSessionCookieHeader } from './session-cookie';
@@ -33,7 +34,14 @@ export async function handleMeRequest(request: Request, deps: MeHandlerDeps): Pr
   const expiresAt = sessionExpiresAt({ issuedAt, lastActivityAt: now }).toISOString();
   return dataResponse(
     200,
-    { userId: payload.userId, displayName: payload.displayName, roles: payload.roles, expiresAt },
+    // GAP-009: 再読込・別タブでも command を送れるよう、session に紐づく CSRF token を再発行して返す
+    {
+      userId: payload.userId,
+      displayName: payload.displayName,
+      roles: payload.roles,
+      expiresAt,
+      csrfToken: issueCsrfToken(payload.sessionId, deps.sessionSecret),
+    },
     correlationId,
     sessionCookieHeader(issueSessionToken(refreshed, deps.sessionSecret), sessionCookieAttributes().maxAge),
   );

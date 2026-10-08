@@ -35,12 +35,13 @@ describe('handleMeRequest', () => {
 
     expect(response.status).toBe(200);
     const body = (await response.json()) as any;
-    expect(body.data).toEqual({
+    expect(body.data).toMatchObject({
       userId: 'u-1',
       displayName: '田中太郎',
       roles: ['OFFICE'],
       expiresAt: '2026-10-07T09:35:00.000Z',
     });
+    expect(typeof body.data.csrfToken).toBe('string');
     expect(response.headers.get('set-cookie')).toContain(`${SESSION_COOKIE_NAME}=`);
   });
 
