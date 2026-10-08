@@ -7,6 +7,7 @@ import { interpretMeResponse, type MeData } from '../lib/auth/me-response';
 import { storeCsrfToken } from '../lib/api/client';
 
 const ADMIN_AREA_ROLES = ['OFFICE', 'ADMIN', 'AUDITOR'];
+const FIELD_AREA_ROLES = ['FIELD', 'OFFICE', 'ADMIN'];
 
 type ViewState =
   | { readonly status: 'loading' }
@@ -56,6 +57,11 @@ export function HomeClient() {
         <p>
           ようこそ、{view.user.displayName}さん（{view.user.roles.join(', ')}）
         </p>
+        {view.user.roles.some((r) => FIELD_AREA_ROLES.includes(r)) ? (
+          <p>
+            <a href="/field">現場入力へ</a>
+          </p>
+        ) : null}
         {view.user.roles.some((r) => ADMIN_AREA_ROLES.includes(r)) ? (
           <p>
             <a href="/admin/masters/products">マスター管理へ</a>

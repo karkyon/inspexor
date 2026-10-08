@@ -132,7 +132,6 @@ describe('G1: 認可負試験（T-SEC-001〜004）', () => {
     ['transitionRecord', ['FIELD']],
     ['transitionRecord', ['AUDITOR']],
     ['createBillingRun', ['AUDITOR']],
-    ['listRecords', ['FIELD']],
     ['getInvoice', ['FIELD']],
     ['createWorkReport', ['ADMIN']],
   ] as const)('%s を %j は 403 FORBIDDEN、handler未実行、拒否をauditに記録', async (op, roles) => {

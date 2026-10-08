@@ -7,6 +7,7 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import { apiRequest, storeCsrfToken } from '../../lib/api/client';
+import { clearAllDrafts } from '../../lib/field/draft-store';
 
 export interface AdminUser {
   readonly userId: string;
@@ -55,6 +56,7 @@ export function AdminShell({ children }: { readonly children: ReactNode }) {
 
   async function logout(): Promise<void> {
     await apiRequest('POST', '/auth/logout');
+    clearAllDrafts();
     router.replace('/login');
   }
 

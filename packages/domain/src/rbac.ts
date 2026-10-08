@@ -57,7 +57,8 @@ export const OPERATION_POLICIES = {
   getDeliveryReport: { apiId: 'API-009', method: 'GET', path: '/delivery-reports/{id}', access: AUTHENTICATED, idempotent: false },
   updateDeliveryReport: { apiId: 'API-010', method: 'PATCH', path: '/delivery-reports/{id}', access: roles(['OFFICE'], true), idempotent: false },
   confirmDeliveryReport: { apiId: 'API-011', method: 'POST', path: '/delivery-reports/{id}/confirm', access: roles(['OFFICE'], true), idempotent: true },
-  listRecords: { apiId: 'API-012', method: 'GET', path: '/records', access: roles(['OFFICE', 'ADMIN', 'AUDITOR']), idempotent: false },
+  // CHG-002: FIELD を追加（業務要件 §2「自分の履歴 FIELD=R」）。FIELD は repository で owner=本人に限定する
+  listRecords: { apiId: 'API-012', method: 'GET', path: '/records', access: roles(['FIELD', 'OFFICE', 'ADMIN', 'AUDITOR']), idempotent: false },
   transitionRecord: { apiId: 'API-013', method: 'POST', path: '/records/{type}/{id}/{action}', access: roles(['OFFICE', 'ADMIN']), idempotent: true },
   listMasters: { apiId: 'API-014', method: 'GET', path: '/masters/{type}', access: AUTHENTICATED, idempotent: false },
   createMaster: { apiId: 'API-015', method: 'POST', path: '/masters/{type}', access: roles(['ADMIN']), idempotent: false },

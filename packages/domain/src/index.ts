@@ -11,3 +11,4 @@ export * from './auth-lockout';
 export * from './session-policy';
 export * from './rbac';
 export * from './master-retroactive';
+export * from './field-report';

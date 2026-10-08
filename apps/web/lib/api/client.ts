@@ -39,8 +39,13 @@ function readCsrfToken(): string | null {
   }
 }
 
-export async function apiRequest<T>(method: 'GET' | 'POST' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<ApiResult<T>> {
-  const headers: Record<string, string> = {};
+export async function apiRequest<T>(
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
+  path: string,
+  body?: unknown,
+  extraHeaders: Readonly<Record<string, string>> = {},
+): Promise<ApiResult<T>> {
+  const headers: Record<string, string> = { ...extraHeaders };
   if (body !== undefined) headers['content-type'] = 'application/json';
   if (method !== 'GET') {
     const token = readCsrfToken();

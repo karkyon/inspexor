@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { CSRF_TOKEN_STORAGE_KEY } from './LoginForm';
+import { clearAllDrafts } from '../lib/field/draft-store';
 
 export interface LogoutButtonProps {
   readonly onLoggedOut: () => void;
@@ -28,6 +29,8 @@ export function LogoutButton({ onLoggedOut }: LogoutButtonProps) {
         headers: csrfToken !== null ? { 'X-CSRF-Token': csrfToken } : {},
       });
       if (response.status === 204) {
+        // REQ-OFF-001: logout で端末下書きを削除
+        clearAllDrafts();
         try {
           window.sessionStorage.removeItem(CSRF_TOKEN_STORAGE_KEY);
         } catch {

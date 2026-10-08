@@ -39,9 +39,13 @@ describe('rbac: API設計書 §6 認証/権限 準拠', () => {
   });
 
   it('FIELDは承認・請求・帳票操作を拒否', () => {
-    for (const op of ['transitionRecord', 'listRecords', 'createBillingRun', 'getInvoice', 'documentAction'] as const) {
+    for (const op of ['transitionRecord', 'createBillingRun', 'getInvoice', 'documentAction'] as const) {
       expect(authorizeOperation(op, as('FIELD'))).toEqual({ ok: false, errorCode: 'FORBIDDEN' });
     }
+  });
+
+  it('CHG-002: FIELD は listRecords 可（自分の履歴。owner 絞込みは repository）', () => {
+    expect(authorizeOperation('listRecords', as('FIELD'))).toEqual({ ok: true, ownerCheckRequired: false });
   });
 
   it('owner/OFFICE 型: OFFICEは即可、FIELDは所有者判定が必要', () => {
