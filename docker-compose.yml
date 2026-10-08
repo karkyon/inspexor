@@ -1,26 +1,23 @@
-# インフラ・運用設計書 v5.1 準拠
-# - project name: inspexor-dev (docker compose -p inspexor-dev)
-# - container_name は固定しない（複数worktree/複数案件との衝突回避）
-# - host port はこのファイルへ直書きせず .env.local の DB_HOST_PORT から注入する
-#   （着手前に `pnpm ports:audit` 等で空きportを棚卸しし、.env.local に記録すること）
+# ローカル開発・検証用（00契約 §1 固定技術: Docker Compose）。本番は Cloud SQL / Cloud Run。
+#   docker compose up -d db mailpit
 services:
   db:
     image: postgres:16
-    restart: unless-stopped
     environment:
-      POSTGRES_USER: ${DB_USER:-inspexor}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-inspexor_local_only}
-      POSTGRES_DB: ${DB_NAME:-inspexor_dev}
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: inspexor_local
     ports:
-      # 127.0.0.1限定bind（DB hostを外部に公開しない方針）
-      - "127.0.0.1:${DB_HOST_PORT:-55432}:5432"
+      - "5434:5432"
     volumes:
-      - inspexor_pg_data:/var/lib/postgresql/data
+      - ./docs/spec/schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-inspexor}"]
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
       timeout: 5s
       retries: 10
-
-volumes:
-  inspexor_pg_data:
+  # G4以降のメール送信検証用（EXT-03 Gmail OAuth 未提供時の代替、MVP開発計画 §外部入力）
+  mailpit:
+    image: axllent/mailpit:v1.20
+    ports:
+      - "1025:1025"
+      - "8025:8025"

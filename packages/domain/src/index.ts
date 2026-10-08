@@ -9,3 +9,4 @@ export * from './error-codes';
 export * from './idempotency';
 export * from './auth-lockout';
 export * from './session-policy';
+export * from './rbac';

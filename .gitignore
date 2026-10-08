@@ -37,3 +37,4 @@ build/
 g0_*.sh
 playwright-report/
 test-results/
+g[0-9]*_*.sh

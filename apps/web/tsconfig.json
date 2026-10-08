@@ -53,15 +53,26 @@
     "lib/auth/session-token.test.ts",
     "lib/auth/session-token.ts",
     "lib/contract/openapi-contract.test.ts",
+    "lib/contract/rbac-contract.test.ts",
+    "lib/db/foundation.itest.ts",
+    "lib/db/pg-audit-repository.ts",
+    "lib/db/pg-idempotency-repository.ts",
+    "lib/db/pg-outbox-repository.ts",
+    "lib/db/pg.ts",
     "lib/db/prisma-client.ts",
+    "lib/http/api-handler.test.ts",
+    "lib/http/api-handler.ts",
     "lib/http/api-response.ts",
     "lib/http/correlation-id.test.ts",
     "lib/http/correlation-id.ts",
+    "lib/idempotency/idempotency-service.ts",
     "lib/security/csrf.test.ts",
     "lib/security/csrf.ts",
+    "lib/testing/fresh-db.ts",
     "next-env.d.ts",
     "playwright.config.ts",
-    "src"
+    "src",
+    "vitest.integration.config.ts"
   ],
   "exclude": [
     "node_modules"

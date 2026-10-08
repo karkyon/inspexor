@@ -54,7 +54,7 @@ for (const base of ['app', 'lib', 'components', 'e2e']) {
   const d = path.join(appDir, base);
   if (fs.existsSync(d)) walk(d, found);
 }
-for (const rootFile of ['playwright.config.ts']) {
+for (const rootFile of ['playwright.config.ts', 'vitest.integration.config.ts']) {
   if (fs.existsSync(path.join(appDir, rootFile))) found.push(path.join(appDir, rootFile));
 }
 const rel = found.map((p) => path.relative(appDir, p).split(path.sep).join('/'));
