@@ -18,9 +18,18 @@ interface RecordRow {
   readonly status: string;
   readonly type: 'WORK' | 'DELIVERY';
   readonly businessDate: string;
+  readonly documentStatus: string | null;
 }
 
 const WEEK = ['日', '月', '火', '水', '木', '金', '土'];
+
+/** 帳票の状態（G4）。DRAFT 以外で帳票が未完了なら「作成中」、最終失敗は事務所対応 */
+function documentLabel(status: string, documentStatus: string | null): string {
+  if (status === 'DRAFT') return '';
+  if (documentStatus === 'GENERATED') return '・帳票 作成済';
+  if (documentStatus === 'FAILED_FINAL') return '・帳票 エラー（事務所で対応）';
+  return '・帳票 作成中';
+}
 
 export function FieldHome() {
   const user = useFieldUser();
@@ -138,7 +147,10 @@ export function FieldHome() {
               <li key={r.id} className="fx-record">
                 <span className={`fx-pill ${r.status}`}>{statusLabel(r.status)}</span>
                 <b>{r.reportNo}</b>
-                <span>{r.type === 'WORK' ? '作業日報' : '運搬実績'}</span>
+                <span>
+                  {r.type === 'WORK' ? '作業日報' : '運搬実績'}
+                  <small className="fx-muted"> {documentLabel(r.status, r.documentStatus)}</small>
+                </span>
                 <time dateTime={r.businessDate}>{r.businessDate}</time>
               </li>
             ))}

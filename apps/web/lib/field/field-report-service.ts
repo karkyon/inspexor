@@ -283,6 +283,15 @@ async function latestRevision(db: Queryable, type: FieldReportType, reportId: st
   return r.rows[0] ?? null;
 }
 
+/** 最新 revision の最新帳票 job（G4 / CHG-003: documentStatus・documentId） */
+async function latestDocument(db: Queryable, revisionId: unknown): Promise<{ id: string; status: string } | null> {
+  const r = await db.query<{ id: string; status: string }>(
+    `SELECT id, status::text AS status FROM app.document_jobs WHERE source_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`,
+    [revisionId],
+  );
+  return r.rows[0] ?? null;
+}
+
 function toIso(v: unknown): string {
   return v instanceof Date ? v.toISOString() : new Date(String(v)).toISOString();
 }
@@ -294,6 +303,7 @@ async function workDetail(db: Queryable, header: HeaderRow): Promise<Record<stri
       [header.id],
     )
   ).rows[0] as Record<string, unknown>;
+  const doc = await latestDocument(db, rev['id']);
   const workers = await db.query<{ worker_id: string }>(
     `SELECT w.worker_id FROM app.work_report_workers w JOIN app.workers m ON m.id = w.worker_id WHERE w.revision_id = $1 ORDER BY m.code, m.id`,
     [rev['id']],
@@ -308,7 +318,8 @@ async function workDetail(db: Queryable, header: HeaderRow): Promise<Record<stri
     reportNo: header.report_no,
     status: header.status,
     version: header.version,
-    documentStatus: null,
+    documentStatus: doc?.status ?? null,
+    documentId: doc?.id ?? null,
     ownerId: header.owner_id,
     revisionId: rev['id'],
     revisionNo: rev['revision_no'],
@@ -337,6 +348,7 @@ async function deliveryDetail(db: Queryable, header: HeaderRow): Promise<Record<
   const rev = (
     await db.query(`SELECT * FROM app.delivery_report_revisions WHERE report_id = $1 ORDER BY revision_no DESC LIMIT 1`, [header.id])
   ).rows[0] as Record<string, unknown>;
+  const doc = await latestDocument(db, rev['id']);
   const items = await db.query<{ product_id: string; quantity: number; allocation_eligible: boolean }>(
     `SELECT i.product_id, i.quantity, i.allocation_eligible FROM app.delivery_items i JOIN app.products p ON p.id = i.product_id
       WHERE i.delivery_revision_id = $1 ORDER BY p.code, p.id`,
@@ -347,7 +359,8 @@ async function deliveryDetail(db: Queryable, header: HeaderRow): Promise<Record<
     reportNo: header.report_no,
     status: header.status,
     version: header.version,
-    documentStatus: null,
+    documentStatus: doc?.status ?? null,
+    documentId: doc?.id ?? null,
     ownerId: header.owner_id,
     revisionId: rev['id'],
     revisionNo: rev['revision_no'],
@@ -587,17 +600,19 @@ export class FieldReportService {
       where.push(`business_date <= $${params.length}::date`);
     }
     const union = `
-      SELECT h.id, h.report_no, h.status::text AS status, h.version, h.owner_id, 'WORK' AS type, r.work_date AS business_date, r.revision_no
+      SELECT h.id, h.report_no, h.status::text AS status, h.version, h.owner_id, 'WORK' AS type, r.work_date AS business_date, r.revision_no, d.status::text AS document_status
         FROM app.work_reports h
-        JOIN LATERAL (SELECT work_date, revision_no FROM app.work_report_revisions WHERE report_id = h.id ORDER BY revision_no DESC LIMIT 1) r ON true
+        JOIN LATERAL (SELECT id, work_date, revision_no FROM app.work_report_revisions WHERE report_id = h.id ORDER BY revision_no DESC LIMIT 1) r ON true
+        LEFT JOIN LATERAL (SELECT status FROM app.document_jobs WHERE source_id = r.id ORDER BY created_at DESC, id DESC LIMIT 1) d ON true
       UNION ALL
-      SELECT h.id, h.report_no, h.status::text, h.version, h.owner_id, 'DELIVERY', r.delivery_date, r.revision_no
+      SELECT h.id, h.report_no, h.status::text, h.version, h.owner_id, 'DELIVERY', r.delivery_date, r.revision_no, d.status::text
         FROM app.delivery_reports h
-        JOIN LATERAL (SELECT delivery_date, revision_no FROM app.delivery_report_revisions WHERE report_id = h.id ORDER BY revision_no DESC LIMIT 1) r ON true`;
+        JOIN LATERAL (SELECT id, delivery_date, revision_no FROM app.delivery_report_revisions WHERE report_id = h.id ORDER BY revision_no DESC LIMIT 1) r ON true
+        LEFT JOIN LATERAL (SELECT status FROM app.document_jobs WHERE source_id = r.id ORDER BY created_at DESC, id DESC LIMIT 1) d ON true`;
     const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
     const total = await this.pool.query<{ n: string }>(`SELECT count(*) AS n FROM (${union}) x ${whereSql}`, params);
     params.push(q.pageSize, (q.page - 1) * q.pageSize);
-    const rows = await this.pool.query<{ id: string; report_no: string; status: string; version: number; type: FieldReportType; business_date: string; revision_no: number }>(
+    const rows = await this.pool.query<{ id: string; report_no: string; status: string; version: number; type: FieldReportType; business_date: string; revision_no: number; document_status: string | null }>(
       `SELECT * FROM (${union}) x ${whereSql} ORDER BY business_date DESC, id ASC LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params,
     );
@@ -607,7 +622,7 @@ export class FieldReportService {
         reportNo: r.report_no,
         status: r.status,
         version: r.version,
-        documentStatus: null,
+        documentStatus: r.document_status,
         type: r.type,
         businessDate: r.business_date,
         revisionNo: r.revision_no,

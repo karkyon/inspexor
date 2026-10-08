@@ -20,7 +20,13 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
+      # G4: 日報メールの開発用 provider（EXT-03 Gmail 未提供時の代替）
+      mailpit:
+        image: axllent/mailpit:v1.20
+        ports:
+          - 8025:8025
     env:
+      MAILPIT_URL: http://127.0.0.1:8025
       ITEST_DATABASE_URL: postgresql://postgres:test@127.0.0.1:5433/postgres
       SCHEMA_SQL_PATH: ${{ github.workspace }}/docs/spec/schema.sql
       OPENAPI_PATH: ${{ github.workspace }}/docs/spec/openapi.yaml
@@ -49,6 +55,12 @@ jobs:
         run: cd apps/web && npx vitest run
       - name: web integration (fresh DB)
         run: cd apps/web && npx vitest run --config vitest.integration.config.ts
+      - name: worker typecheck
+        run: cd apps/worker && npx tsc --noEmit
+      - name: worker chromium（PDF 生成）
+        run: cd apps/worker && npx playwright-core install --with-deps chromium
+      - name: worker integration（outbox → 帳票 → メール、API-024/025）
+        run: cd apps/worker && npx vitest run --config vitest.integration.config.ts
 
   secret-scan:
     runs-on: ubuntu-latest

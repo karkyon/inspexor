@@ -60,7 +60,7 @@ export function DonePanel({ kind, done, again }: { kind: string; done: Done; aga
     <section className="fx-done" role="status" aria-live="polite">
       <h1>{kind}を登録しました</h1>
       <p>
-        報告番号 <b>{done.reportNo}</b>（状態: {statusLabel(done.status)}）。日報PDFの作成・送信は事務所側で処理されます。
+        報告番号 <b>{done.reportNo}</b>（状態: {statusLabel(done.status)}）。帳票PDFは自動で作成され、作成後に「提出済」になります。
       </p>
       <div className="fx-actions" style={{ position: 'static', background: 'transparent', border: 0, padding: 0 }}>
         <a className="fx-btn" href="/field">

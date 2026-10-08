@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>運搬実績報告書 {{report_no}}</title>
+<!-- DELIVERY_REPORT_V1（CHG-003、fixture HTML）。運搬は1報告=1便 -->
+<style>
+  @page { size: A4; margin: 14mm 12mm 16mm; }
+  * { box-sizing: border-box; }
+  body { font-family: "Noto Sans JP", sans-serif; font-size: 10.5pt; color: #111; margin: 0; }
+  h1 { font-size: 18pt; text-align: center; letter-spacing: .3em; margin: 0 0 4mm; }
+  .meta { display: flex; justify-content: space-between; font-size: 9pt; margin-bottom: 4mm; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { border: 0.3mm solid #333; padding: 2mm 2.5mm; vertical-align: top; }
+  th { background: #eef2f5; font-weight: 700; text-align: left; white-space: nowrap; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .section { margin-top: 5mm; }
+  .section h2 { font-size: 11pt; margin: 0 0 2mm; border-left: 1.2mm solid #0f7f6c; padding-left: 2mm; }
+  thead { display: table-header-group; }
+  tr { break-inside: avoid; }
+  .foot { margin-top: 6mm; font-size: 8.5pt; color: #444; }
+</style>
+</head>
+<body>
+  <h1>運搬実績報告書</h1>
+  <div class="meta">
+    <span>報告番号 {{report_no}}（第{{revision_no}}版）</span>
+    <span>確定日時 {{confirmed_at}}</span>
+  </div>
+  <table>
+    <tr><th>運搬日</th><td>{{delivery_date}}</td><th>運転者</th><td>{{driver_name}}</td></tr>
+    <tr><th>お客様</th><td colspan="3">{{customer_code}} {{customer_name}}</td></tr>
+  </table>
+  <div class="section">
+    <h2>品番・数量（1便）</h2>
+    <table>
+      <thead><tr><th>品番</th><th>品名</th><th class="num">数量（個）</th></tr></thead>
+      <tbody>
+        {{item_rows}}
+        <tr><td colspan="2"><b>合計（{{item_count}}品番）</b></td><td class="num"><b>{{total_quantity}}</b></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="foot">本書は INSPEXOR により確定済みの運搬実績から自動作成されました。運搬費は請求計算時に運搬ルールに従って計上されます。</p>
+</body>
+</html>

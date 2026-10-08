@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>作業結果報告書 {{report_no}}</title>
+<!-- DAILY_REPORT_V1（fixture HTML、帳票・メール定義書 v5.1）。実帳票（EXT-01）導入時も placeholder 名は変えない -->
+<style>
+  @page { size: A4; margin: 14mm 12mm 16mm; }
+  * { box-sizing: border-box; }
+  body { font-family: "Noto Sans JP", sans-serif; font-size: 10.5pt; color: #111; margin: 0; }
+  h1 { font-size: 18pt; text-align: center; letter-spacing: .3em; margin: 0 0 4mm; }
+  .meta { display: flex; justify-content: space-between; font-size: 9pt; margin-bottom: 4mm; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { border: 0.3mm solid #333; padding: 2mm 2.5mm; vertical-align: top; }
+  th { background: #eef2f5; font-weight: 700; text-align: left; width: 32mm; white-space: nowrap; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .section { margin-top: 5mm; }
+  .section h2 { font-size: 11pt; margin: 0 0 2mm; border-left: 1.2mm solid #1769aa; padding-left: 2mm; }
+  .defects th { width: auto; }
+  thead { display: table-header-group; }
+  tr { break-inside: avoid; }
+  .foot { margin-top: 6mm; font-size: 8.5pt; color: #444; }
+</style>
+</head>
+<body>
+  <h1>作業結果報告書</h1>
+  <div class="meta">
+    <span>報告番号 {{report_no}}（第{{revision_no}}版）</span>
+    <span>確定日時 {{confirmed_at}}</span>
+  </div>
+  <table>
+    <tr><th>作業日</th><td>{{work_date}}</td><th>報告者</th><td>{{reporter_name}}</td></tr>
+    <tr><th>お客様</th><td colspan="3">{{customer_code}} {{customer_name}}</td></tr>
+    <tr><th>品番 / 品名</th><td colspan="3">{{product_code}} / {{product_name}}</td></tr>
+    <tr><th>作業内容</th><td>{{work_type}}</td><th>ロットNo</th><td>{{lot_no}}</td></tr>
+    <tr><th>作業者</th><td colspan="3">{{worker_names}}</td></tr>
+    <tr><th>作業時間</th><td colspan="3">{{start_time}} ～ {{end_time}}（休憩控除 {{break_minutes}}）</td></tr>
+    <tr><th>通常工数</th><td>{{regular_person_minutes}}</td><th>割増工数</th><td>{{overtime_person_minutes}}</td></tr>
+  </table>
+  <div class="section">
+    <h2>数量・不良</h2>
+    <table class="defects">
+      <thead><tr><th>区分</th><th class="num">数量（個）</th></tr></thead>
+      <tbody>
+        <tr><td>作業数量</td><td class="num">{{quantity}}</td></tr>
+        {{defect_rows}}
+        <tr><td><b>不良合計</b></td><td class="num"><b>{{defect_total}}</b></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="foot">本書は INSPEXOR により確定済みの作業実績から自動作成されました。工数の単位は人・時間（作業者数×時間）です。</p>
+</body>
+</html>

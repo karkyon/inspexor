@@ -53,6 +53,8 @@ export async function createFreshDatabase(label: string): Promise<FreshDatabase>
   const url = new URL(adminUrl);
   url.pathname = `/${name}`;
   const pool = new Pool({ connectionString: url.toString(), max: 5 });
+  // DROP DATABASE ... WITH (FORCE) で切断された idle 接続の error を握る（試験終了処理のみ）
+  pool.on('error', () => undefined);
   const schemaPath = findSpecFile('schema.sql', 'SCHEMA_SQL_PATH');
   await pool.query(readFileSync(schemaPath, 'utf8'));
   // 追記migration（docs/spec/migrations/*.sql、rollback除く）を番号順に適用
