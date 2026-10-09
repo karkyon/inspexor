@@ -1,31 +1,16 @@
-import { Pool } from "pg";
+import { getDocStore } from '../../../lib/db/docstore';
 
-// 本エンドポイントはG0以前の「環境が実際に稼働しているか」の確認専用。
-// 業務ロジックは含まない。DATABASE_URLへの実接続をSELECT 1で検証する。
+// 稼働確認（業務ロジックなし）。CHG-006: Firestore へ実際に1件読込を行い接続を確認する（文書が無くても成功）。
+export const dynamic = 'force-dynamic';
+
 export async function GET(): Promise<Response> {
   const startedAt = Date.now();
-  const result: { app: string; db: "ok" | "ng"; error?: string; latencyMs?: number } = {
-    app: "ok",
-    db: "ng",
-  };
-
-  const connectionString = process.env.DATABASE_URL;
-  if (!connectionString) {
-    return Response.json({ ...result, error: "DATABASE_URL is not set" }, { status: 500 });
-  }
-
-  const pool = new Pool({ connectionString, max: 1 });
   try {
-    await pool.query("SELECT 1");
-    result.db = "ok";
-    result.latencyMs = Date.now() - startedAt;
-    return Response.json(result, { status: 200 });
+    await getDocStore().get('_health/ping');
+    return Response.json({ app: 'ok', db: 'ok', latencyMs: Date.now() - startedAt }, { status: 200 });
   } catch (err) {
-    return Response.json(
-      { ...result, error: err instanceof Error ? err.message : String(err) },
-      { status: 500 },
-    );
-  } finally {
-    await pool.end();
+    // 内部詳細は返さない（ログのみ）
+    console.error('[health] firestore', err instanceof Error ? err.message : String(err));
+    return Response.json({ app: 'ok', db: 'ng' }, { status: 500 });
   }
 }
