@@ -30,8 +30,10 @@ let clock = new Date('2026-10-08T03:00:00.000Z');
 class FakeRenderer implements PdfRenderer {
   calls = 0;
   failNext = 0;
+  lastHtml = '';
   async render(html: string): Promise<Buffer> {
     this.calls += 1;
+    this.lastHtml = html;
     if (this.failNext > 0) {
       this.failNext -= 1;
       throw new AdapterError('render timeout', true, 'DEPENDENCY_UNAVAILABLE');
@@ -133,8 +135,8 @@ afterAll(async () => {
 describe('G4: 帳票 job（T-DOC-001 placeholder 残存は先に検査）', () => {
   it('未置換 placeholder を含む template は FAILED_FINAL（TEMPLATE_INVALID）、メール job なし、実績は CONFIRMED のまま', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'inspexor-tpl-'));
-    const html = await readFile(join(TEMPLATE_DIR, 'daily-report-v1.html'), 'utf8');
-    await writeFile(join(dir, 'daily-report-v1.html'), html.replace('</body>', '<p>{{unknown_field}}</p></body>'));
+    const html = await readFile(join(TEMPLATE_DIR, 'daily-report-v2.html'), 'utf8');
+    await writeFile(join(dir, 'daily-report-v2.html'), html.replace('</body>', '<p>{{unknown_field}}</p></body>'));
     const r = await confirmWork();
     const renderer = new FakeRenderer();
     await runOnce(deps(renderer, new FakeSender(), dir));
@@ -147,6 +149,36 @@ describe('G4: 帳票 job（T-DOC-001 placeholder 残存は先に検査）', () =
     expect(Number((await one<{ n: string }>(`SELECT count(*) n FROM app.outbox_events WHERE event_type='DocumentFailed' AND aggregate_id=$1`, [job.id])).n)).toBe(1);
     // この試験で registry に登録された改変版を消す（以降は正規の template を使う）
     await db.pool.query(`DELETE FROM app.template_versions`);
+  });
+});
+
+describe('CHG-005: 作業結果報告書（DAILY_REPORT_V2）', () => {
+  it('新しく確定した日報は V2 様式: 和暦・作業者ごとの時間・担当者・作業場所・使用車・内訳・総時間数・備考', async () => {
+    const loc = (await one(`INSERT INTO app.work_locations(code,name) VALUES ('L1','三成興業 作業場') RETURNING id`)).id;
+    const car = (await one(`INSERT INTO app.vehicles(code,name) VALUES ('V1','キャラバン') RETURNING id`)).id;
+    await one(`INSERT INTO app.defect_types(product_id,code,name,sort_order) VALUES ($1,'D2','注入口',2) RETURNING id`, [m['pA']]);
+    const svc = new FieldReportService(db.pool);
+    const r = await svc.createWork(
+      {
+        workDate: '2026-10-08', reporterId: fieldUser, customerId: m['customer'] as string, productId: m['pA'] as string, workTypeId: m['wt_pA'] as string,
+        lotNo: '8, 5/24', workerIds: [m['w1'] as string, m['w2'] as string], startAt: jstToInstant('2026-10-08', '09:30'), endAt: jstToInstant('2026-10-08', '11:25'),
+        quantity: 1600, defects: [{ defectTypeId: m['d_pA'] as string, quantity: 2 }], workLocationId: loc, vehicleId: car, remarks: '特記事項なし',
+      },
+      ctx(),
+    );
+    await svc.confirm('WORK', r.id, 1, ctx());
+    const renderer = new FakeRenderer();
+    await runOnce(deps(renderer, new FakeSender()));
+    const job = await jobFor(r.id, 'work');
+    expect(job.status).toBe('GENERATED');
+    expect((await one<{ template_version: string }>('SELECT template_version FROM app.document_jobs WHERE id = $1', [job.id])).template_version).toBe('DAILY_REPORT_V2');
+    const html = renderer.lastHtml;
+    expect(html).not.toMatch(/\{\{/);
+    for (const text of ['作業結果報告書', '令和 8 年 10 月 8 日（木）', '担当 様', '三成興業 作業場', 'キャラバン', '［ 作業者 一郎 ］ 9時30分 〜 11時25分', '1.92', '昼休憩 0.00 H', '外観検査', 'バリ　2', '注入口　', '3.83', '特記事項なし', '合成顧客＆&lt;A&gt;']) {
+      expect(html, text).toContain(text);
+    }
+    // 作業者欄は最低10行（現行帳票）
+    expect(html.match(/class="w-row"/g)).toHaveLength(10);
   });
 });
 

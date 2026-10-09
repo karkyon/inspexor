@@ -6,11 +6,12 @@ import { MASTER_DEFS, type FieldDef, type MasterDef, type MasterType } from './d
 
 /**
  * CHG-004: 提案書「マスタ管理（簡易）: 客先・品番・作業者・不良項目」＋作業場所・車両（D1）を表示する。
- * 連絡先（日報メール）・単価/運搬/固定費ルール（請求）は対象外のため一覧に出さない（Blind。URL 直指定・API は従来どおり）。
+ * 単価/運搬/固定費ルール（請求）は対象外のため一覧に出さない（Blind。URL 直指定・API は従来どおり）。
+ * お客様担当者は CHG-005 で日報（作業結果報告書）の「担当者」欄に使うため表示する（メール送信は停止中）。
  */
 export const ALL_MASTER_LABELS: Readonly<Record<MasterType, string>> = {
   customers: 'お客様',
-  contacts: '連絡先',
+  contacts: 'お客様担当者',
   products: '品番',
   'work-types': '作業内容',
   defects: '不良種別',
@@ -23,7 +24,7 @@ export const ALL_MASTER_LABELS: Readonly<Record<MasterType, string>> = {
   'fixed-charges': '固定費',
 };
 
-const VISIBLE_MASTERS: readonly MasterType[] = ['customers', 'products', 'work-types', 'defects', 'workers', 'work-locations', 'vehicles', 'holidays'];
+const VISIBLE_MASTERS: readonly MasterType[] = ['customers', 'contacts', 'products', 'work-types', 'defects', 'workers', 'work-locations', 'vehicles', 'holidays'];
 
 export const MASTER_NAV: ReadonlyArray<{ type: MasterType; label: string }> = VISIBLE_MASTERS.map((type) => ({ type, label: ALL_MASTER_LABELS[type] }));
 
@@ -35,9 +36,9 @@ export const FIELD_LABELS: Readonly<Record<string, string>> = {
   closingDay: '締日',
   customerId: 'お客様',
   email: 'メールアドレス',
-  sendDaily: '日報を送信',
-  sendInvoice: '請求書を送信',
-  dailyProductIds: '日報の担当品番',
+  sendDaily: '日報メール（現在は送信停止中）',
+  sendInvoice: '請求書メール（対象外）',
+  dailyProductIds: '日報の担当品番（作業結果報告書の担当者欄）',
   invoiceProductIds: '請求書の担当品番',
   settlementType: '精算',
   lotRequired: 'ロット番号',

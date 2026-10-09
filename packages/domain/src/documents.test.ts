@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import {
   DAILY_REPORT_PLACEHOLDERS,
+  DAILY_REPORT_V2_PLACEHOLDERS,
+  hoursLabel,
+  jaClock,
+  toWareki,
   dailyReportSubject,
   decideRetry,
   documentFileName,
@@ -70,5 +74,26 @@ describe('retry（network/408/429/5xx のみ、10s/30s/2m/10m/30m、最大5回�
     expect([1, 2, 3, 4, 5].map((a) => decideRetry(a, true))).toEqual([10, 30, 120, 600, 1800].map((s) => ({ status: 'FAILED_RETRYABLE', nextAttemptAfterSeconds: s })));
     expect(decideRetry(6, true)).toEqual({ status: 'FAILED_FINAL' });
     expect(decideRetry(1, false)).toEqual({ status: 'FAILED_FINAL' });
+  });
+});
+
+describe('CHG-005: 作業結果報告書（V2）の表示部品', () => {
+  it('和暦・曜日（令和元年・平成）', () => {
+    expect(toWareki('2026-06-02').text).toBe('令和 8 年 6 月 2 日（火）');
+    expect(toWareki('2019-05-01').text).toBe('令和 元 年 5 月 1 日（水）');
+    expect(toWareki('2019-04-30').text).toBe('平成 31 年 4 月 30 日（火）');
+    expect(() => toWareki('x')).toThrow();
+  });
+  it('時間（H）と時刻表記', () => {
+    expect(hoursLabel(115)).toBe('1.92');
+    expect(hoursLabel(230)).toBe('3.83');
+    expect(hoursLabel(0)).toBe('0.00');
+    expect(jaClock('09:30')).toBe('9時30分');
+    expect(jaClock('24:00')).toBe('24時00分');
+  });
+  it('V2 の必須 placeholder と日報ファイル名', () => {
+    const all = DAILY_REPORT_V2_PLACEHOLDERS.map((p) => `{{${p}}}`).join('');
+    expect(missingPlaceholders(all, 'DAILY_REPORT_V2')).toEqual([]);
+    expect(documentFileName('DAILY_REPORT_V2', { date: '2026-06-02', customerCode: 'C1', reportNo: 'WR-202606-000001', revisionNo: 2 })).toBe('日報_2026-06-02_C1_WR-202606-000001_r2.pdf');
   });
 });

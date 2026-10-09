@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>作業結果報告書 {{report_no}}</title>
+<!-- DAILY_REPORT_V2（CHG-005）: 三成興業の現行「作業結果報告書」の様式に合わせた A4 縦。placeholder 名は変えない -->
+<style>
+  @page { size: A4; margin: 10mm 11mm 10mm; }
+  * { box-sizing: border-box; }
+  body { font-family: "Noto Sans JP", sans-serif; font-size: 10pt; color: #111; margin: 0; }
+  .head { display: grid; grid-template-columns: 1fr auto; gap: 4mm; align-items: start; }
+  .to { font-size: 11.5pt; }
+  .to .name { font-size: 13pt; border-bottom: 0.3mm solid #111; padding: 0 6mm 0.8mm 0; display: inline-block; }
+  .to .contact { margin-top: 1.2mm; border-bottom: 0.3mm solid #111; padding: 0 6mm 0.8mm 0; display: inline-block; min-width: 55mm; }
+  h1 { text-align: center; font-size: 19pt; letter-spacing: .25em; margin: 4mm 0 2mm; }
+  h1 span { border-bottom: 0.5mm solid #111; padding: 0 2mm 0.6mm; }
+  .from { text-align: right; font-size: 9pt; line-height: 1.55; }
+  .from b { font-size: 11pt; }
+  .greet { font-size: 9.5pt; line-height: 1.6; margin: 1mm 0 3mm; }
+  table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  td, th { border: 0.35mm solid #222; padding: 1.4mm 2mm; vertical-align: middle; }
+  th { font-weight: 500; text-align: center; letter-spacing: .3em; background: #fff; white-space: nowrap; }
+  .shade { background: #e3e6e8; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .center { text-align: center; }
+  .w-row td { height: 6.9mm; font-size: 10pt; }
+  .w-row .nm { width: 30mm; }
+  .w-row .hrs { text-align: right; white-space: nowrap; }
+  .w-row .brk { white-space: nowrap; font-size: 9pt; }
+  .vlabel { letter-spacing: .1em; line-height: 1.5; font-size: 9.5pt; }
+  .items th { letter-spacing: .1em; }
+  .items td { height: 8.5mm; }
+  .bd { font-size: 9pt; line-height: 1.5; }
+  .total td { font-weight: 700; }
+  .bottom { display: grid; grid-template-columns: 1fr 70mm; gap: 6mm; margin-top: 4mm; align-items: end; }
+  .stamps td { height: 16mm; width: 25mm; }
+  .stamps th { font-size: 8.5pt; letter-spacing: 0; padding: 1mm; }
+  .sums th { width: 30mm; font-size: 12pt; letter-spacing: .2em; }
+  .sums td { font-size: 13pt; height: 11mm; }
+  .unit { font-size: 10pt; margin-left: 2mm; }
+  .note { margin-top: 3mm; font-size: 8pt; color: #333; display: flex; justify-content: space-between; gap: 4mm; }
+  .remarks { margin-top: 2mm; font-size: 9pt; white-space: pre-wrap; overflow-wrap: anywhere; }
+  tr { break-inside: avoid; }
+</style>
+</head>
+<body>
+  <div class="head">
+    <div class="to">
+      <div class="name">{{customer_name}} 御中</div><br>
+      <div class="contact">担当者　{{contact_name}}</div>
+    </div>
+    <div></div>
+  </div>
+  <h1><span>作業結果報告書</span></h1>
+  <div class="head">
+    <div class="greet">いつも大変お世話さまになっております。<br>ご依頼の作業結果は下記の通りです。よろしくお願い致します。</div>
+    <div class="from"><b>三成興業株式会社</b><br>TEL 086-448-1930<br>FAX 086-448-1936<br>E-mail sansei0112@nifty.com</div>
+  </div>
+
+  <table>
+    <colgroup><col style="width:30mm"><col><col style="width:24mm"><col style="width:38mm"></colgroup>
+    <tr><th>依頼元</th><td>{{customer_name}}</td><th class="shade">担当者</th><td>{{contact_name}}</td></tr>
+    <tr><th>作業日</th><td>{{work_date_jp}}</td><th class="shade">運搬日</th><td class="center">／</td></tr>
+    <tr><th>作業場所</th><td>{{work_location}}</td><th>使用車</th><td>{{vehicle}}</td></tr>
+  </table>
+  <table style="margin-top:-0.35mm">
+    <colgroup><col style="width:30mm"><col><col style="width:38mm"></colgroup>
+    {{worker_rows}}
+    <tr><th>作業内容</th><td colspan="2">{{work_type}}</td></tr>
+  </table>
+
+  <table class="items" style="margin-top:3mm">
+    <colgroup><col style="width:44mm"><col><col style="width:26mm"><col style="width:22mm"><col style="width:42mm"></colgroup>
+    <thead><tr><th>品番</th><th>ロットNo</th><th>作業数量</th><th>不良個数</th><th>内訳</th></tr></thead>
+    <tbody>
+      <tr><td>{{product_code}}<br><span class="bd">{{product_name}}</span></td><td>{{lot_no}}</td><td class="num">{{quantity}}</td><td class="num">{{defect_total}}</td><td class="bd">{{defect_breakdown}}</td></tr>
+      <tr><td></td><td></td><td></td><td></td><td></td></tr>
+      <tr><td></td><td></td><td></td><td></td><td></td></tr>
+      <tr class="total"><td class="shade center" colspan="2">計</td><td class="num">{{quantity}}</td><td class="num">{{defect_total}}</td><td></td></tr>
+    </tbody>
+  </table>
+
+  <div class="remarks">備考：{{remarks}}</div>
+
+  <div class="bottom">
+    <table class="stamps">
+      <tr><th>実施先担当者</th><th>三成担当者</th><th>結果報告済欄</th></tr>
+      <tr><td></td><td></td><td></td></tr>
+    </table>
+    <table class="sums">
+      <tr><th class="shade">総時間数</th><td class="num">{{total_hours}}<span class="unit">H</span></td></tr>
+      <tr><th class="shade">運搬費</th><td class="num"><span class="unit">円</span></td></tr>
+    </table>
+  </div>
+  <div class="note"><span>報告番号 {{report_no}}（第{{revision_no}}版）</span><span>確定 {{confirmed_at}}・INSPEXOR で作成</span></div>
+</body>
+</html>

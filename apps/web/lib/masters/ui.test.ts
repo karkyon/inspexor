@@ -12,9 +12,9 @@ const lookups: Lookups = {
 describe('SCR-13 表示定義', () => {
   it('ナビは提案書の範囲（CHG-004）だけ・重複なし。請求・メール系は表示しない', () => {
     const nav = MASTER_NAV.map((n) => n.type);
-    expect(nav).toEqual(['customers', 'products', 'work-types', 'defects', 'workers', 'work-locations', 'vehicles', 'holidays']);
+    expect(nav).toEqual(['customers', 'contacts', 'products', 'work-types', 'defects', 'workers', 'work-locations', 'vehicles', 'holidays']);
     expect(new Set(nav).size).toBe(nav.length);
-    for (const hidden of ['contacts', 'rates', 'transport-rules', 'fixed-charges']) expect(nav).not.toContain(hidden);
+    for (const hidden of ['rates', 'transport-rules', 'fixed-charges']) expect(nav).not.toContain(hidden);
     for (const type of MASTER_TYPES) expect(NAV_LABEL[type]).toBeTruthy();
   });
   it('一覧列・全項目にラベルがあり、定義済み項目だけを使う', () => {

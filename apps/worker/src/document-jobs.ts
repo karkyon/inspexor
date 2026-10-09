@@ -97,7 +97,10 @@ export async function processOneDocumentJob(deps: DocumentDeps): Promise<'none' 
   const job = await claim(deps.pool, deps.now());
   if (job === null) return 'none';
   try {
-    const snapshot = job.source_type === 'WORK_REVISION' ? await workSnapshot(deps.pool, job.source_id) : await deliverySnapshot(deps.pool, job.source_id);
+    const snapshot =
+      job.source_type === 'WORK_REVISION'
+        ? await workSnapshot(deps.pool, job.source_id, job.template_version === 'DAILY_REPORT_V1' ? 'DAILY_REPORT_V1' : 'DAILY_REPORT_V2')
+        : await deliverySnapshot(deps.pool, job.source_id);
     if (snapshot === null || snapshot.type !== job.template_version) throw new FinalFailure('SOURCE_NOT_FOUND', '確定済み revision が見つかりません');
     let template;
     try {

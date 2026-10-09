@@ -92,7 +92,8 @@ test.describe('G2-E2E: SCR-13 マスター管理', () => {
     const nav = page.getByRole('navigation', { name: 'マスター種別' });
     await expect(nav.getByRole('link', { name: /車両/ })).toBeVisible();
     await expect(nav.getByRole('link', { name: /作業場所/ })).toBeVisible();
-    for (const hidden of [/単価ルール/, /運搬ルール/, /固定費/, /連絡先/]) await expect(nav.getByRole('link', { name: hidden })).toHaveCount(0);
+    for (const hidden of [/単価ルール/, /運搬ルール/, /固定費/]) await expect(nav.getByRole('link', { name: hidden })).toHaveCount(0);
+    await expect(nav.getByRole('link', { name: /お客様担当者/ })).toBeVisible(); // CHG-005: 日報の担当者欄
     await nav.getByRole('link', { name: /車両/ }).click();
     await expect(page).toHaveURL(/\/admin\/masters\/vehicles$/);
     await expect(page.getByRole('cell', { name: 'SYN-V01', exact: true })).toBeVisible();

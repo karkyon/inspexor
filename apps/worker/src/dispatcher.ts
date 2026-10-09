@@ -8,7 +8,8 @@ import { createDailyMailJob } from './mail-jobs';
 import { workSnapshot } from './templates';
 
 export const DOCUMENT_EVENT_TEMPLATE: Readonly<Record<string, { template: string; documentType: string; sourceType: string }>> = {
-  WorkReportConfirmed: { template: 'DAILY_REPORT_V1', documentType: 'DAILY_REPORT', sourceType: 'WORK_REVISION' },
+  // CHG-005: 新しく確定する作業日報は現行の作業結果報告書様式（V2）
+  WorkReportConfirmed: { template: 'DAILY_REPORT_V2', documentType: 'DAILY_REPORT', sourceType: 'WORK_REVISION' },
   DeliveryReportConfirmed: { template: 'DELIVERY_REPORT_V1', documentType: 'DELIVERY_REPORT', sourceType: 'DELIVERY_REVISION' },
 };
 

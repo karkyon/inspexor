@@ -139,7 +139,7 @@ describe('G4: API-024 getDocument（scope・10分署名 URL）', () => {
 
   it('応答: file メタデータ・署名 URL（10分）・メール履歴（宛先アドレスは返さない）', async () => {
     const d = (await json(await documentItemHandlers(docDeps()).GET(req('field', 'GET', `documents/${workDocId}`)))).data as Record<string, unknown>;
-    expect(d).toMatchObject({ status: 'GENERATED', templateVersion: 'DAILY_REPORT_V1', source: { type: 'WORK', reportNo: work.reportNo, revisionNo: 1 } });
+    expect(d).toMatchObject({ status: 'GENERATED', templateVersion: 'DAILY_REPORT_V2', source: { type: 'WORK', reportNo: work.reportNo, revisionNo: 1 } });
     expect((d['file'] as { fileName: string }).fileName).toBe(`日報_2026-10-08_C1_${work.reportNo}_r1.pdf`);
     expect(d['signedUrl']).toMatch(/^\/api\/files\/[0-9a-f-]{36}\?exp=\d+&sig=/);
     expect(d['signedUrlExpiresAt']).toBe('2026-10-08T03:10:00.000Z');

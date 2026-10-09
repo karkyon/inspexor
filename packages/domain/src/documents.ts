@@ -7,12 +7,21 @@
  *  - retry: network/408/429/5xx のみ、10s/30s/2m/10m/30m、最大5回（機能別詳細設計書 §9）
  */
 
-export type TemplateType = 'DAILY_REPORT_V1' | 'DELIVERY_REPORT_V1';
+export type TemplateType = 'DAILY_REPORT_V1' | 'DAILY_REPORT_V2' | 'DELIVERY_REPORT_V1';
 
 export const DAILY_REPORT_PLACEHOLDERS = [
   'report_no', 'revision_no', 'work_date', 'customer_code', 'customer_name', 'product_code', 'product_name', 'work_type', 'lot_no',
   'reporter_name', 'worker_names', 'start_time', 'end_time', 'break_minutes', 'regular_person_minutes', 'overtime_person_minutes',
   'quantity', 'defect_rows', 'defect_total', 'confirmed_at',
+] as const;
+
+/**
+ * CHG-005: 現行の「作業結果報告書」様式（三成興業の手書き帳票）に合わせた日報。新しく確定する作業日報はこの様式で作る
+ * （V1 で作成済みの帳票は版を固定したまま。再出力も作成時の様式）
+ */
+export const DAILY_REPORT_V2_PLACEHOLDERS = [
+  'report_no', 'revision_no', 'confirmed_at', 'customer_name', 'contact_name', 'work_date_jp', 'work_location', 'vehicle', 'worker_rows',
+  'work_type', 'product_code', 'product_name', 'lot_no', 'quantity', 'defect_total', 'defect_breakdown', 'total_hours', 'remarks',
 ] as const;
 
 /** CHG-003 で定義（運搬実績の帳票） */
@@ -22,6 +31,7 @@ export const DELIVERY_REPORT_PLACEHOLDERS = [
 
 export const TEMPLATE_PLACEHOLDERS: Readonly<Record<TemplateType, readonly string[]>> = {
   DAILY_REPORT_V1: DAILY_REPORT_PLACEHOLDERS,
+  DAILY_REPORT_V2: DAILY_REPORT_V2_PLACEHOLDERS,
   DELIVERY_REPORT_V1: DELIVERY_REPORT_PLACEHOLDERS,
 };
 
@@ -59,7 +69,7 @@ function safeFilePart(value: string): string {
 }
 
 export function documentFileName(type: TemplateType, input: { date: string; customerCode: string; reportNo: string; revisionNo: number }): string {
-  const prefix = type === 'DAILY_REPORT_V1' ? '日報' : '運搬';
+  const prefix = type.startsWith('DAILY_REPORT') ? '日報' : '運搬';
   return `${prefix}_${safeFilePart(input.date)}_${safeFilePart(input.customerCode)}_${safeFilePart(input.reportNo)}_r${input.revisionNo}.pdf`;
 }
 
@@ -127,4 +137,34 @@ export type JobOutcome =
 export function decideRetry(attempts: number, retryable: boolean): JobOutcome {
   if (!retryable || attempts - 1 >= JOB_MAX_RETRIES) return { status: 'FAILED_FINAL' };
   return { status: 'FAILED_RETRYABLE', nextAttemptAfterSeconds: JOB_RETRY_DELAYS_SECONDS[attempts - 1] ?? 1800 };
+}
+
+const WEEKDAYS_JA = ['日', '月', '火', '水', '木', '金', '土'] as const;
+
+/** 'YYYY-MM-DD' → 和暦（帳票の日付欄: 「令和 8 年 6 月 2 日（火）」）。令和は 2019-05-01 以降、それ以前は平成 */
+export function toWareki(date: string): { era: string; year: number; month: number; day: number; weekday: string; text: string } {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (m === null) throw new Error(`invalid date: ${date}`);
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  const reiwa = date >= '2019-05-01';
+  const era = reiwa ? '令和' : '平成';
+  const year = reiwa ? y - 2018 : y - 1988;
+  const weekday = WEEKDAYS_JA[new Date(Date.UTC(y, mo - 1, d)).getUTCDay()] as string;
+  return { era, year, month: mo, day: d, weekday, text: `${era} ${year === 1 ? '元' : year} 年 ${mo} 月 ${d} 日（${weekday}）` };
+}
+
+/** 分 → 時間（帳票の「(H)」欄。小数2桁、0 は 0.00） */
+export function hoursLabel(minutes: number): string {
+  const h = Math.floor(minutes / 60);
+  const frac = Math.round(((minutes % 60) * 100) / 60);
+  return frac === 100 ? `${h + 1}.00` : `${h}.${String(frac).padStart(2, '0')}`;
+}
+
+/** 'HH:MM' → 「9時30分」（帳票の時刻欄） */
+export function jaClock(time: string): string {
+  const m = /^(\d{2}):(\d{2})$/.exec(time);
+  if (m === null) throw new Error(`invalid time: ${time}`);
+  return `${Number(m[1])}時${m[2]}分`;
 }
