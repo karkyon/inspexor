@@ -59,8 +59,20 @@ export function loadDraft<T>(userId: string, type: DraftType, now: Date = new Da
   }
 }
 
-/** 保存できたら true（storage 不可・容量超過は false＝画面で警告） */
+/**
+ * logout 後の書き戻し防止（REQ-OFF-001）: 入力の自動保存（1秒遅延）が logout と画面遷移の間に発火すると、
+ * 削除した下書きが復活する。clearAllDrafts から次のログイン確認（resumeDrafts）までは保存しない。
+ */
+let suspended = false;
+
+/** ログイン済みを確認した時（現場画面の /me 成功時）に呼ぶ */
+export function resumeDrafts(): void {
+  suspended = false;
+}
+
+/** 保存できたら true（storage 不可・容量超過は false＝画面で警告。logout 直後は書かずに true） */
 export function saveDraft<T>(userId: string, type: DraftType, draft: Omit<StoredDraft<T>, 'v' | 'updatedAt'>, now: Date = new Date(), storage?: KeyValueStorage): boolean {
+  if (suspended) return true;
   const s = storageOrNull(storage);
   if (s === null) return false;
   try {
@@ -83,6 +95,7 @@ export function clearDraft(userId: string, type: DraftType, storage?: KeyValueSt
 
 /** logout 時: この端末の INSPEXOR 下書きをすべて削除 */
 export function clearAllDrafts(storage?: KeyValueStorage): void {
+  suspended = true;
   const s = storageOrNull(storage);
   if (s === null) return;
   try {

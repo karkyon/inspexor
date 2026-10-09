@@ -21,6 +21,7 @@ export interface ServerState {
 }
 
 export interface Done {
+  readonly id: string;
   readonly reportNo: string;
   readonly status: string;
 }
@@ -39,6 +40,8 @@ export function useWizard<F>(options: {
   firstInvalidStep: (form: F) => number | null;
   apiSegment: 'work-reports' | 'delivery-reports';
   detailToForm: (detail: Record<string, unknown>) => F;
+  /** 古い端末下書き（項目追加前）を現在の形に補う（CHG-004） */
+  normalize?: (form: F) => F;
 }) {
   const { type, userId, basePath, maxStep, apiSegment } = options;
   const params = useSearchParams();
@@ -61,7 +64,7 @@ export function useWizard<F>(options: {
   useEffect(() => {
     const draft = loadDraft<F>(userId, type);
     if (draft !== null) {
-      setFormState(draft.data);
+      setFormState(options.normalize !== undefined ? options.normalize(draft.data) : draft.data);
       setServer({ id: draft.serverId, version: draft.serverVersion, reportNo: draft.reportNo });
       setLastSaved(new Date(draft.updatedAt));
     }
@@ -144,7 +147,7 @@ export function useWizard<F>(options: {
           return;
         }
         clearDraft(userId, type);
-        setDone({ reportNo: confirmed.data.reportNo, status: confirmed.data.status });
+        setDone({ id: s.id ?? saved.data.id, reportNo: confirmed.data.reportNo, status: confirmed.data.status });
       } finally {
         setBusy(false);
       }
@@ -163,7 +166,7 @@ export function useWizard<F>(options: {
     }
     if (res.data['status'] !== 'DRAFT') {
       clearDraft(userId, type);
-      setDone({ reportNo: String(res.data['reportNo']), status: String(res.data['status']) });
+      setDone({ id, reportNo: String(res.data['reportNo']), status: String(res.data['status']) });
       return;
     }
     const f = options.detailToForm(res.data);

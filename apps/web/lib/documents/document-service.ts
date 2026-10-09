@@ -5,6 +5,7 @@
  *  - action（OFFICE/ADMIN、理由必須）: regenerate=新しい帳票 job、retry=FAILED_FINAL の帳票/メールを新 job で再実行、
  *    send=日報の再送（新 mail job）。job の作成は worker（outbox: DocumentRequested / MailRequested）が行い、旧版は保持
  *  - expectedVersion は元実績（root）の version と照合（document_jobs に version 列が無いため。GAP-019）
+ *  - CHG-004: メール送信は提案書の対象外。mailEnabled=false（既定）では send は未定義の操作（404）、メールの retry も不可
  */
 import { randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
@@ -92,7 +93,11 @@ function canRead(actor: DocActor, row: DocRow): boolean {
 }
 
 export class DocumentService {
-  constructor(private readonly pool: Pool, private readonly secret: string) {}
+  constructor(
+    private readonly pool: Pool,
+    private readonly secret: string,
+    private readonly mailEnabled = false,
+  ) {}
 
   async get(id: string, actor: DocActor, now: Date): Promise<Record<string, unknown>> {
     const row = await load(this.pool, id, false);
@@ -144,6 +149,9 @@ export class DocumentService {
     cmd: { expectedVersion: number; reason?: string | undefined },
     ctx: { actor: DocActor; correlationId: string; now: Date },
   ): Promise<{ requestId: string; action: DocumentAction; status: 'QUEUED' }> {
+    if (action === 'send' && !this.mailEnabled) {
+      throw new DocumentError(404, 'VALIDATION_ERROR', '未定義の操作です。', [{ path: '/action', code: 'enum', message: 'regenerate / retry のいずれかです。' }]);
+    }
     const reason = cmd.reason?.trim() ?? '';
     if (reason === '') {
       throw new DocumentError(422, 'VALIDATION_ERROR', '理由を入力してください。', [{ path: '/reason', code: 'required', message: '手動の再生成・再送・再実行は理由が必須です。' }]);
@@ -168,7 +176,7 @@ export class DocumentService {
         if (row.status === 'FAILED_FINAL') {
           eventType = 'DocumentRequested';
           mode = 'retry';
-        } else if (row.status === 'GENERATED' && mailStatus === 'FAILED_FINAL') {
+        } else if (this.mailEnabled && row.status === 'GENERATED' && mailStatus === 'FAILED_FINAL') {
           eventType = 'MailRequested';
           mode = 'retry';
         } else {

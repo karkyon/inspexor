@@ -16,7 +16,7 @@ import { issueSessionToken } from '../auth/session-token';
 import { SESSION_COOKIE_NAME } from '../auth/session-cookie';
 import { issueCsrfToken } from '../security/csrf';
 import { FieldReportService } from './field-report-service';
-import { fieldCollectionHandlers, fieldConfirmHandlers, fieldItemHandlers, recordListHandlers, type FieldRouteDeps } from './field-handlers';
+import { deliveryFeeHandlers, fieldCollectionHandlers, fieldConfirmHandlers, fieldItemHandlers, recordListHandlers, recordTransitionHandlers, type FieldRouteDeps } from './field-handlers';
 
 const SECRET = 'f'.repeat(32);
 const NOW = new Date('2026-10-08T03:00:00.000Z'); // JST 2026-10-08 12:00
@@ -323,9 +323,167 @@ describe('G3: listRecords（API-012、CHG-002）', () => {
     expect(rows.length).toBeGreaterThan(5);
     expect(rows.map((r) => r.businessDate)).toEqual([...rows.map((r) => r.businessDate)].sort().reverse());
     expect(rows.some((r) => r.type === 'DELIVERY')).toBe(true);
+    // CHG-004 D5: 同じ業務日は新しい登録（作成日時）が先
+    const created = await db.pool.query<{ id: string }>(`SELECT id FROM (SELECT id, created_at FROM app.work_reports UNION ALL SELECT id, created_at FROM app.delivery_reports) x ORDER BY created_at DESC, id ASC`);
+    const sameDay = (all as unknown as { data: Array<{ id: string; businessDate: string }> }).data.filter((r) => r.businessDate === '2026-10-08').map((r) => r.id);
+    expect(sameDay).toEqual(created.rows.map((r) => r.id).filter((id) => sameDay.includes(id)));
     const confirmed = await json(await list.GET(req('office', 'GET', 'records?status=CONFIRMED&dateFrom=2026-10-08&dateTo=2026-10-08')));
     expect((confirmed as unknown as { data: Array<{ status: string }> }).data.every((r) => r.status === 'CONFIRMED')).toBe(true);
     expect((await list.GET(req('office', 'GET', 'records?sort=x'))).status).toBe(400);
     expect((await list.GET(req('office', 'GET', 'records?status=DONE'))).status).toBe(400);
+  });
+});
+
+describe('CHG-004: 提案書の入力項目（作業場所・使用車・備考／使用車両・運搬回数・運搬費）', () => {
+  it('作業: 作業場所・使用車・備考を保存して Detail で返す（未指定は null）。無効な車両は 422', async () => {
+    m['loc'] = (await one(`INSERT INTO app.work_locations(code,name) VALUES ('L1','三成興業 作業場') RETURNING id`)).id;
+    m['car'] = (await one(`INSERT INTO app.vehicles(code,name) VALUES ('V1','キャラバン') RETURNING id`)).id;
+    m['carOff'] = (await one(`INSERT INTO app.vehicles(code,name,active) VALUES ('V9','廃車',false) RETURNING id`)).id;
+    const plain = await createWork('field-a');
+    const plainDetail = (await json(await W().item.GET(req('field-a', 'GET', `work-reports/${plain.id}`)))).data as Record<string, unknown>;
+    expect(plainDetail).toMatchObject({ workLocationId: null, vehicleId: null, remarks: null });
+    expect(schema('WorkReportDetail')(plainDetail)).toBe(true);
+
+    const created = await createWork('field-a', { workLocationId: m['loc'], vehicleId: m['car'], remarks: '  特記事項なし  ' });
+    const detail = (await json(await W().item.GET(req('field-a', 'GET', `work-reports/${created.id}`)))).data as Record<string, unknown>;
+    expect(detail).toMatchObject({ workLocationId: m['loc'], vehicleId: m['car'], remarks: '特記事項なし' });
+    expect(schema('WorkReportDetail')(detail)).toBe(true);
+
+    const bad = await W().col.POST(req('field-a', 'POST', 'work-reports', work('field-a', { vehicleId: m['carOff'] })));
+    expect(bad.status).toBe(422);
+    expect((await json(bad)).error?.fields?.map((f) => `${f.path}:${f.code}`)).toEqual(['/vehicleId:inactive']);
+    const long = await W().col.POST(req('field-a', 'POST', 'work-reports', work('field-a', { remarks: 'あ'.repeat(501) })));
+    expect(long.status).toBe(422);
+
+    // 確定後の監査に備考の本文は残さない（有無のみ）
+    const audit = await one<{ after_data: Record<string, unknown> }>(`SELECT after_data FROM app.audit_events WHERE target_id = $1 AND action = 'WORK_REPORT_CREATE'`, [created.id]);
+    expect(JSON.stringify(audit.after_data)).not.toContain('特記事項なし');
+  });
+
+  it('運搬: 使用車両・運搬回数・運搬費（空欄可）を保存、PATCH で運搬費を後から入れられる、範囲外は 422', async () => {
+    const d0 = await json(await D().col.POST(req('field-a', 'POST', 'delivery-reports', delivery())));
+    const detail0 = (await json(await D().item.GET(req('field-a', 'GET', `delivery-reports/${d0.data?.id}`)))).data as Record<string, unknown>;
+    expect(detail0).toMatchObject({ vehicleId: null, tripCount: 1, deliveryFeeYen: null });
+    expect(schema('DeliveryReportDetail')(detail0)).toBe(true);
+
+    const patched = await D().item.PATCH(
+      req('field-a', 'PATCH', `delivery-reports/${d0.data?.id}`, { ...delivery({ vehicleId: m['car'], tripCount: 2, deliveryFeeYen: 2500 }), expectedVersion: 1 }),
+    );
+    expect(patched.status).toBe(200);
+    const detail1 = (await json(await D().item.GET(req('field-a', 'GET', `delivery-reports/${d0.data?.id}`)))).data as Record<string, unknown>;
+    expect(detail1).toMatchObject({ vehicleId: m['car'], tripCount: 2, deliveryFeeYen: 2500, version: 2 });
+    expect(schema('DeliveryReportDetail')(detail1)).toBe(true);
+
+    for (const over of [{ tripCount: 0 }, { tripCount: 100 }, { deliveryFeeYen: -1 }, { deliveryFeeYen: 10_000_000 }, { deliveryFeeYen: 1.5 }]) {
+      expect((await D().col.POST(req('field-a', 'POST', 'delivery-reports', delivery(over)))).status).toBe(422);
+    }
+    const inactiveCar = await D().col.POST(req('field-a', 'POST', 'delivery-reports', delivery({ vehicleId: m['carOff'] })));
+    expect((await json(inactiveCar)).error?.fields?.map((f) => `${f.path}:${f.code}`)).toEqual(['/vehicleId:inactive']);
+
+    // 確定後も運搬回数・運搬費は保持
+    const confirmed = await D().confirm.POST(req('field-a', 'POST', `delivery-reports/${d0.data?.id}/confirm`, { expectedVersion: 2 }, KEY('chg004-d')));
+    expect(confirmed.status).toBe(202);
+    const detail2 = (await json(await D().item.GET(req('field-a', 'GET', `delivery-reports/${d0.data?.id}`)))).data as Record<string, unknown>;
+    expect(detail2).toMatchObject({ status: 'CONFIRMED', vehicleId: m['car'], tripCount: 2, deliveryFeeYen: 2500 });
+  });
+});
+
+describe('CHG-004 batch16: 事務所の一覧絞込・確定後修正（新しい版）・運搬費の後入力', () => {
+  it('一覧: 種別・お客様・品番で絞り込み、要約（お客様・品番・数量・運搬回数・運搬費）を返す。不正 query は 400', async () => {
+    const list = recordListHandlers(deps);
+    const dl = (await json(await list.GET(req('office', 'GET', `records?type=DELIVERY&productId=${m['pB']}&pageSize=100`)))) as unknown as { data: Array<Record<string, unknown>> };
+    expect(dl.data.length).toBeGreaterThan(0);
+    for (const r of dl.data) {
+      expect(r['type']).toBe('DELIVERY');
+      expect(r['productIds']).toContain(m['pB']);
+      expect(r['customerId']).toBe(m['customer']);
+      expect(typeof r['quantity']).toBe('number');
+      expect(r['tripCount']).toBeGreaterThanOrEqual(1);
+      expect(schema('Record')(r)).toBe(true);
+    }
+    const wk = (await json(await list.GET(req('office', 'GET', `records?type=WORK&customerId=${m['customer']}&pageSize=100`)))) as unknown as { data: Array<Record<string, unknown>> };
+    expect(wk.data.every((r) => r['type'] === 'WORK' && r['tripCount'] === null && r['deliveryFeeYen'] === null && (r['productIds'] as string[]).length === 1)).toBe(true);
+    const none = (await json(await list.GET(req('office', 'GET', `records?customerId=${m['customer2']}`)))) as unknown as { data: unknown[] };
+    expect(none.data).toEqual([]);
+    expect((await list.GET(req('office', 'GET', 'records?type=X'))).status).toBe(400);
+    expect((await list.GET(req('office', 'GET', 'records?productId=abc'))).status).toBe(400);
+  });
+
+  it('revise: 確定済みを新しい下書き版にし（旧版は不変・親参照）、修正→確定で版2。理由必須、下書き・FIELD・承認系は不可', async () => {
+    const created = await createWork('field-a');
+    const t = recordTransitionHandlers(deps);
+    const draftRevise = await t.POST(req('office', 'POST', `records/WORK/${created.id}/revise`, { expectedVersion: 1, reason: '数量訂正' }, KEY('rv0')));
+    expect(draftRevise.status).toBe(409);
+    expect((await W().confirm.POST(req('field-a', 'POST', `work-reports/${created.id}/confirm`, { expectedVersion: 1 }, KEY('rv-c1')))).status).toBe(202);
+
+    expect((await t.POST(req('office', 'POST', `records/WORK/${created.id}/revise`, { expectedVersion: 2 }, KEY('rv1')))).status).toBe(422);
+    expect((await t.POST(req('field-a', 'POST', `records/WORK/${created.id}/revise`, { expectedVersion: 2, reason: 'x' }, KEY('rv2')))).status).toBe(403);
+    expect((await t.POST(req('office', 'POST', `records/WORK/${created.id}/approve`, { expectedVersion: 2, reason: 'x' }, KEY('rv3')))).status).toBe(404);
+    expect((await t.POST(req('office', 'POST', `records/WORK/${created.id}/revise`, { expectedVersion: 1, reason: 'x' }, KEY('rv4')))).status).toBe(409);
+
+    const ok = await t.POST(req('office', 'POST', `records/WORK/${created.id}/revise`, { expectedVersion: 2, reason: '数量訂正' }, KEY('rv5')));
+    expect(ok.status).toBe(200);
+    const rec = (await json(ok)).data as Record<string, unknown>;
+    expect(rec).toMatchObject({ status: 'DRAFT', version: 3, revisionNo: 2 });
+    // 同じ key は再生（副作用1回）
+    const replay = await t.POST(req('office', 'POST', `records/WORK/${created.id}/revise`, { expectedVersion: 2, reason: '数量訂正' }, KEY('rv5')));
+    expect(replay.headers.get('idempotent-replayed')).toBe('true');
+    const revs = await db.pool.query<{ revision_no: number; parent_revision_id: string | null; confirmed_at: Date | null; quantity: number }>(
+      'SELECT revision_no, parent_revision_id, confirmed_at, quantity FROM app.work_report_revisions WHERE report_id = $1 ORDER BY revision_no',
+      [created.id],
+    );
+    expect(revs.rows).toHaveLength(2);
+    expect(revs.rows[0]?.confirmed_at).not.toBeNull();
+    expect(revs.rows[1]?.confirmed_at).toBeNull();
+    expect(revs.rows[1]?.quantity).toBe(1600);
+    const audit = await one<{ reason: string }>(`SELECT reason FROM app.audit_events WHERE target_id = $1 AND action = 'WORK_REPORT_REVISE'`, [created.id]);
+    expect(audit.reason).toBe('数量訂正');
+
+    // 事務所が修正して確定 → 版2が確定（版1は不変）、outbox が1件増える
+    const detail = (await json(await W().item.GET(req('office', 'GET', `work-reports/${created.id}`)))).data as Record<string, unknown>;
+    const body = { ...work('field-a', { quantity: 1500 }), expectedVersion: 3 };
+    expect((await W().item.PATCH(req('office', 'PATCH', `work-reports/${created.id}`, body))).status).toBe(200);
+    expect(detail['revisionNo']).toBe(2);
+    expect((await W().confirm.POST(req('office', 'POST', `work-reports/${created.id}/confirm`, { expectedVersion: 4 }, KEY('rv-c2')))).status).toBe(202);
+    const after = (await json(await W().item.GET(req('office', 'GET', `work-reports/${created.id}`)))).data as Record<string, unknown>;
+    expect(after).toMatchObject({ status: 'CONFIRMED', revisionNo: 2, quantity: 1500 });
+    expect((await one<{ quantity: number }>('SELECT quantity FROM app.work_report_revisions WHERE report_id = $1 AND revision_no = 1', [created.id])).quantity).toBe(1600);
+    const events = await one<{ n: string }>(`SELECT count(*) n FROM app.outbox_events WHERE aggregate_id = $1 AND event_type = 'WorkReportConfirmed'`, [created.id]);
+    expect(Number(events.n)).toBe(2);
+  });
+
+  it('運搬 revise は明細・運搬回数・使用車両を複製する', async () => {
+    const d = await json(await D().col.POST(req('field-a', 'POST', 'delivery-reports', delivery({ tripCount: 3, vehicleId: m['car'] }))));
+    const id = d.data?.id as string;
+    await D().confirm.POST(req('field-a', 'POST', `delivery-reports/${id}/confirm`, { expectedVersion: 1 }, KEY('rvd-c')));
+    const r = await recordTransitionHandlers(deps).POST(req('office', 'POST', `records/DELIVERY/${id}/revise`, { expectedVersion: 2, reason: '品番追加' }, KEY('rvd')));
+    expect(r.status).toBe(200);
+    const detail = (await json(await D().item.GET(req('office', 'GET', `delivery-reports/${id}`)))).data as Record<string, unknown>;
+    expect(detail).toMatchObject({ status: 'DRAFT', revisionNo: 2, tripCount: 3, vehicleId: m['car'] });
+    expect((detail['items'] as unknown[]).length).toBe(2);
+  });
+
+  it('運搬費の後入力: OFFICE は確定後に入力・修正・未確定へ戻せる（版は作らない）。下書き・FIELD・範囲外は不可、監査あり', async () => {
+    const d = await json(await D().col.POST(req('field-a', 'POST', 'delivery-reports', delivery())));
+    const id = d.data?.id as string;
+    const fee = deliveryFeeHandlers(deps);
+    expect((await fee.POST(req('office', 'POST', `delivery-reports/${id}/fee`, { expectedVersion: 1, deliveryFeeYen: 2500 }))).status).toBe(409);
+    await D().confirm.POST(req('field-a', 'POST', `delivery-reports/${id}/confirm`, { expectedVersion: 1 }, KEY('fee-c')));
+    expect((await fee.POST(req('field-a', 'POST', `delivery-reports/${id}/fee`, { expectedVersion: 2, deliveryFeeYen: 2500 }))).status).toBe(403);
+    expect((await fee.POST(req('office', 'POST', `delivery-reports/${id}/fee`, { expectedVersion: 2, deliveryFeeYen: -1 }))).status).toBe(422);
+    expect((await fee.POST(req('office', 'POST', `delivery-reports/${id}/fee`, { expectedVersion: 2, deliveryFeeYen: 625, extra: 1 }))).status).toBe(422);
+    const ok = await fee.POST(req('office', 'POST', `delivery-reports/${id}/fee`, { expectedVersion: 2, deliveryFeeYen: 625 }));
+    expect(ok.status).toBe(200);
+    expect(((await json(ok)).data as Record<string, unknown>)['version']).toBe(3);
+    expect((await fee.POST(req('office', 'POST', `delivery-reports/${id}/fee`, { expectedVersion: 2, deliveryFeeYen: 700 }))).status).toBe(409);
+    expect((await fee.POST(req('office', 'POST', `delivery-reports/${id}/fee`, { expectedVersion: 3, deliveryFeeYen: null, reason: '金額確認中' }))).status).toBe(200);
+    const detail = (await json(await D().item.GET(req('office', 'GET', `delivery-reports/${id}`)))).data as Record<string, unknown>;
+    expect(detail).toMatchObject({ deliveryFeeYen: null, version: 4, revisionNo: 1, status: 'CONFIRMED' });
+    const audits = await db.pool.query<{ after_data: { deliveryFeeYen: number | null }; reason: string | null }>(
+      `SELECT after_data, reason FROM app.audit_events WHERE target_id = $1 AND action = 'DELIVERY_FEE_UPDATE' ORDER BY (before_data->>'version')::int`,
+      [id],
+    );
+    expect(audits.rows.map((a) => a.after_data.deliveryFeeYen)).toEqual([625, null]);
+    expect(audits.rows[1]?.reason).toBe('金額確認中');
   });
 });

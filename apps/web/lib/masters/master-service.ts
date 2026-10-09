@@ -301,6 +301,11 @@ async function computeImpact(
         ['workRevisions', `SELECT count(*)::text AS n FROM app.work_report_revisions WHERE product_id = $1`],
       ],
       workers: [['workRevisions', `SELECT count(*)::text AS n FROM app.work_report_workers WHERE worker_id = $1`]],
+      vehicles: [
+        ['workRevisions', `SELECT count(*)::text AS n FROM app.work_report_revisions WHERE vehicle_id = $1`],
+        ['deliveryRevisions', `SELECT count(*)::text AS n FROM app.delivery_report_revisions WHERE vehicle_id = $1`],
+      ],
+      'work-locations': [['workRevisions', `SELECT count(*)::text AS n FROM app.work_report_revisions WHERE work_location_id = $1`]],
       'work-types': [['rates', `SELECT count(*)::text AS n FROM app.rate_rules WHERE work_type_id = $1 AND active`]],
       defects: [['defectResults', `SELECT count(*)::text AS n FROM app.defect_results WHERE defect_type_id = $1`]],
       contacts: [['productLinks', `SELECT count(*)::text AS n FROM app.product_contacts WHERE contact_id = $1`]],

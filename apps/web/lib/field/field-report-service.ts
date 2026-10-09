@@ -10,6 +10,7 @@
  *                         → current_revision_id → CONFIRMED → outbox（WorkReportConfirmed / DeliveryReportConfirmed）
  *  - 参照（API-005/009）: owner か OFFICE/ADMIN/AUDITOR のみ。それ以外は存在を秘匿して 404
  *  - 報告者は本人のみ（SPEC-CONFLICT-G3-01: 代理入力は別CHG）
+ *  - CHG-004: 作業場所・使用車・備考（作業）、使用車両・運搬回数（運搬 revision）、運搬費（運搬 header、空欄可）
  */
 import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
@@ -64,6 +65,29 @@ export interface RecordSummary {
   readonly businessDate: string;
   readonly revisionNo: number;
 }
+
+/** CHG-004 D6: 報告一覧（事務所）の表示・絞込用の要約（提案書 P.6「日付・種別・客先・品番で絞り込み」） */
+export interface RecordListItem extends RecordSummary {
+  readonly customerId: string;
+  readonly productIds: string[];
+  readonly quantity: number;
+  readonly tripCount: number | null;
+  readonly deliveryFeeYen: number | null;
+}
+
+export interface RecordListQuery {
+  readonly page: number;
+  readonly pageSize: number;
+  readonly status: string | null;
+  readonly dateFrom: string | null;
+  readonly dateTo: string | null;
+  readonly type?: FieldReportType | null;
+  readonly customerId?: string | null;
+  readonly productId?: string | null;
+}
+
+/** 確定後修正（D3）を始められる状態。承認（Blind）を使わないため CONFIRMED/SUBMITTED も対象 */
+export const REVISABLE_STATUSES = ['CONFIRMED', 'SUBMITTED', 'REJECTED', 'REVOKED'] as const;
 
 interface HeaderRow {
   id: string;
@@ -187,6 +211,13 @@ async function validateWork(db: Queryable, input: WorkDraftInput, expectedReport
       issues.push({ path: `/defects/${i}/defectTypeId`, code: 'mismatch', message: '不良種別が選択した品番のものではありません。' });
     }
   });
+  // 任意項目は Zod で null に正規化済み。内部呼出（worker 試験等）で省略された場合も null と同じ扱い
+  if (input.workLocationId != null) {
+    checkActive(issues, (await rowsById(db, 'work_locations', [input.workLocationId])).get(input.workLocationId), '/workLocationId', '作業場所');
+  }
+  if (input.vehicleId != null) {
+    checkActive(issues, (await rowsById(db, 'vehicles', [input.vehicleId])).get(input.vehicleId), '/vehicleId', '使用車');
+  }
   issues.push(...validateWorkQuantities(input));
   const span = validateWorkSpan(input.workDate, new Date(input.startAt), new Date(input.endAt));
   if (!span.ok) issues.push(...span.issues);
@@ -208,6 +239,9 @@ async function validateDelivery(db: Queryable, input: DeliveryDraftInput): Promi
       issues.push({ path: `/items/${i}/productId`, code: 'mismatch', message: '品番が選択したお客様のものではありません。' });
     }
   });
+  if (input.vehicleId != null) {
+    checkActive(issues, (await rowsById(db, 'vehicles', [input.vehicleId])).get(input.vehicleId), '/vehicleId', '使用車両');
+  }
   issues.push(...validateDeliveryItems(input.items));
   if (issues.length > 0) throw invalid(issues);
 }
@@ -218,14 +252,15 @@ async function writeWorkRevision(client: PoolClient, revisionId: string, input: 
   const values = [
     input.workDate, input.reporterId, input.customerId, input.productId, input.workTypeId, input.lotNo,
     input.startAt, input.endAt, computed.breakMinutes, computed.regularMinutes, computed.overtimeMinutes,
-    computed.regularPersonMinutes, computed.overtimePersonMinutes, input.quantity,
+    computed.regularPersonMinutes, computed.overtimePersonMinutes, input.quantity, input.workLocationId ?? null, input.vehicleId ?? null, input.remarks ?? null,
   ];
   if (insert !== null) {
     await client.query(
       `INSERT INTO app.work_report_revisions
          (id, report_id, parent_revision_id, revision_no, work_date, reporter_id, customer_id, product_id, work_type_id, lot_no,
-          start_at, end_at, break_minutes, regular_minutes, overtime_minutes, regular_person_minutes, overtime_person_minutes, quantity)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+          start_at, end_at, break_minutes, regular_minutes, overtime_minutes, regular_person_minutes, overtime_person_minutes, quantity,
+          work_location_id, vehicle_id, remarks)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
       [revisionId, insert.reportId, insert.parentRevisionId, insert.revisionNo, ...values],
     );
   } else {
@@ -234,7 +269,8 @@ async function writeWorkRevision(client: PoolClient, revisionId: string, input: 
     await client.query(
       `UPDATE app.work_report_revisions SET work_date=$2, reporter_id=$3, customer_id=$4, product_id=$5, work_type_id=$6, lot_no=$7,
               start_at=$8, end_at=$9, break_minutes=$10, regular_minutes=$11, overtime_minutes=$12,
-              regular_person_minutes=$13, overtime_person_minutes=$14, quantity=$15
+              regular_person_minutes=$13, overtime_person_minutes=$14, quantity=$15,
+              work_location_id=$16, vehicle_id=$17, remarks=$18
         WHERE id = $1 AND confirmed_at IS NULL`,
       [revisionId, ...values],
     );
@@ -250,17 +286,20 @@ async function writeWorkRevision(client: PoolClient, revisionId: string, input: 
 async function writeDeliveryRevision(client: PoolClient, revisionId: string, input: DeliveryDraftInput, insert: { reportId: string; revisionNo: number; parentRevisionId: string | null } | null): Promise<void> {
   if (insert !== null) {
     await client.query(
-      `INSERT INTO app.delivery_report_revisions (id, report_id, parent_revision_id, revision_no, delivery_date, driver_id, customer_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-      [revisionId, insert.reportId, insert.parentRevisionId, insert.revisionNo, input.deliveryDate, input.driverId, input.customerId],
+      `INSERT INTO app.delivery_report_revisions (id, report_id, parent_revision_id, revision_no, delivery_date, driver_id, customer_id, vehicle_id, trip_count)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [revisionId, insert.reportId, insert.parentRevisionId, insert.revisionNo, input.deliveryDate, input.driverId, input.customerId, input.vehicleId ?? null, input.tripCount ?? 1],
     );
   } else {
     await client.query('DELETE FROM app.delivery_items WHERE delivery_revision_id = $1', [revisionId]);
     await client.query(
-      'UPDATE app.delivery_report_revisions SET delivery_date=$2, driver_id=$3, customer_id=$4 WHERE id = $1 AND confirmed_at IS NULL',
-      [revisionId, input.deliveryDate, input.driverId, input.customerId],
+      'UPDATE app.delivery_report_revisions SET delivery_date=$2, driver_id=$3, customer_id=$4, vehicle_id=$5, trip_count=$6 WHERE id = $1 AND confirmed_at IS NULL',
+      [revisionId, input.deliveryDate, input.driverId, input.customerId, input.vehicleId ?? null, input.tripCount ?? 1],
     );
   }
+  // 運搬費は header（D2: 運搬報告1件に1金額）
+  const report = insert?.reportId ?? (await client.query<{ report_id: string }>('SELECT report_id FROM app.delivery_report_revisions WHERE id = $1', [revisionId])).rows[0]?.report_id;
+  await client.query('UPDATE app.delivery_reports SET delivery_fee_yen = $2 WHERE id = $1', [report, input.deliveryFeeYen ?? null]);
   for (const it of input.items) {
     await client.query('INSERT INTO app.delivery_items (delivery_revision_id, product_id, quantity) VALUES ($1, $2, $3)', [revisionId, it.productId, it.quantity]);
   }
@@ -341,7 +380,18 @@ async function workDetail(db: Queryable, header: HeaderRow): Promise<Record<stri
     overtimeMinutes: rev['overtime_minutes'],
     regularPersonMinutes: rev['regular_person_minutes'],
     overtimePersonMinutes: rev['overtime_person_minutes'],
+    workLocationId: rev['work_location_id'] ?? null,
+    vehicleId: rev['vehicle_id'] ?? null,
+    remarks: rev['remarks'] ?? null,
   };
+}
+
+/** bigint（運搬費）→ 安全な整数（00契約: 金額は整数円。JS の安全範囲外は扱わない） */
+function yenOrNull(v: unknown): number | null {
+  if (v === null || v === undefined) return null;
+  const n = Number(v);
+  if (!Number.isSafeInteger(n)) throw new Error('unsafe integer in delivery_fee_yen');
+  return n;
 }
 
 async function deliveryDetail(db: Queryable, header: HeaderRow): Promise<Record<string, unknown>> {
@@ -370,6 +420,9 @@ async function deliveryDetail(db: Queryable, header: HeaderRow): Promise<Record<
     driverId: rev['driver_id'],
     customerId: rev['customer_id'],
     items: items.rows.map((i) => ({ productId: i.product_id, quantity: i.quantity, allocationEligible: i.allocation_eligible })),
+    vehicleId: rev['vehicle_id'] ?? null,
+    tripCount: rev['trip_count'],
+    deliveryFeeYen: yenOrNull((await db.query<{ delivery_fee_yen: string | null }>('SELECT delivery_fee_yen FROM app.delivery_reports WHERE id = $1', [header.id])).rows[0]?.delivery_fee_yen),
   };
 }
 
@@ -576,11 +629,9 @@ export class FieldReportService {
     });
   }
 
-  /** API-012: 業務日 DESC, id ASC。FIELD（全件参照ロール無し）は owner=本人のみ（CHG-002） */
-  async list(
-    actor: FieldActor,
-    q: { page: number; pageSize: number; status: string | null; dateFrom: string | null; dateTo: string | null },
-  ): Promise<{ data: RecordSummary[]; meta: { page: number; pageSize: number; total: number } }> {
+  /** API-012: 業務日 DESC, 作成日時 DESC, id ASC（CHG-004 D5: 同じ日は新しい登録が先）。FIELD（全件参照ロール無し）は owner=本人のみ（CHG-002）。
+   *  CHG-004 D6: 種別・お客様・品番の絞込と、一覧表示用の要約（お客様・品番・数量・運搬回数・運搬費） */
+  async list(actor: FieldActor, q: RecordListQuery): Promise<{ data: RecordListItem[]; meta: { page: number; pageSize: number; total: number } }> {
     const params: unknown[] = [];
     const where: string[] = [];
     if (!canReadAll(actor)) {
@@ -599,21 +650,42 @@ export class FieldReportService {
       params.push(q.dateTo);
       where.push(`business_date <= $${params.length}::date`);
     }
+    if (q.type !== undefined && q.type !== null) {
+      params.push(q.type);
+      where.push(`type = $${params.length}`);
+    }
+    if (q.customerId !== undefined && q.customerId !== null) {
+      params.push(q.customerId);
+      where.push(`customer_id = $${params.length}::uuid`);
+    }
+    if (q.productId !== undefined && q.productId !== null) {
+      params.push(q.productId);
+      where.push(`$${params.length}::uuid = ANY(product_ids)`);
+    }
     const union = `
-      SELECT h.id, h.report_no, h.status::text AS status, h.version, h.owner_id, 'WORK' AS type, r.work_date AS business_date, r.revision_no, d.status::text AS document_status
+      SELECT h.id, h.report_no, h.status::text AS status, h.version, h.owner_id, h.created_at, 'WORK' AS type, r.work_date AS business_date, r.revision_no,
+             d.status::text AS document_status, r.customer_id, ARRAY[r.product_id] AS product_ids, r.quantity::bigint AS quantity,
+             NULL::int AS trip_count, NULL::bigint AS delivery_fee_yen
         FROM app.work_reports h
-        JOIN LATERAL (SELECT id, work_date, revision_no FROM app.work_report_revisions WHERE report_id = h.id ORDER BY revision_no DESC LIMIT 1) r ON true
+        JOIN LATERAL (SELECT id, work_date, revision_no, customer_id, product_id, quantity FROM app.work_report_revisions WHERE report_id = h.id ORDER BY revision_no DESC LIMIT 1) r ON true
         LEFT JOIN LATERAL (SELECT status FROM app.document_jobs WHERE source_id = r.id ORDER BY created_at DESC, id DESC LIMIT 1) d ON true
       UNION ALL
-      SELECT h.id, h.report_no, h.status::text, h.version, h.owner_id, 'DELIVERY', r.delivery_date, r.revision_no, d.status::text
+      SELECT h.id, h.report_no, h.status::text, h.version, h.owner_id, h.created_at, 'DELIVERY', r.delivery_date, r.revision_no,
+             d.status::text, r.customer_id,
+             ARRAY(SELECT i.product_id FROM app.delivery_items i JOIN app.products p ON p.id = i.product_id WHERE i.delivery_revision_id = r.id ORDER BY p.code, p.id),
+             (SELECT COALESCE(sum(i.quantity), 0) FROM app.delivery_items i WHERE i.delivery_revision_id = r.id)::bigint,
+             r.trip_count, h.delivery_fee_yen
         FROM app.delivery_reports h
-        JOIN LATERAL (SELECT id, delivery_date, revision_no FROM app.delivery_report_revisions WHERE report_id = h.id ORDER BY revision_no DESC LIMIT 1) r ON true
+        JOIN LATERAL (SELECT id, delivery_date, revision_no, customer_id, trip_count FROM app.delivery_report_revisions WHERE report_id = h.id ORDER BY revision_no DESC LIMIT 1) r ON true
         LEFT JOIN LATERAL (SELECT status FROM app.document_jobs WHERE source_id = r.id ORDER BY created_at DESC, id DESC LIMIT 1) d ON true`;
     const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
     const total = await this.pool.query<{ n: string }>(`SELECT count(*) AS n FROM (${union}) x ${whereSql}`, params);
     params.push(q.pageSize, (q.page - 1) * q.pageSize);
-    const rows = await this.pool.query<{ id: string; report_no: string; status: string; version: number; type: FieldReportType; business_date: string; revision_no: number; document_status: string | null }>(
-      `SELECT * FROM (${union}) x ${whereSql} ORDER BY business_date DESC, id ASC LIMIT $${params.length - 1} OFFSET $${params.length}`,
+    const rows = await this.pool.query<{
+      id: string; report_no: string; status: string; version: number; type: FieldReportType; business_date: string; revision_no: number;
+      document_status: string | null; customer_id: string; product_ids: string[]; quantity: string; trip_count: number | null; delivery_fee_yen: string | null;
+    }>(
+      `SELECT * FROM (${union}) x ${whereSql} ORDER BY business_date DESC, created_at DESC, id ASC LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params,
     );
     return {
@@ -626,9 +698,113 @@ export class FieldReportService {
         type: r.type,
         businessDate: r.business_date,
         revisionNo: r.revision_no,
+        customerId: r.customer_id,
+        productIds: r.product_ids,
+        quantity: Number(r.quantity),
+        tripCount: r.trip_count,
+        deliveryFeeYen: yenOrNull(r.delivery_fee_yen),
       })),
       meta: { page: q.page, pageSize: q.pageSize, total: Number(total.rows[0]?.n ?? 0) },
     };
+  }
+
+  /**
+   * API-013 transitionRecord `revise`（CHG-004 D3: 確定後の事務所修正）。
+   * 確定版は残し、親 revision 付きの新しい下書き revision（内容は複製）を作る。以後は PATCH（API-006/010）で直し、
+   * confirm（API-007/011）で新しい版として確定 → 帳票も新しい版で作成される。理由必須・監査。
+   */
+  async revise(type: FieldReportType, id: string, cmd: { expectedVersion: number; reason: string }, ctx: FieldContext): Promise<RecordSummary> {
+    return withTransaction(this.pool, async (client) => {
+      const header = await lockHeader(client, type, id);
+      if (header === null) throw notFound(type);
+      if (header.version !== cmd.expectedVersion) {
+        throw new FieldError(409, 'VERSION_CONFLICT', '他の利用者により更新されています。再読込してください。', [], { currentVersion: header.version, changedFields: ['/status'] });
+      }
+      const latest = await latestRevision(client, type, id);
+      if (!(REVISABLE_STATUSES as readonly string[]).includes(header.status) || latest === null || latest.confirmed_at === null) {
+        throw stateConflict(header, '確定済みの報告だけを修正できます（下書き中の修正は、そのまま編集して確定してください）。');
+      }
+      const revisionId = randomUUID();
+      const revisionNo = latest.revision_no + 1;
+      const t = TABLES[type];
+      if (type === 'WORK') {
+        await client.query(
+          `INSERT INTO app.work_report_revisions
+             (id, report_id, parent_revision_id, revision_no, work_date, reporter_id, customer_id, product_id, work_type_id, lot_no,
+              start_at, end_at, break_minutes, regular_minutes, overtime_minutes, regular_person_minutes, overtime_person_minutes, quantity,
+              work_location_id, vehicle_id, remarks)
+           SELECT $1, report_id, id, $2, work_date, reporter_id, customer_id, product_id, work_type_id, lot_no,
+                  start_at, end_at, break_minutes, regular_minutes, overtime_minutes, regular_person_minutes, overtime_person_minutes, quantity,
+                  work_location_id, vehicle_id, remarks
+             FROM app.work_report_revisions WHERE id = $3`,
+          [revisionId, revisionNo, latest.id],
+        );
+        await client.query('INSERT INTO app.work_report_workers (revision_id, worker_id) SELECT $1, worker_id FROM app.work_report_workers WHERE revision_id = $2', [revisionId, latest.id]);
+        await client.query('INSERT INTO app.defect_results (revision_id, defect_type_id, quantity) SELECT $1, defect_type_id, quantity FROM app.defect_results WHERE revision_id = $2', [revisionId, latest.id]);
+      } else {
+        await client.query(
+          `INSERT INTO app.delivery_report_revisions (id, report_id, parent_revision_id, revision_no, delivery_date, driver_id, customer_id, vehicle_id, trip_count)
+           SELECT $1, report_id, id, $2, delivery_date, driver_id, customer_id, vehicle_id, trip_count FROM app.delivery_report_revisions WHERE id = $3`,
+          [revisionId, revisionNo, latest.id],
+        );
+        await client.query('INSERT INTO app.delivery_items (delivery_revision_id, product_id, quantity) SELECT $1, product_id, quantity FROM app.delivery_items WHERE delivery_revision_id = $2', [revisionId, latest.id]);
+      }
+      const r = await client.query<{ version: number }>(
+        `UPDATE app.${t.header} SET status = 'DRAFT', version = version + 1, updated_at = now() WHERE id = $1 RETURNING version`,
+        [id],
+      );
+      const version = r.rows[0]?.version as number;
+      await new PgAuditRepository(client).append({
+        actorId: ctx.actor.userId,
+        action: `${t.target}_REVISE`,
+        targetType: t.target,
+        targetId: id,
+        beforeData: { status: header.status, version: header.version, revisionId: latest.id, revisionNo: latest.revision_no },
+        afterData: { status: 'DRAFT', version, revisionId, revisionNo, parentRevisionId: latest.id },
+        reason: cmd.reason,
+        correlationId: ctx.correlationId,
+        occurredAt: ctx.now,
+      });
+      const date = await client.query<{ d: string }>(`SELECT ${t.dateColumn}::text AS d FROM app.${t.revision} WHERE id = $1`, [revisionId]);
+      return { id, reportNo: header.report_no, status: 'DRAFT', version, documentStatus: null, type, businessDate: date.rows[0]?.d as string, revisionNo };
+    });
+  }
+
+  /**
+   * CHG-004 D2: 運搬費（運搬報告1件に1金額）を事務所が後から入力・修正する。版は作らず header の version と監査で管理。
+   * 下書き中は PATCH（API-010）で扱う。請求確定済み（BILLING_LOCKED）は変更不可。
+   */
+  async setDeliveryFee(id: string, cmd: { expectedVersion: number; deliveryFeeYen: number | null; reason?: string | undefined }, ctx: FieldContext): Promise<RecordSummary> {
+    return withTransaction(this.pool, async (client) => {
+      const header = await lockHeader(client, 'DELIVERY', id);
+      if (header === null) throw notFound('DELIVERY');
+      const before = await client.query<{ delivery_fee_yen: string | null }>('SELECT delivery_fee_yen FROM app.delivery_reports WHERE id = $1', [id]);
+      if (header.version !== cmd.expectedVersion) {
+        throw new FieldError(409, 'VERSION_CONFLICT', '他の利用者により更新されています。再読込してください。', [], { currentVersion: header.version, changedFields: ['/deliveryFeeYen'] });
+      }
+      if (header.status === 'DRAFT' || header.status === 'BILLING_LOCKED') {
+        throw stateConflict(header, header.status === 'DRAFT' ? '下書きの運搬費は入力画面で変更してください。' : '請求確定済みのため変更できません。');
+      }
+      const r = await client.query<{ version: number }>(
+        'UPDATE app.delivery_reports SET delivery_fee_yen = $2, version = version + 1, updated_at = now() WHERE id = $1 RETURNING version',
+        [id, cmd.deliveryFeeYen],
+      );
+      const version = r.rows[0]?.version as number;
+      await new PgAuditRepository(client).append({
+        actorId: ctx.actor.userId,
+        action: 'DELIVERY_FEE_UPDATE',
+        targetType: TABLES.DELIVERY.target,
+        targetId: id,
+        beforeData: { deliveryFeeYen: yenOrNull(before.rows[0]?.delivery_fee_yen), version: header.version },
+        afterData: { deliveryFeeYen: cmd.deliveryFeeYen, version },
+        ...(cmd.reason !== undefined && cmd.reason.trim() !== '' ? { reason: cmd.reason.trim() } : {}),
+        correlationId: ctx.correlationId,
+        occurredAt: ctx.now,
+      });
+      const rev = await latestRevision(client, 'DELIVERY', id);
+      const date = await client.query<{ d: string }>('SELECT delivery_date::text AS d FROM app.delivery_report_revisions WHERE id = $1', [rev?.id]);
+      return { id, reportNo: header.report_no, status: header.status, version, documentStatus: null, type: 'DELIVERY', businessDate: date.rows[0]?.d as string, revisionNo: rev?.revision_no as number };
+    });
   }
 }
 
@@ -645,6 +821,9 @@ function detailToWorkInput(d: Record<string, unknown>): WorkDraftInput {
     endAt: d['endAt'] as string,
     quantity: d['quantity'] as number,
     defects: d['defects'] as Array<{ defectTypeId: string; quantity: number }>,
+    workLocationId: (d['workLocationId'] as string | null) ?? null,
+    vehicleId: (d['vehicleId'] as string | null) ?? null,
+    remarks: (d['remarks'] as string | null) ?? null,
   };
 }
 
@@ -654,17 +833,21 @@ function detailToDeliveryInput(d: Record<string, unknown>): DeliveryDraftInput {
     driverId: d['driverId'] as string,
     customerId: d['customerId'] as string,
     items: (d['items'] as Array<{ productId: string; quantity: number }>).map((i) => ({ productId: i.productId, quantity: i.quantity })),
+    vehicleId: (d['vehicleId'] as string | null) ?? null,
+    tripCount: d['tripCount'] as number,
+    deliveryFeeYen: (d['deliveryFeeYen'] as number | null) ?? null,
   };
 }
 
 /** audit 用（PII 最小化: ID・数値のみ） */
 function summarizeWork(d: Record<string, unknown>): Record<string, unknown> {
-  const keys = ['workDate', 'customerId', 'productId', 'workTypeId', 'workerIds', 'startAt', 'endAt', 'quantity', 'defects', 'lotNo', 'version'];
-  return Object.fromEntries(keys.filter((k) => k in d).map((k) => [k, d[k]]));
+  const keys = ['workDate', 'customerId', 'productId', 'workTypeId', 'workerIds', 'startAt', 'endAt', 'quantity', 'defects', 'lotNo', 'workLocationId', 'vehicleId', 'version'];
+  // 備考は自由記述のため本文を監査に残さず、有無だけ記録する
+  return { ...Object.fromEntries(keys.filter((k) => k in d).map((k) => [k, d[k]])), ...('remarks' in d ? { hasRemarks: d['remarks'] !== null } : {}) };
 }
 
 function summarizeDelivery(d: Record<string, unknown>): Record<string, unknown> {
-  const keys = ['deliveryDate', 'driverId', 'customerId', 'items', 'version'];
+  const keys = ['deliveryDate', 'driverId', 'customerId', 'items', 'vehicleId', 'tripCount', 'deliveryFeeYen', 'version'];
   return Object.fromEntries(
     keys
       .filter((k) => k in d)

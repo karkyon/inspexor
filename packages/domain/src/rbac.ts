@@ -72,6 +72,11 @@ export const OPERATION_POLICIES = {
   transitionInvoice: { apiId: 'API-023', method: 'POST', path: '/invoices/{id}/{action}', access: roles(['OFFICE', 'ADMIN']), idempotent: true },
   getDocument: { apiId: 'API-024', method: 'GET', path: '/documents/{id}', access: AUTHENTICATED, idempotent: false },
   documentAction: { apiId: 'API-025', method: 'POST', path: '/documents/{id}/{action}', access: roles(['OFFICE', 'ADMIN']), idempotent: true },
+  // CHG-004 D2: 運搬費の後入力（事務所）
+  setDeliveryFee: { apiId: 'API-026', method: 'POST', path: '/delivery-reports/{id}/fee', access: roles(['OFFICE', 'ADMIN']), idempotent: false },
+  // CHG-004 D4: 月次集計と Excel/CSV 出力（AUDITOR は download を含む参照可: 業務要件 §2）
+  getMonthlySummary: { apiId: 'API-027', method: 'GET', path: '/reports/monthly', access: roles(['OFFICE', 'ADMIN', 'AUDITOR']), idempotent: false },
+  exportMonthlySummary: { apiId: 'API-028', method: 'GET', path: '/reports/monthly/export', access: roles(['OFFICE', 'ADMIN', 'AUDITOR']), idempotent: false },
 } as const satisfies Record<string, OperationPolicy>;
 
 export type OperationId = keyof typeof OPERATION_POLICIES;

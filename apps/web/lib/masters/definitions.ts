@@ -1,5 +1,5 @@
 /**
- * マスタ10種の定義（CHG-001 / docs/spec/openapi.yaml の *Write schema ⇔ schema.sql+0001 migration の列）。
+ * マスタ10種＋2種（CHG-004: 車両・作業場所）の定義（CHG-001 / docs/spec/openapi.yaml の *Write schema ⇔ schema.sql+0001 migration の列）。
  * API項目名・型・必須・長さは openapi と一致させ、contract test（master-schema-contract.test.ts）で照合する。
  */
 import type { RetroactiveKind } from '@inspexor/domain';
@@ -15,6 +15,9 @@ export const MASTER_TYPES = [
   'rates',
   'transport-rules',
   'fixed-charges',
+  // CHG-004 D1（提案書: 作業場所・使用車は選択）
+  'vehicles',
+  'work-locations',
 ] as const;
 
 export type MasterType = (typeof MASTER_TYPES)[number];
@@ -245,6 +248,34 @@ export const MASTER_DEFS: Readonly<Record<MasterType, MasterDef>> = {
       { api: 'amountYen', column: 'amount_yen', kind: 'yen', required: true },
       { api: 'validFrom', column: 'valid_from', kind: 'date', required: true },
       { api: 'validTo', column: 'valid_to', kind: 'dateNullable', required: false },
+      active,
+    ],
+  },
+  vehicles: {
+    type: 'vehicles',
+    schemaName: 'VehicleWrite',
+    table: 'vehicles',
+    label: '車両',
+    orderBy: 'code ASC, id ASC',
+    retroactive: 'NONE',
+    uniqueField: 'code',
+    fields: [
+      { api: 'code', column: 'code', kind: 'code', required: true, max: 30 },
+      { api: 'name', column: 'name', kind: 'text', required: true, max: 100 },
+      active,
+    ],
+  },
+  'work-locations': {
+    type: 'work-locations',
+    schemaName: 'WorkLocationWrite',
+    table: 'work_locations',
+    label: '作業場所',
+    orderBy: 'code ASC, id ASC',
+    retroactive: 'NONE',
+    uniqueField: 'code',
+    fields: [
+      { api: 'code', column: 'code', kind: 'code', required: true, max: 30 },
+      { api: 'name', column: 'name', kind: 'text', required: true, max: 100 },
       active,
     ],
   },

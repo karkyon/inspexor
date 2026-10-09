@@ -64,7 +64,7 @@ async function one<T = { id: string }>(sql: string, params: unknown[] = []): Pro
 }
 
 function deps(renderer: PdfRenderer, sender: MailSender, templateDir?: string): WorkerDeps {
-  return { pool: db.pool, storage: new LocalFsStorage(storageDir), pdf: renderer, sender, now: () => clock, ...(templateDir ? { templateDir } : {}) };
+  return { pool: db.pool, storage: new LocalFsStorage(storageDir), pdf: renderer, sender, now: () => clock, dailyMailEnabled: true, ...(templateDir ? { templateDir } : {}) };
 }
 
 const ctx = () => ({ actor: { userId: fieldUser, roles: ['FIELD'] }, correlationId: '00000000-0000-4000-8000-000000000001', now: clock });
@@ -147,6 +147,22 @@ describe('G4: 帳票 job（T-DOC-001 placeholder 残存は先に検査）', () =
     expect(Number((await one<{ n: string }>(`SELECT count(*) n FROM app.outbox_events WHERE event_type='DocumentFailed' AND aggregate_id=$1`, [job.id])).n)).toBe(1);
     // この試験で registry に登録された改変版を消す（以降は正規の template を使う）
     await db.pool.query(`DELETE FROM app.template_versions`);
+  });
+});
+
+describe('CHG-004: 日報メール自動送信は既定で無効', () => {
+  it('dailyMailEnabled 未指定なら 帳票は生成・SUBMITTED、mail job は作らず送信 0 通', async () => {
+    const r = await confirmWork();
+    const sender = new FakeSender();
+    const { dailyMailEnabled: _on, ...rest } = deps(new FakeRenderer(), sender);
+    const result = await runOnce(rest);
+    expect(result.documents).toContain('generated');
+    expect(result.mails).toEqual([]);
+    const job = await jobFor(r.id, 'work');
+    expect(job.status).toBe('GENERATED');
+    expect((await one<{ status: string }>('SELECT status FROM app.work_reports WHERE id = $1', [r.id])).status).toBe('SUBMITTED');
+    expect(Number((await one<{ n: string }>('SELECT count(*) n FROM app.mail_jobs WHERE document_job_id = $1', [job.id])).n)).toBe(0);
+    expect(sender.sent.length).toBe(0);
   });
 });
 

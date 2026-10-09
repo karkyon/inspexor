@@ -2,11 +2,12 @@
 
 /**
  * SCR-03〜05 運搬 3 step（FR-002 / REQ-DLV-001）。1報告=1便（DEC-002）。
- * Step1 基本（運搬日・運転者・お客様）→ Step2 品番・数量（お客様の有効品番から選択、重複は1行）→ Step3 確認・確定。
+ * Step1 基本（運搬日・運転者・お客様・使用車両）→ Step2 品番・数量・運搬回数・運搬費（任意）→ Step3 確認・確定。
+ * CHG-004（提案書 P.7）: 運搬費は空欄で保存でき、事務所が後から入力・修正する。自動計算はしない。
  */
 import { useState, type FormEvent } from 'react';
 import type { FieldIssue } from '@inspexor/domain';
-import { buildDeliveryDraft, deliveryDetailToForm, emptyDeliveryForm, validateDeliveryStep, DELIVERY_STEPS, type DeliveryForm } from '../../lib/field/wizard';
+import { buildDeliveryDraft, deliveryDetailToForm, emptyDeliveryForm, feeOf, normalizeDeliveryForm, validateDeliveryStep, DELIVERY_STEPS, type DeliveryForm } from '../../lib/field/wizard';
 import { canCreateReports, useFieldUser } from './FieldShell';
 import { ErrorSummary, FieldError, StateBar, Stepper, issueFor } from './FieldParts';
 import { nameOf, useFieldMasters } from './useFieldMasters';
@@ -15,6 +16,11 @@ import { todayJst, useWizard } from './useWizard';
 import { ConflictBanner, DonePanel, NotAllowed } from './WizardCommon';
 
 const BASE = '/field/deliveries/new';
+
+function feeLabel(raw: string): string {
+  const fee = feeOf(raw);
+  return fee === null || fee === 'invalid' ? '未確定（事務所で入力）' : `${fee.toLocaleString('ja-JP')}円`;
+}
 
 export function DeliveryWizard() {
   const user = useFieldUser();
@@ -34,12 +40,13 @@ export function DeliveryWizard() {
     },
     apiSegment: 'delivery-reports',
     detailToForm: deliveryDetailToForm,
+    normalize: normalizeDeliveryForm,
   });
   const [issues, setIssues] = useState<FieldIssue[]>([]);
   const [checked, setChecked] = useState(false);
 
   if (!canCreateReports(user)) return <NotAllowed />;
-  if (w.done !== null) return <DonePanel kind="運搬実績" done={w.done} again={BASE} />;
+  if (w.done !== null) return <DonePanel type="DELIVERY" kind="運搬実績" done={w.done} again={BASE} />;
   if (!w.loaded || lookup === null || masters === null) {
     return <p className="fx-muted" aria-busy="true">{masterError ?? '読み込み中…'}</p>;
   }
@@ -59,7 +66,7 @@ export function DeliveryWizard() {
   function next(e: FormEvent): void {
     e.preventDefault();
     if (lookup === null) return;
-    const found = validateDeliveryStep(step, f, lookup).filter((i) => step === 1 || !['/deliveryDate', '/driverId', '/customerId'].includes(i.path));
+    const found = validateDeliveryStep(step, f, lookup).filter((i) => step === 1 || !['/deliveryDate', '/driverId', '/customerId', '/vehicleId'].includes(i.path));
     setIssues(found);
     if (found.length === 0) w.goStep(step + 1);
   }
@@ -144,6 +151,20 @@ export function DeliveryWizard() {
               <small id="h-customerId">選択したお客様の品番だけを次の画面に表示します。お客様を変えると選択済みの品番は外れます。</small>
               <FieldError id="e-customerId" issue={issueFor(allIssues, '/customerId')} />
             </div>
+            <div className="fx-field">
+              <label htmlFor="f-vehicleId">
+                使用車両<span className="fx-opt">任意</span>
+              </label>
+              <select id="f-vehicleId" value={f.vehicleId} onChange={(e) => w.setForm((p) => ({ ...p, vehicleId: e.target.value }))} aria-invalid={issueFor(allIssues, '/vehicleId') !== undefined || undefined} aria-describedby="e-vehicleId">
+                <option value="">選択しない</option>
+                {masters.vehicles.filter((x) => x.active).map((x) => (
+                  <option key={x.id} value={x.id}>
+                    {x.code} {x.name}
+                  </option>
+                ))}
+              </select>
+              <FieldError id="e-vehicleId" issue={issueFor(allIssues, '/vehicleId')} />
+            </div>
           </section>
           <footer className="fx-actions">
             <a className="fx-btn" href="/field">
@@ -222,6 +243,23 @@ export function DeliveryWizard() {
                 <b>{total.toLocaleString('ja-JP')}個</b>
               </div>
             </div>
+            <div className="fx-twocol">
+              <div className="fx-field">
+                <label htmlFor="f-tripCount">
+                  運搬回数（回）<span className="fx-req">必須</span>
+                </label>
+                <input id="f-tripCount" type="number" inputMode="numeric" min={1} max={99} value={f.tripCount} onChange={(e) => w.setForm((p) => ({ ...p, tripCount: e.target.value }))} aria-invalid={issueFor(allIssues, '/tripCount') !== undefined || undefined} aria-describedby="e-tripCount" />
+                <FieldError id="e-tripCount" issue={issueFor(allIssues, '/tripCount')} />
+              </div>
+              <div className="fx-field">
+                <label htmlFor="f-deliveryFeeYen">
+                  運搬費（円）<span className="fx-opt">任意・後入力可</span>
+                </label>
+                <input id="f-deliveryFeeYen" type="text" inputMode="numeric" placeholder="未確定なら空欄" value={f.deliveryFee} onChange={(e) => w.setForm((p) => ({ ...p, deliveryFee: e.target.value }))} aria-invalid={issueFor(allIssues, '/deliveryFeeYen') !== undefined || undefined} aria-describedby="h-deliveryFeeYen e-deliveryFeeYen" />
+                <small id="h-deliveryFeeYen">空欄のまま保存できます。金額は事務所で確認後に入力・修正します。</small>
+                <FieldError id="e-deliveryFeeYen" issue={issueFor(allIssues, '/deliveryFeeYen')} />
+              </div>
+            </div>
           </section>
           <footer className="fx-actions">
             <button type="button" className="fx-btn" onClick={() => w.goStep(1)}>
@@ -247,6 +285,12 @@ export function DeliveryWizard() {
                 <dd>{nameOf(masters.workers, f.driverId)}</dd>
                 <dt>お客様</dt>
                 <dd>{nameOf(masters.customers, f.customerId)}</dd>
+                <dt>使用車両</dt>
+                <dd>{f.vehicleId === '' ? '—' : nameOf(masters.vehicles, f.vehicleId)}</dd>
+                <dt>運搬回数</dt>
+                <dd>{f.tripCount}回</dd>
+                <dt>運搬費</dt>
+                <dd>{feeLabel(f.deliveryFee)}</dd>
               </dl>
               <table>
                 <thead>
@@ -271,7 +315,7 @@ export function DeliveryWizard() {
                   })}
                 </tbody>
               </table>
-              <p className="fx-note">運搬費は請求計算時に、品番ごとの運搬ルール（按分・便ごと等）に従って計上されます。</p>
+              <p className="fx-note">運搬費は自動計算しません。未確定の場合は事務所が後から入力・修正します。</p>
             </div>
             <label className="fx-confirmcheck" htmlFor="f-confirmCheck">
               <input id="f-confirmCheck" type="checkbox" checked={checked} onChange={(e) => setChecked(e.target.checked)} aria-describedby="e-confirmCheck" />

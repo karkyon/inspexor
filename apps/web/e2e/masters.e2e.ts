@@ -85,6 +85,25 @@ test.describe('G2-E2E: SCR-13 マスター管理', () => {
     await expect(page.getByRole('cell', { name: code, exact: true })).toBeVisible();
   });
 
+  test('CHG-004: メニューは提案書の範囲（車両・作業場所あり、請求・メール系なし）、車両を追加', async ({ page }) => {
+    const code = `0E2E-V${9_999_999_999_999 - Date.now()}`;
+    await login(page);
+    await page.goto('/admin/masters/products');
+    const nav = page.getByRole('navigation', { name: 'マスター種別' });
+    await expect(nav.getByRole('link', { name: /車両/ })).toBeVisible();
+    await expect(nav.getByRole('link', { name: /作業場所/ })).toBeVisible();
+    for (const hidden of [/単価ルール/, /運搬ルール/, /固定費/, /連絡先/]) await expect(nav.getByRole('link', { name: hidden })).toHaveCount(0);
+    await nav.getByRole('link', { name: /車両/ }).click();
+    await expect(page).toHaveURL(/\/admin\/masters\/vehicles$/);
+    await expect(page.getByRole('cell', { name: 'SYN-V01', exact: true })).toBeVisible();
+    await page.getByRole('link', { name: '＋ 車両を追加' }).click();
+    await page.getByLabel(/^コード/).fill(code);
+    await page.getByLabel('車両名').fill('E2E 車両');
+    await page.getByRole('button', { name: '登録する' }).click();
+    await expect(page).toHaveURL(/\/admin\/masters\/vehicles\?saved=created$/);
+    await expect(page.getByRole('cell', { name: code, exact: true })).toBeVisible();
+  });
+
   test('単価ルール: 影響を確認（遡及は警告表示・保存はしない）', async ({ page }) => {
     await login(page);
     await page.goto('/admin/masters/rates');

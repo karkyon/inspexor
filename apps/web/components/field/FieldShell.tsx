@@ -7,7 +7,7 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
 import { apiRequest, storeCsrfToken } from '../../lib/api/client';
-import { clearAllDrafts } from '../../lib/field/draft-store';
+import { clearAllDrafts, resumeDrafts } from '../../lib/field/draft-store';
 
 export interface FieldUser {
   readonly userId: string;
@@ -46,6 +46,7 @@ export function FieldShell({ children }: { readonly children: ReactNode }) {
         return;
       }
       storeCsrfToken(res.data.csrfToken);
+      resumeDrafts();
       setState({ status: res.data.roles.some((r) => FIELD_AREA_ROLES.includes(r)) ? 'ready' : 'forbidden', user: res.data });
     })();
     return () => {

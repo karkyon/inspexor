@@ -74,6 +74,14 @@ export function formatMinutes(minutes: number): string {
   return h > 0 ? `${h}時間${m > 0 ? `${m}分` : ''}` : `${m}分`;
 }
 
+/**
+ * CHG-004（提案書 SK-2026-08-MINI を正本化）: 日報メールの自動送信は対象外。
+ * 機能は残すが既定で無効（環境変数 DAILY_MAIL_ENABLED=true のときだけ動く。画面にも出さない）
+ */
+export function isDailyMailEnabled(value: string | undefined): boolean {
+  return value === 'true';
+}
+
 export const MAIL_MAX_TOTAL_BYTES = 20 * 1024 * 1024;
 export const MAIL_MAX_ATTACHMENTS = 2;
 

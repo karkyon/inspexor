@@ -9,6 +9,7 @@ import { apiRequest } from '../../lib/api/client';
 import { loadDraft } from '../../lib/field/draft-store';
 import { canCreateReports, useFieldUser } from './FieldShell';
 import { StateBar } from './FieldParts';
+import { PdfLinks } from './PdfLinks';
 import { useOnline } from './useOnline';
 import { statusLabel } from './WizardCommon';
 
@@ -152,6 +153,11 @@ export function FieldHome() {
                   <small className="fx-muted"> {documentLabel(r.status, r.documentStatus)}</small>
                 </span>
                 <time dateTime={r.businessDate}>{r.businessDate}</time>
+                {r.documentStatus === 'GENERATED' ? (
+                  <div className="fx-record-pdf">
+                    <PdfLinks type={r.type} id={r.id} />
+                  </div>
+                ) : null}
               </li>
             ))}
           </ul>

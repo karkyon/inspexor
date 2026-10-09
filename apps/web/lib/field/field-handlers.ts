@@ -13,7 +13,7 @@ import { beginIdempotentRequest, computeRequestHash } from '../idempotency/idemp
 import { PgIdempotencyRepository } from '../db/pg-idempotency-repository';
 import type { Pool } from 'pg';
 import { FieldError, type FieldContext, type FieldReportService, type FieldReportType } from './field-report-service';
-import { deliveryDraftSchema, deliveryUpdateSchema, fieldCommandSchema, workDraftSchema, workUpdateSchema } from './schemas';
+import { deliveryDraftSchema, deliveryFeeSchema, deliveryUpdateSchema, fieldCommandSchema, workDraftSchema, workUpdateSchema } from './schemas';
 
 const UUID_RE = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -126,6 +126,15 @@ function dateParam(params: URLSearchParams, key: string): string | null {
   return raw;
 }
 
+function uuidParam(params: URLSearchParams, key: string): string | null {
+  const raw = params.get(key);
+  if (raw === null) return null;
+  if (!UUID_RE.test(raw)) {
+    throw new RequestError(400, 'VALIDATION_ERROR', `${key} が不正です。`, [{ path: `/query/${key}`, code: 'format', message: 'uuid 形式です。' }]);
+  }
+  return raw.toLowerCase();
+}
+
 export function fieldCollectionHandlers(type: FieldReportType, deps: FieldRouteDeps) {
   return {
     POST: handler(type === 'WORK' ? 'createWorkReport' : 'createDeliveryReport', deps, async (ctx) => {
@@ -202,10 +211,14 @@ export function fieldConfirmHandlers(type: FieldReportType, deps: FieldRouteDeps
 export function recordListHandlers(deps: FieldRouteDeps) {
   return {
     GET: handler('listRecords', deps, async (ctx) => {
-      const q = rejectQuery(ctx.request, ['page', 'pageSize', 'status', 'dateFrom', 'dateTo']);
+      const q = rejectQuery(ctx.request, ['page', 'pageSize', 'status', 'dateFrom', 'dateTo', 'type', 'customerId', 'productId']);
       const status = q.get('status');
       if (status !== null && !RECORD_STATUSES.includes(status)) {
         throw new RequestError(400, 'VALIDATION_ERROR', 'status が不正です。', [{ path: '/query/status', code: 'enum', message: '未定義の状態です。' }]);
+      }
+      const type = q.get('type');
+      if (type !== null && type !== 'WORK' && type !== 'DELIVERY') {
+        throw new RequestError(400, 'VALIDATION_ERROR', 'type が不正です。', [{ path: '/query/type', code: 'enum', message: 'WORK / DELIVERY のいずれかです。' }]);
       }
       const result = await deps.service().list(ctxOf(ctx).actor, {
         page: intParam(q, 'page', 1, 1, 1_000_000),
@@ -213,8 +226,71 @@ export function recordListHandlers(deps: FieldRouteDeps) {
         status,
         dateFrom: dateParam(q, 'dateFrom'),
         dateTo: dateParam(q, 'dateTo'),
+        type,
+        customerId: uuidParam(q, 'customerId'),
+        productId: uuidParam(q, 'productId'),
       });
       return Response.json(result, { status: 200, headers: { 'x-correlation-id': ctx.correlationId } });
+    }),
+  };
+}
+
+/**
+ * API-013 transitionRecord（/records/{type}/{id}/{action}）。CHG-004: 承認（approve/reject/revoke）は対象外のため
+ * 未定義の操作（404）とし、revise（確定後の事務所修正 D3、理由必須）だけを扱う。Idempotency-Key で冪等（GAP-011）。
+ */
+export function recordTransitionHandlers(deps: FieldRouteDeps) {
+  return {
+    POST: handler('transitionRecord', deps, async (ctx) => {
+      rejectQuery(ctx.request, []);
+      const seg = new URL(ctx.request.url).pathname.split('/').filter((x) => x.length > 0);
+      const i = seg.indexOf('records');
+      const typeRaw = seg[i + 1] ?? '';
+      const id = seg[i + 2] ?? '';
+      const action = seg[i + 3] ?? '';
+      if ((typeRaw !== 'WORK' && typeRaw !== 'DELIVERY') || !UUID_RE.test(id)) {
+        throw new RequestError(404, 'VALIDATION_ERROR', '報告が見つかりません。', [{ path: '/id', code: 'not_found', message: '報告が見つかりません。' }]);
+      }
+      if (action !== 'revise') {
+        throw new RequestError(404, 'VALIDATION_ERROR', '未定義の操作です。', [{ path: '/action', code: 'enum', message: 'revise のみ利用できます。' }]);
+      }
+      const type = typeRaw as FieldReportType;
+      const raw = await readJson(ctx.request);
+      const cmd = parseBody(fieldCommandSchema, raw);
+      const reason = cmd.reason?.trim() ?? '';
+      if (reason === '') {
+        throw new RequestError(422, 'VALIDATION_ERROR', '修正理由を入力してください。', [{ path: '/reason', code: 'required', message: '確定済みの報告の修正は理由が必須です。' }]);
+      }
+      const field = ctxOf(ctx);
+      const route = `POST /records/${type}/${id.toLowerCase()}/revise`;
+      const repo = new PgIdempotencyRepository(deps.pool());
+      const begin = await beginIdempotentRequest(repo, { actorId: field.actor.userId, route, key: ctx.idempotencyKey as string }, computeRequestHash('POST', route, raw), ctx.now);
+      if (begin.kind === 'REPLAY') {
+        return Response.json(begin.responseBody, { status: begin.responseStatus, headers: { 'x-correlation-id': ctx.correlationId, 'idempotent-replayed': 'true' } });
+      }
+      if (begin.kind !== 'PROCEED') {
+        return errorResponse(409, 'IDEMPOTENCY_CONFLICT', begin.kind === 'IN_PROGRESS' ? '同じ操作を実行中です。' : '同じ Idempotency-Key で異なる内容が送信されました。', ctx.correlationId, { retryable: begin.kind === 'IN_PROGRESS' });
+      }
+      try {
+        const record = await deps.service().revise(type, id.toLowerCase(), { expectedVersion: cmd.expectedVersion, reason }, field);
+        await repo.complete(begin.recordId, 200, { data: record, meta: null });
+        return dataResponse(200, record, ctx.correlationId);
+      } catch (error) {
+        await repo.fail(begin.recordId).catch(() => undefined);
+        throw error;
+      }
+    }),
+  };
+}
+
+/** CHG-004 D2: POST /delivery-reports/{id}/fee（運搬費の後入力・修正。OFFICE/ADMIN） */
+export function deliveryFeeHandlers(deps: FieldRouteDeps) {
+  return {
+    POST: handler('setDeliveryFee', deps, async (ctx) => {
+      const id = pathId(ctx.request, 'DELIVERY');
+      rejectQuery(ctx.request, []);
+      const cmd = parseBody(deliveryFeeSchema, await readJson(ctx.request));
+      return dataResponse(200, await deps.service().setDeliveryFee(id, cmd, ctxOf(ctx)), ctx.correlationId);
     }),
   };
 }

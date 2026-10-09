@@ -5,11 +5,25 @@ const ALL = Object.keys(OPERATION_POLICIES) as OperationId[];
 const as = (...roles: RoleCode[]) => ({ roles });
 
 describe('rbac: API設計書 §6 認証/権限 準拠', () => {
-  it('25 operation（API-001〜025）を網羅し apiId が一意', () => {
-    expect(ALL).toHaveLength(25);
+  it('28 operation（API-001〜025＋CHG-004 API-026〜028）を網羅し apiId が一意', () => {
+    expect(ALL).toHaveLength(28);
     const ids = ALL.map((op) => OPERATION_POLICIES[op].apiId);
-    expect(new Set(ids).size).toBe(25);
-    expect([...ids].sort()).toEqual(Array.from({ length: 25 }, (_, i) => `API-${String(i + 1).padStart(3, '0')}`));
+    expect(new Set(ids).size).toBe(28);
+    expect([...ids].sort()).toEqual(Array.from({ length: 28 }, (_, i) => `API-${String(i + 1).padStart(3, '0')}`));
+  });
+
+  it('CHG-004: setDeliveryFee は OFFICE/ADMIN のみ', () => {
+    expect(authorizeOperation('setDeliveryFee', { roles: ['OFFICE'] }).ok).toBe(true);
+    expect(authorizeOperation('setDeliveryFee', { roles: ['ADMIN'] }).ok).toBe(true);
+    expect(authorizeOperation('setDeliveryFee', { roles: ['FIELD'] })).toEqual({ ok: false, errorCode: 'FORBIDDEN' });
+    expect(authorizeOperation('setDeliveryFee', { roles: ['AUDITOR'] })).toEqual({ ok: false, errorCode: 'FORBIDDEN' });
+  });
+
+  it('CHG-004: 月次集計・出力は OFFICE/ADMIN/AUDITOR、FIELD は不可', () => {
+    for (const op of ['getMonthlySummary', 'exportMonthlySummary'] as const) {
+      expect(authorizeOperation(op, { roles: ['AUDITOR'] }).ok).toBe(true);
+      expect(authorizeOperation(op, { roles: ['FIELD'] })).toEqual({ ok: false, errorCode: 'FORBIDDEN' });
+    }
   });
 
   it('PUBLIC（login）は未認証でも可', () => {

@@ -30,6 +30,13 @@ export function canEditMasters(user: AdminUser): boolean {
 
 const ADMIN_AREA_ROLES = ['OFFICE', 'ADMIN', 'AUDITOR'];
 
+/** CHG-004: 提案書 P.6 の事務所 Web 管理画面（報告一覧・月次集計・マスタ管理） */
+const NAV = [
+  { prefix: '/admin/records', href: '/admin/records', code: 'SCR-11', label: '報告一覧' },
+  { prefix: '/admin/monthly', href: '/admin/monthly', code: '集計', label: '月次集計' },
+  { prefix: '/admin/masters', href: '/admin/masters/products', code: 'SCR-13', label: 'マスター管理' },
+] as const;
+
 export function AdminShell({ children }: { readonly children: ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
@@ -72,10 +79,15 @@ export function AdminShell({ children }: { readonly children: ReactNode }) {
           </div>
         </div>
         <nav>
-          <a className={`ix-navitem${pathname.startsWith('/admin/masters') ? ' active' : ''}`} href="/admin/masters/products" aria-current={pathname.startsWith('/admin/masters') ? 'page' : undefined}>
-            <span>SCR-13</span>
-            <b>マスター管理</b>
-          </a>
+          {NAV.map((n) => {
+            const active = pathname.startsWith(n.prefix);
+            return (
+              <a key={n.prefix} className={`ix-navitem${active ? ' active' : ''}`} href={n.href} aria-current={active ? 'page' : undefined}>
+                <span>{n.code}</span>
+                <b>{n.label}</b>
+              </a>
+            );
+          })}
           <a className="ix-navitem" href="/">
             <span>HOME</span>
             <b>ホーム</b>
@@ -84,7 +96,7 @@ export function AdminShell({ children }: { readonly children: ReactNode }) {
       </aside>
       <div className="ix-content">
         <header className="ix-appbar">
-          <b>マスター管理</b>
+          <b>{NAV.find((n) => pathname.startsWith(n.prefix))?.label ?? '管理'}</b>
           <div className="ix-spacer" />
           {user !== null ? (
             <div className="ix-user">
@@ -108,7 +120,7 @@ export function AdminShell({ children }: { readonly children: ReactNode }) {
           ) : state.status === 'forbidden' ? (
             <section className="ix-panel" role="alert">
               <h1>この画面を表示する権限がありません</h1>
-              <p>マスター管理は事務・管理者・監査のロールで利用できます。</p>
+              <p>事務所の画面は事務・管理者・監査のロールで利用できます。</p>
               <a href="/">ホームへ戻る</a>
             </section>
           ) : (

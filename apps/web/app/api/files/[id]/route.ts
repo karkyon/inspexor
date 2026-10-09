@@ -1,6 +1,7 @@
 /**
  * 開発用 storage adapter の配信口（API-024 が発行する10分の署名付き URL の宛先。/api/health と同じく契約外の基盤 route）。
  * 本番（STORAGE_BUCKET 設定時）は Cloud Storage の署名 URL を使うため、この route は 404 を返す（G9）。
+ * `disposition=inline` を付けるとブラウザ内で表示（提案書: 日報PDFのプレビュー）。署名の対象外（表示方法のみ）。
  */
 import { readFile } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
@@ -32,11 +33,12 @@ export async function GET(request: Request, { params }: { params: { id: string }
     return deny(404);
   }
   const name = file.storage_key.split('/').pop() ?? 'document.pdf';
+  const disposition = url.searchParams.get('disposition') === 'inline' ? 'inline' : 'attachment';
   return new Response(new Uint8Array(bytes), {
     status: 200,
     headers: {
       'content-type': file.mime_type,
-      'content-disposition': `attachment; filename="document.pdf"; filename*=UTF-8''${encodeURIComponent(name)}`,
+      'content-disposition': `${disposition}; filename="document.pdf"; filename*=UTF-8''${encodeURIComponent(name)}`,
       'cache-control': 'private, no-store',
       'x-content-type-options': 'nosniff',
     },

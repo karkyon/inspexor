@@ -6,11 +6,13 @@
  *   MAIL_FROM           既定 inspexor-dev@example.invalid
  *   WORKER_POLL_MS      既定 2000
  *   CHROMIUM_PATH       任意（未指定なら Playwright の既定ブラウザ）
+ *   DAILY_MAIL_ENABLED  既定 false（CHG-004: 日報メール自動送信は提案書の対象外。true のときだけ送る）
  */
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { ChromiumPdfRenderer } from './adapters/chromium-pdf';
 import { LocalFsStorage } from './adapters/local-fs-storage';
+import { isDailyMailEnabled } from '@inspexor/domain';
 import { MailpitMailSender } from './adapters/mailpit-mail';
 import { createPool } from './db';
 import { runOnce } from './worker';
@@ -34,6 +36,7 @@ const deps = {
   storage: new LocalFsStorage(process.env['STORAGE_DIR'] ?? join(homedir(), '.inspexor-storage')),
   sender: new MailpitMailSender(process.env['MAILPIT_URL'] ?? 'http://127.0.0.1:8025', process.env['MAIL_FROM'] ?? 'inspexor-dev@example.invalid'),
   now: () => new Date(),
+  dailyMailEnabled: isDailyMailEnabled(process.env['DAILY_MAIL_ENABLED']),
 };
 const interval = Number(process.env['WORKER_POLL_MS'] ?? '2000');
 let stopping = false;

@@ -4,22 +4,30 @@
  */
 import { MASTER_DEFS, type FieldDef, type MasterDef, type MasterType } from './definitions';
 
-export const MASTER_NAV: ReadonlyArray<{ type: MasterType; label: string }> = [
-  { type: 'customers', label: 'お客様' },
-  { type: 'contacts', label: '連絡先' },
-  { type: 'products', label: '品番' },
-  { type: 'work-types', label: '作業内容' },
-  { type: 'defects', label: '不良種別' },
-  { type: 'workers', label: '作業者' },
-  { type: 'holidays', label: '休日' },
-  { type: 'rates', label: '単価ルール' },
-  { type: 'transport-rules', label: '運搬ルール' },
-  { type: 'fixed-charges', label: '固定費' },
-];
+/**
+ * CHG-004: 提案書「マスタ管理（簡易）: 客先・品番・作業者・不良項目」＋作業場所・車両（D1）を表示する。
+ * 連絡先（日報メール）・単価/運搬/固定費ルール（請求）は対象外のため一覧に出さない（Blind。URL 直指定・API は従来どおり）。
+ */
+export const ALL_MASTER_LABELS: Readonly<Record<MasterType, string>> = {
+  customers: 'お客様',
+  contacts: '連絡先',
+  products: '品番',
+  'work-types': '作業内容',
+  defects: '不良種別',
+  workers: '作業者',
+  'work-locations': '作業場所',
+  vehicles: '車両',
+  holidays: '休日',
+  rates: '単価ルール',
+  'transport-rules': '運搬ルール',
+  'fixed-charges': '固定費',
+};
 
-export const NAV_LABEL: Readonly<Record<MasterType, string>> = Object.fromEntries(
-  MASTER_NAV.map((n) => [n.type, n.label]),
-) as Record<MasterType, string>;
+const VISIBLE_MASTERS: readonly MasterType[] = ['customers', 'products', 'work-types', 'defects', 'workers', 'work-locations', 'vehicles', 'holidays'];
+
+export const MASTER_NAV: ReadonlyArray<{ type: MasterType; label: string }> = VISIBLE_MASTERS.map((type) => ({ type, label: ALL_MASTER_LABELS[type] }));
+
+export const NAV_LABEL: Readonly<Record<MasterType, string>> = ALL_MASTER_LABELS;
 
 export const FIELD_LABELS: Readonly<Record<string, string>> = {
   code: 'コード',
@@ -65,9 +73,11 @@ export const LIST_COLUMNS: Readonly<Record<MasterType, readonly string[]>> = {
   rates: ['productId', 'workTypeId', 'unitPrice', 'overtimeMultiplier', 'validFrom', 'validTo'],
   'transport-rules': ['productId', 'transportType', 'amountYen', 'allocationGroup', 'validFrom', 'validTo'],
   'fixed-charges': ['productId', 'label', 'amountYen', 'validFrom', 'validTo'],
+  vehicles: ['code', 'name'],
+  'work-locations': ['code', 'name'],
 };
 
-export const NAME_LABEL_OVERRIDE: Partial<Record<MasterType, string>> = { products: '品名', 'work-types': '作業内容名', defects: '不良名', workers: '氏名', contacts: '氏名' };
+export const NAME_LABEL_OVERRIDE: Partial<Record<MasterType, string>> = { products: '品名', 'work-types': '作業内容名', defects: '不良名', workers: '氏名', contacts: '氏名', vehicles: '車両名', 'work-locations': '作業場所名' };
 
 export function fieldLabel(type: MasterType, api: string): string {
   if (api === 'name' && NAME_LABEL_OVERRIDE[type] !== undefined) return NAME_LABEL_OVERRIDE[type] as string;

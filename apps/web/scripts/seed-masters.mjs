@@ -68,13 +68,21 @@ try {
   for (const [d, name] of [['2026-01-01', '合成休日（元日）'], ['2026-05-04', '合成休日'], ['2026-11-03', '合成休日']]) {
     await c.query(`INSERT INTO app.holidays(holiday_date,name) VALUES ($1,$2) ON CONFLICT (holiday_date) DO NOTHING`, [d, name]);
   }
+  // CHG-004 D1: 車両・作業場所（合成値。実運用値は EXT-02 で置換）
+  for (const [code, name] of [['SYN-V01', '合成車両キャンター'], ['SYN-V02', '合成車両キャラバン']]) {
+    await c.query(`INSERT INTO app.vehicles(code,name) VALUES ($1,$2) ON CONFLICT (code) DO NOTHING`, [code, name]);
+  }
+  for (const [code, name] of [['SYN-L01', '合成作業場（自社）'], ['SYN-L02', '合成作業場（客先常駐）']]) {
+    await c.query(`INSERT INTO app.work_locations(code,name) VALUES ($1,$2) ON CONFLICT (code) DO NOTHING`, [code, name]);
+  }
   await c.query('COMMIT');
   const counts = await c.query(`SELECT
     (SELECT count(*) FROM app.customers) customers, (SELECT count(*) FROM app.products) products,
     (SELECT count(*) FROM app.work_types) work_types, (SELECT count(*) FROM app.defect_types) defects,
     (SELECT count(*) FROM app.rate_rules) rates, (SELECT count(*) FROM app.transport_rules) transport,
     (SELECT count(*) FROM app.workers) workers, (SELECT count(*) FROM app.customer_contacts) contacts,
-    (SELECT count(*) FROM app.holidays) holidays`);
+    (SELECT count(*) FROM app.holidays) holidays, (SELECT count(*) FROM app.vehicles) vehicles,
+    (SELECT count(*) FROM app.work_locations) work_locations`);
   console.log('seed 完了:', counts.rows[0]);
 } catch (error) {
   await c.query('ROLLBACK').catch(() => {});

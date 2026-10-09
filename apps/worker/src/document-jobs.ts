@@ -2,7 +2,7 @@
  * 帳票 job（FR-005 / REQ-DOC-001 / CHG-003）:
  *   revision snapshot → template（version 固定・registry の sha256 照合）→ placeholder 置換 → 未置換検査
  *   → PDF（Chromium）→ 20MB 検査 → storage → 読み戻し hash 照合 → files / GENERATED（＋CONFIRMED→SUBMITTED）
- *   → 日報は mail job（宛先 snapshot）。失敗は retry（network/5xx 相当）か FAILED_FINAL。record は失敗でも保持。
+ *   → 日報は mail job（宛先 snapshot。CHG-004 により dailyMailEnabled=true のときだけ）。失敗は retry（network/5xx 相当）か FAILED_FINAL。record は失敗でも保持。
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { decideRetry, documentFileName, findUnresolvedPlaceholders, MAIL_MAX_TOTAL_BYTES, renderTemplate, type TemplateType } from '@inspexor/domain';
@@ -18,6 +18,8 @@ export interface DocumentDeps {
   readonly pdf: PdfRenderer;
   readonly now: () => Date;
   readonly templateDir?: string;
+  /** CHG-004: 日報メールの自動送信（既定 false = 送らない） */
+  readonly dailyMailEnabled?: boolean;
 }
 
 interface JobRow {
@@ -144,7 +146,7 @@ export async function processOneDocumentJob(deps: DocumentDeps): Promise<'none' 
       });
       await submitRecord(client, job, snapshot, now);
       // 日報メールは自動生成分のみ（手動再生成は送らない。送る場合は documentAction send）
-      if (snapshot.mail !== null && job.idempotency_key.endsWith(':auto')) {
+      if (deps.dailyMailEnabled === true && snapshot.mail !== null && job.idempotency_key.endsWith(':auto')) {
         await createDailyMailJob(client, { documentJobId: job.id, snapshot, fileName, sendRevision: 1, reason: null }, now);
       }
     });

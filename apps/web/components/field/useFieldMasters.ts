@@ -28,9 +28,20 @@ export interface FieldMasters {
   readonly defects: readonly MasterRow[];
   readonly workers: readonly MasterRow[];
   readonly holidays: readonly MasterRow[];
+  readonly vehicles: readonly MasterRow[];
+  readonly workLocations: readonly MasterRow[];
 }
 
-const TYPES = { customers: 'customers', products: 'products', workTypes: 'work-types', defects: 'defects', workers: 'workers', holidays: 'holidays' } as const;
+const TYPES = {
+  customers: 'customers',
+  products: 'products',
+  workTypes: 'work-types',
+  defects: 'defects',
+  workers: 'workers',
+  holidays: 'holidays',
+  vehicles: 'vehicles',
+  workLocations: 'work-locations',
+} as const;
 
 async function loadAll(type: string): Promise<MasterRow[] | null> {
   const rows: MasterRow[] = [];
@@ -73,7 +84,11 @@ export function useFieldMasters(online: boolean) {
     const workTypes = active(masters.workTypes);
     const workers = active(masters.workers);
     const defects = active(masters.defects);
+    const vehicles = active(masters.vehicles);
+    const workLocations = active(masters.workLocations);
     return {
+      vehicle: (id) => vehicles.has(id),
+      workLocation: (id) => workLocations.has(id),
       activeCustomer: (id) => customers.has(id),
       product: (id) => {
         const p = products.get(id);

@@ -4,10 +4,11 @@
  * SCR-06〜09 作業日報 5 step（FR-003 / REQ-WRK-001）。
  * 顧客 → 品番・作業 → 人員・時間（工数を即時計算） → 数量・不良 → 確認・確定。
  * 報告者は本人のみ（SPEC-CONFLICT-G3-01: 代理入力は別CHG）。
+ * CHG-004（提案書 P.8/P.9）: Step1 に作業場所、Step2 に使用車（任意）、Step4 に備考。
  */
 import { useMemo, useState, type FormEvent } from 'react';
 import { computeBusinessTime, jstToInstant, toJstParts, validateWorkSpan, type FieldIssue } from '@inspexor/domain';
-import { buildWorkDraft, emptyWorkForm, validateWorkStep, workDetailToForm, WORK_STEPS, type WorkForm } from '../../lib/field/wizard';
+import { buildWorkDraft, emptyWorkForm, normalizeWorkForm, validateWorkStep, workDetailToForm, REMARKS_MAX, WORK_STEPS, type WorkForm } from '../../lib/field/wizard';
 import { canCreateReports, useFieldUser } from './FieldShell';
 import { ErrorSummary, FieldError, StateBar, Stepper, issueFor } from './FieldParts';
 import { nameOf, useFieldMasters, type FieldMasters } from './useFieldMasters';
@@ -18,10 +19,10 @@ import { ConflictBanner, DonePanel, NotAllowed } from './WizardCommon';
 const BASE = '/field/work-reports/new';
 const TITLES = ['日付・報告者・お客様', '品番・作業内容', '作業者・作業時間', '数量・不良', '登録内容を確認'];
 const STEP_PATHS: Record<number, string[]> = {
-  1: ['/workDate', '/customerId', '/reporterId'],
-  2: ['/productId', '/workTypeId', '/lotNo'],
+  1: ['/workDate', '/customerId', '/reporterId', '/workLocationId'],
+  2: ['/productId', '/workTypeId', '/lotNo', '/vehicleId'],
   3: ['/workerIds', '/startAt', '/endAt'],
-  4: ['/quantity', '/defects'],
+  4: ['/quantity', '/defects', '/remarks'],
 };
 
 function personHours(minutes: number): string {
@@ -63,13 +64,14 @@ export function WorkWizard() {
     },
     apiSegment: 'work-reports',
     detailToForm: (d) => workDetailToForm(d, (iso) => toJstParts(new Date(iso))),
+    normalize: normalizeWorkForm,
   });
   const [issues, setIssues] = useState<FieldIssue[]>([]);
   const [checked, setChecked] = useState(false);
   const calc = useTimeCalc(w.form, masters);
 
   if (!canCreateReports(user)) return <NotAllowed />;
-  if (w.done !== null) return <DonePanel kind="作業日報" done={w.done} again={BASE} />;
+  if (w.done !== null) return <DonePanel type="WORK" kind="作業日報" done={w.done} again={BASE} />;
   if (!w.loaded || lookup === null || masters === null) {
     return <p className="fx-muted" aria-busy="true">{masterError ?? '読み込み中…'}</p>;
   }
@@ -168,8 +170,8 @@ export function WorkWizard() {
             </div>
             <div className="fx-field">
               <label htmlFor="f-reporterId">報告者</label>
-              <input id="f-reporterId" readOnly value={`${user.displayName}（本人）`} aria-describedby="h-reporter e-reporterId" />
-              <small id="h-reporter">代理入力は現在対応していません。</small>
+              <input id="f-reporterId" readOnly value={f.reporterId === user.userId ? `${user.displayName}（本人）` : '元の報告者（事務所で修正中）'} aria-describedby="h-reporter e-reporterId" />
+              <small id="h-reporter">{f.reporterId === user.userId ? '代理入力は現在対応していません。' : '確定済み報告の修正では報告者は変わりません。'}</small>
               <FieldError id="e-reporterId" issue={issueFor(allIssues, '/reporterId')} />
             </div>
             <div className="fx-field">
@@ -193,6 +195,20 @@ export function WorkWizard() {
                 ))}
               </select>
               <FieldError id="e-customerId" issue={issueFor(allIssues, '/customerId')} />
+            </div>
+            <div className="fx-field">
+              <label htmlFor="f-workLocationId">
+                作業場所<span className="fx-opt">任意</span>
+              </label>
+              <select id="f-workLocationId" value={f.workLocationId} onChange={(e) => w.setForm((p) => ({ ...p, workLocationId: e.target.value }))} aria-invalid={invalid('/workLocationId')} aria-describedby="e-workLocationId">
+                <option value="">選択しない</option>
+                {masters.workLocations.filter((x) => x.active).map((x) => (
+                  <option key={x.id} value={x.id}>
+                    {x.code} {x.name}
+                  </option>
+                ))}
+              </select>
+              <FieldError id="e-workLocationId" issue={issueFor(allIssues, '/workLocationId')} />
             </div>
           </section>
           {actions(null, '次へ進む →')}
@@ -246,6 +262,20 @@ export function WorkWizard() {
               <input id="f-lotNo" type="text" maxLength={100} value={f.lotNo} onChange={(e) => w.setForm((p) => ({ ...p, lotNo: e.target.value }))} aria-invalid={invalid('/lotNo')} aria-describedby="e-lotNo h-lotNo" />
               <small id="h-lotNo">{product?.lotRequired === true ? 'この品番では入力必須です。' : '複数ロットはカンマ区切りで入力できます。'}</small>
               <FieldError id="e-lotNo" issue={issueFor(allIssues, '/lotNo')} />
+            </div>
+            <div className="fx-field">
+              <label htmlFor="f-vehicleId">
+                使用車<span className="fx-opt">任意</span>
+              </label>
+              <select id="f-vehicleId" value={f.vehicleId} onChange={(e) => w.setForm((p) => ({ ...p, vehicleId: e.target.value }))} aria-invalid={invalid('/vehicleId')} aria-describedby="e-vehicleId">
+                <option value="">選択しない</option>
+                {masters.vehicles.filter((x) => x.active).map((x) => (
+                  <option key={x.id} value={x.id}>
+                    {x.code} {x.name}
+                  </option>
+                ))}
+              </select>
+              <FieldError id="e-vehicleId" issue={issueFor(allIssues, '/vehicleId')} />
             </div>
           </section>
           {actions(1, '次へ進む →')}
@@ -305,7 +335,7 @@ export function WorkWizard() {
               <div>
                 <span>割増工数</span>
                 <b>{calc === null ? '—' : `${personHours(calc.overtimePersonMinutes)}人時`}</b>
-                <small>{calc?.isHoliday === true ? '休日のため全時間が割増対象' : '17:00以降・土日祝 ×1.25'}</small>
+                <small>{calc?.isHoliday === true ? '休日のため全時間が時間外' : '17:00以降・土日祝の時間'}</small>
               </div>
             </div>
           </section>
@@ -358,6 +388,14 @@ export function WorkWizard() {
               })}
             </fieldset>
             <FieldError id="e-defects" issue={allIssues.find((i) => i.path === '/defects')} />
+            <div className="fx-field">
+              <label htmlFor="f-remarks">
+                備考<span className="fx-opt">任意</span>
+              </label>
+              <textarea id="f-remarks" rows={3} maxLength={REMARKS_MAX} value={f.remarks} onChange={(e) => w.setForm((p) => ({ ...p, remarks: e.target.value }))} aria-invalid={invalid('/remarks')} aria-describedby="h-remarks e-remarks" />
+              <small id="h-remarks">{REMARKS_MAX}文字まで（例: 特記事項なし）</small>
+              <FieldError id="e-remarks" issue={issueFor(allIssues, '/remarks')} />
+            </div>
             <div className="fx-finalsummary" aria-live="polite">
               <div>
                 <small>通常</small>
@@ -393,15 +431,19 @@ export function WorkWizard() {
                 <dt>作業日</dt>
                 <dd>{f.workDate}</dd>
                 <dt>報告者</dt>
-                <dd>{user.displayName}（本人）</dd>
+                <dd>{f.reporterId === user.userId ? `${user.displayName}（本人）` : '元の報告者（事務所で修正中）'}</dd>
                 <dt>お客様</dt>
                 <dd>{nameOf(masters.customers, f.customerId)}</dd>
+                <dt>作業場所</dt>
+                <dd>{f.workLocationId === '' ? '—' : nameOf(masters.workLocations, f.workLocationId)}</dd>
                 <dt>品番 / 品名</dt>
                 <dd>{nameOf(masters.products, f.productId)}</dd>
                 <dt>作業内容</dt>
                 <dd>{nameOf(masters.workTypes, f.workTypeId)}</dd>
                 <dt>ロット</dt>
                 <dd>{f.lotNo.trim() === '' ? '—' : f.lotNo.trim()}</dd>
+                <dt>使用車</dt>
+                <dd>{f.vehicleId === '' ? '—' : nameOf(masters.vehicles, f.vehicleId)}</dd>
                 <dt>作業者</dt>
                 <dd>{f.workerIds.map((id) => nameOf(masters.workers, id)).join('、')}</dd>
                 <dt>時間</dt>
@@ -413,6 +455,8 @@ export function WorkWizard() {
                 <dd>
                   {quantity.toLocaleString('ja-JP')}個 / {defectTotal.toLocaleString('ja-JP')}個（{rate}%）
                 </dd>
+                <dt>備考</dt>
+                <dd className="fx-prewrap">{f.remarks.trim() === '' ? '—' : f.remarks.trim()}</dd>
               </dl>
               <p className="fx-note">工数は確定時にサーバーで再計算されます（休日マスタを含む）。確定後の内容は変更できません。</p>
             </div>

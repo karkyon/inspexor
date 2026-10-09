@@ -63,9 +63,17 @@ export function HomeClient() {
           </p>
         ) : null}
         {view.user.roles.some((r) => ADMIN_AREA_ROLES.includes(r)) ? (
-          <p>
-            <a href="/admin/masters/products">マスター管理へ</a>
-          </p>
+          <>
+            <p>
+              <a href="/admin/records">報告一覧へ（事務所）</a>
+            </p>
+            <p>
+              <a href="/admin/monthly">月次集計へ</a>
+            </p>
+            <p>
+              <a href="/admin/masters/products">マスター管理へ</a>
+            </p>
+          </>
         ) : null}
         <LogoutButton onLoggedOut={() => setView({ status: 'unauthenticated' })} />
       </div>

@@ -1,6 +1,8 @@
 'use client';
 
 import type { ApiError } from '../../lib/api/client';
+import { useFieldUser } from './FieldShell';
+import { PdfLinks } from './PdfLinks';
 import type { Done } from './useWizard';
 
 const STATUS_LABEL: Record<string, string> = {
@@ -55,17 +57,25 @@ export function ConflictBanner({ error, onReload, onDiscard }: { error: ApiError
   );
 }
 
-export function DonePanel({ kind, done, again }: { kind: string; done: Done; again: string }) {
+export function DonePanel({ kind, type, done, again }: { kind: string; type: 'WORK' | 'DELIVERY'; done: Done; again: string }) {
+  const user = useFieldUser();
+  const office = user.roles.includes('OFFICE');
   return (
     <section className="fx-done" role="status" aria-live="polite">
       <h1>{kind}を登録しました</h1>
       <p>
         報告番号 <b>{done.reportNo}</b>（状態: {statusLabel(done.status)}）。帳票PDFは自動で作成され、作成後に「提出済」になります。
       </p>
+      <PdfLinks type={type} id={done.id} auto />
       <div className="fx-actions" style={{ position: 'static', background: 'transparent', border: 0, padding: 0 }}>
         <a className="fx-btn" href="/field">
           現場ホームへ
         </a>
+        {office ? (
+          <a className="fx-btn" href={`/admin/records/${type === 'WORK' ? 'work' : 'delivery'}/${done.id}`}>
+            事務所の詳細画面へ
+          </a>
+        ) : null}
         <a className="fx-btn primary" href={`${again}?step=1`}>
           続けて登録する
         </a>

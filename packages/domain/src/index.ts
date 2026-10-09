@@ -13,3 +13,4 @@ export * from './rbac';
 export * from './master-retroactive';
 export * from './field-report';
 export * from './documents';
+export * from './monthly-summary';

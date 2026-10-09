@@ -27,6 +27,25 @@ const expectedVersion = () => z.number().int().min(1);
 
 export const defectSchema = z.object({ defectTypeId: uuid(), quantity: z.number().int().min(0) }).strict();
 
+const nullableUuid = () =>
+  uuid()
+    .nullable()
+    .optional()
+    .transform((v) => v ?? null);
+
+/** 文字列は trim、空文字は null（備考） */
+const nullableText = (max: number) =>
+  z
+    .string()
+    .max(max)
+    .nullable()
+    .optional()
+    .transform((v) => {
+      if (v === undefined || v === null) return null;
+      const t = v.trim();
+      return t === '' ? null : t;
+    });
+
 const workShape = {
   workDate: date(),
   reporterId: uuid(),
@@ -52,6 +71,10 @@ const workShape = {
   endAt: dateTime(),
   quantity: z.number().int().min(0),
   defects: z.array(defectSchema),
+  // CHG-004 D1: 提案書 P.5/P.8（作業場所・使用車は選択、備考は Step4）。任意
+  workLocationId: nullableUuid(),
+  vehicleId: nullableUuid(),
+  remarks: nullableText(500),
 };
 
 export const workDraftSchema = z.object(workShape).strict();
@@ -64,6 +87,23 @@ const deliveryShape = {
   driverId: uuid(),
   customerId: uuid(),
   items: z.array(deliveryItemSchema).min(1),
+  // CHG-004 D1/D2: 提案書 P.7（使用車両・運搬回数・運搬費は任意＝空欄で保存可）
+  vehicleId: nullableUuid(),
+  tripCount: z
+    .number()
+    .int()
+    .min(1)
+    .max(99)
+    .optional()
+    .transform((v) => v ?? 1),
+  deliveryFeeYen: z
+    .number()
+    .int()
+    .min(0)
+    .max(9999999)
+    .nullable()
+    .optional()
+    .transform((v) => v ?? null),
 };
 
 export const deliveryDraftSchema = z.object(deliveryShape).strict();
@@ -72,6 +112,15 @@ export const deliveryUpdateSchema = z.object({ ...deliveryShape, expectedVersion
 export const fieldCommandSchema = z
   .object({
     expectedVersion: expectedVersion(),
+    reason: z.string().trim().max(1000).optional(),
+  })
+  .strict();
+
+/** CHG-004 D2: 運搬費の後入力（POST /delivery-reports/{id}/fee）。null は「未確定に戻す」 */
+export const deliveryFeeSchema = z
+  .object({
+    expectedVersion: expectedVersion(),
+    deliveryFeeYen: z.number().int().min(0).max(9999999).nullable(),
     reason: z.string().trim().max(1000).optional(),
   })
   .strict();

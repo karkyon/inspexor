@@ -63,9 +63,9 @@ function req(who: Who, method: string, path: string, body?: unknown, headers: Re
 }
 
 const api = () => ({ sessionSecret: SECRET, now: () => NOW, auditRepository: new PgAuditRepository(db.pool), logError: () => undefined });
-const docDeps = (): DocumentRouteDeps => ({ service: () => new DocumentService(db.pool, SECRET), pool: () => db.pool, api });
+const docDeps = (): DocumentRouteDeps => ({ service: () => new DocumentService(db.pool, SECRET, true), pool: () => db.pool, api });
 const fieldDeps = (): FieldRouteDeps => ({ service: () => new FieldReportService(db.pool), pool: () => db.pool, api });
-const worker = () => runOnce({ pool: db.pool, storage: new LocalFsStorage(storage), pdf: renderer, sender, now: () => new Date() });
+const worker = () => runOnce({ pool: db.pool, storage: new LocalFsStorage(storage), pdf: renderer, sender, now: () => new Date(), dailyMailEnabled: true });
 type Json = { data?: Record<string, unknown>; error?: { code: string; fields?: Array<{ path: string }> } };
 const json = async (r: Response) => (await r.json()) as Json;
 const ctx = () => ({ actor: { userId: users['field'] as string, roles: ['FIELD'] }, correlationId: '00000000-0000-4000-8000-000000000002', now: NOW });
@@ -158,7 +158,13 @@ describe('G4: API-024 getDocument（scope・10分署名 URL）', () => {
     expect(ok.status).toBe(200);
     expect(ok.headers.get('content-type')).toBe('application/pdf');
     expect(ok.headers.get('content-disposition')).toContain(encodeURIComponent(`日報_2026-10-08_C1_${work.reportNo}_r1.pdf`));
+    expect(ok.headers.get('content-disposition')?.startsWith('attachment;')).toBe(true);
     expect(Buffer.from(await ok.arrayBuffer()).subarray(0, 5).toString()).toBe('%PDF-');
+    // 提案書: プレビュー（ブラウザ内表示）。disposition は署名対象外だが署名は引き続き必須
+    const inline = await GET(new Request(`https://example.com${fresh}&disposition=inline`), { params: { id: fileId } });
+    expect(inline.status).toBe(200);
+    expect(inline.headers.get('content-disposition')?.startsWith('inline;')).toBe(true);
+    expect((await GET(new Request(`https://example.com${fresh.replace(/sig=./, 'sig=A')}&disposition=inline`), { params: { id: fileId } })).status).toBe(403);
     const tampered = fresh.replace(/sig=./, 'sig=A');
     expect((await GET(new Request(`https://example.com${tampered}`), { params: { id: fileId } })).status).toBe(403);
     const expired = signFileUrl(fileId, new Date(Date.now() - 11 * 60_000), SECRET).url;
@@ -213,6 +219,16 @@ describe('G4: API-025 documentAction（理由必須・冪等・状態）', () =>
     expect(sent).toHaveLength(2);
     const latest = (await json(await fieldItemHandlers('WORK', fieldDeps()).GET(req('field', 'GET', `work-reports/${work.id}`)))).data;
     expect(latest?.['documentId']).not.toBe(workDocId);
+  });
+
+  it('CHG-004: メール無効（既定）では send は未定義の操作（404）、理由があっても副作用なし', async () => {
+    const off = (): DocumentRouteDeps => ({ service: () => new DocumentService(db.pool, SECRET), pool: () => db.pool, api });
+    const before = Number((await one<{ n: string }>('SELECT count(*) n FROM app.outbox_events')).n);
+    const v = Number((await one<{ version: number }>('SELECT version FROM app.work_reports WHERE id=$1', [work.id])).version);
+    const r = await documentActionHandlers(off()).POST(req('office', 'POST', `documents/${workDocId}/send`, { expectedVersion: v, reason: '送信' }, KEY('off')));
+    expect(r.status).toBe(404);
+    expect((await json(r)).error?.fields?.[0]?.path).toBe('/action');
+    expect(Number((await one<{ n: string }>('SELECT count(*) n FROM app.outbox_events')).n)).toBe(before);
   });
 
   it('運搬の帳票は send 不可（CHG-003: メール送信なし）', async () => {

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { MASTER_DEFS, MASTER_TYPES } from './definitions';
-import { MASTER_NAV, LIST_COLUMNS, FIELD_LABELS, emptyFormState, formStateToPayload, recordToFormState, formatCell, type Lookups } from './ui';
+import { MASTER_NAV, NAV_LABEL, LIST_COLUMNS, FIELD_LABELS, emptyFormState, formStateToPayload, recordToFormState, formatCell, type Lookups } from './ui';
 import { writeSchema } from './schemas';
 
 const lookups: Lookups = {
@@ -10,8 +10,12 @@ const lookups: Lookups = {
 };
 
 describe('SCR-13 表示定義', () => {
-  it('ナビは10種すべて・重複なし', () => {
-    expect(MASTER_NAV.map((n) => n.type).sort()).toEqual([...MASTER_TYPES].sort());
+  it('ナビは提案書の範囲（CHG-004）だけ・重複なし。請求・メール系は表示しない', () => {
+    const nav = MASTER_NAV.map((n) => n.type);
+    expect(nav).toEqual(['customers', 'products', 'work-types', 'defects', 'workers', 'work-locations', 'vehicles', 'holidays']);
+    expect(new Set(nav).size).toBe(nav.length);
+    for (const hidden of ['contacts', 'rates', 'transport-rules', 'fixed-charges']) expect(nav).not.toContain(hidden);
+    for (const type of MASTER_TYPES) expect(NAV_LABEL[type]).toBeTruthy();
   });
   it('一覧列・全項目にラベルがあり、定義済み項目だけを使う', () => {
     for (const type of MASTER_TYPES) {

@@ -82,3 +82,35 @@ body:has(.ix-shell){margin:0}
 .ix-dialog label{display:block;margin:14px 0 6px;font-weight:700}
 .ix-dialog .ix-actions{margin-top:14px}
 @media(max-width:600px){.ix-navitem b{display:block}.ix-navitem span{display:none}.ix-user i{display:none}}
+
+/* CHG-004: 報告一覧・詳細 */
+.ix-filters{display:grid;grid-template-columns:repeat(6,minmax(0,1fr)) auto;gap:12px;align-items:end;margin-bottom:16px;padding:18px}
+.ix-filteractions{display:flex;align-items:flex-end}
+.ix-pill.confirmed{background:#e5f0fb;color:#145a92}.ix-pill.submitted{background:#fff3d6;color:#7a5200}
+.ix-detailgrid{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:16px;align-items:start}
+.ix-sidecol{display:grid;gap:16px}
+.ix-panel h2{margin:0 0 12px;font-size:17px}
+.ix-dl{display:grid;grid-template-columns:150px minmax(0,1fr);gap:10px 16px;margin:0}
+.ix-dl dt{color:var(--ix-muted);font-weight:700}.ix-dl dd{margin:0;overflow-wrap:anywhere}
+.ix-prewrap{white-space:pre-wrap}
+.ix-inner{margin-top:16px;box-shadow:none}
+.ix-inlineform{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-top:12px}
+.ix-inlineform .ix-field{flex:1 1 220px}
+.ix-btnrow{display:flex;flex-wrap:wrap;gap:10px}
+@media(max-width:1100px){.ix-filters{grid-template-columns:repeat(3,minmax(0,1fr))}.ix-detailgrid{grid-template-columns:1fr}}
+@media(max-width:700px){.ix-filters{grid-template-columns:1fr}.ix-dl{grid-template-columns:1fr}}
+
+/* CHG-004 D4: 月次集計 */
+.ix-filters4{grid-template-columns:repeat(4,minmax(0,1fr)) auto}
+.ix-kpis{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px;margin-bottom:16px}
+.ix-kpis>div{background:#fff;border:1px solid var(--ix-line);border-radius:13px;padding:14px 16px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.ix-kpis span{color:var(--ix-muted);font-size:12px;font-weight:700}
+.ix-kpis b{font-size:24px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.ix-kpis small{color:var(--ix-muted);font-size:11px}
+.ix-tabbar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 15px;border-bottom:1px solid var(--ix-line)}
+.ix-tabbar [role=tablist]{display:flex;gap:4px;flex-wrap:wrap}
+.ix-tabbar [role=tab]{border:1px solid transparent;background:none;border-radius:8px;padding:8px 14px;font-weight:700;color:var(--ix-muted);cursor:pointer;min-height:40px}
+.ix-tabbar [role=tab].active{background:#e8f2f8;color:var(--ix-blue);border-color:#c7dcea}
+.ix-datatable td.num,.ix-datatable th.num{font-variant-numeric:tabular-nums}
+@media(max-width:1100px){.ix-kpis{grid-template-columns:repeat(3,minmax(0,1fr))}.ix-filters4{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:700px){.ix-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.ix-filters4{grid-template-columns:1fr}}
