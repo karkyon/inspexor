@@ -8,7 +8,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { parse } from 'yaml';
 import { OPERATION_POLICIES, KNOWN_IDEMPOTENCY_GAPS, type OperationId } from '@inspexor/domain';
-import { findSpecFile } from '../testing/fresh-db';
+import { findSpecFile } from '../testing/spec-files';
 
 type Op = { operationId: string; parameters?: Array<{ $ref?: string; name?: string }>; security?: unknown[] };
 type Doc = { paths: Record<string, Record<string, Op | unknown>> };

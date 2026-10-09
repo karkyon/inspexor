@@ -1,14 +1,15 @@
 /**
- * G2 マスタ管理サービス（FR-008 / REQ-MST-001 / CHG-001）。
- *  - 作成/更新/無効化はすべて1 transaction: root `SELECT FOR UPDATE` → expectedVersion照合 → 更新(version+1) → audit
+ * G2 マスタ管理サービス（FR-008 / REQ-MST-001 / CHG-001）。CHG-006: Firestore 版。
+ *  - 作成/更新/無効化はすべて1 transaction: 対象を読む → expectedVersion照合 → 参照・一意キーの確認 → 更新(version+1) → audit
+ *  - 一意（PostgreSQL の UNIQUE）: uniqueKeys（種類＝マスタ種別、範囲＝親ID）を同じ transaction で確保・付替え
  *  - 参照保護: 物理削除なし（無効化のみ）、親参照は作成後変更不可、無効な親への新規参照は 422 MASTER_INACTIVE
- *  - 遡及（CHG-001 D7）: rule/休日の過去期間に掛かる更新・無効化は reason 必須、audit に retroactive を記録
+ *  - 遡及（CHG-001 D7）: 休日の過去日に掛かる更新・無効化は reason 必須、audit に retroactive を記録
  *  - preview=true: 書込まず MasterImpact を返す（REQ-MST-001 遡及影響preview）
+ *  - CHG-006 F1: 請求専用マスタ（単価・運搬・固定費ルール）は移行しない（Blind）。API は 404
  */
-import type { Pool, PoolClient } from 'pg';
-import { isRetroactiveChange, jstBusinessDate, unionRange, type DateRange } from '@inspexor/domain';
-import { withTransaction, type Queryable } from '../db/pg';
-import { PgAuditRepository } from '../db/pg-audit-repository';
+import { randomUUID } from 'node:crypto';
+import { isRetroactiveChange, jstBusinessDate, type DateRange } from '@inspexor/domain';
+import { appendAudit, C, claimUnique, readUniqueOwner, releaseUnique, type DocReader, type DocStore, type DocTransaction } from '@inspexor/docstore';
 import { MASTER_DEFS, type FieldDef, type MasterDef, type MasterType } from './definitions';
 import type { MasterInput } from './schemas';
 
@@ -47,44 +48,35 @@ export interface MasterContext {
   readonly now: Date;
 }
 
-const OPEN_BILLING_STATUSES = ['OPEN', 'CALCULATING', 'CALCULATED', 'NEEDS_REVIEW', 'REVIEWED'];
+/** Firestore の文書（API 項目名のまま保存。日時は Date） */
+type MasterDoc = Record<string, unknown> & { version: number; active: boolean; createdAt: Date; updatedAt: Date };
 
-const scalarFields = (def: MasterDef) => def.fields.filter((f) => f.kind !== 'uuidArray');
+const UNIQUE_KIND = (def: MasterDef): string => `master:${def.type}`;
 const linkFields = (def: MasterDef) => def.fields.filter((f) => f.kind === 'uuidArray');
 
-function selectSql(def: MasterDef): string {
-  const cols = scalarFields(def).map((f) => `t.${f.column}`);
-  const links = linkFields(def).map(
-    (f) =>
-      `ARRAY(SELECT pc.product_id::text FROM app.product_contacts pc WHERE pc.contact_id = t.id AND pc.purpose = '${f.column}' ORDER BY pc.product_id) AS "${f.api}"`,
-  );
-  return `SELECT t.id, t.version, t.active, t.created_at, t.updated_at, ${[...cols, ...links].join(', ')} FROM app.${def.table} t`;
-}
-
-function toApiValue(f: FieldDef, value: unknown): unknown {
-  if (value === null || value === undefined) return null;
-  if (f.kind === 'yen') {
-    const n = Number(value);
-    if (!Number.isSafeInteger(n)) throw new Error(`unsafe integer in ${f.column}`);
-    return n;
-  }
-  return value;
-}
-
-function rowToRecord(def: MasterDef, row: Record<string, unknown>): MasterRecord {
+function toRecord(def: MasterDef, id: string, doc: MasterDoc): MasterRecord {
   const record: Record<string, unknown> = {
-    id: row['id'],
-    version: row['version'],
-    active: row['active'],
-    createdAt: (row['created_at'] as Date).toISOString(),
-    updatedAt: (row['updated_at'] as Date).toISOString(),
+    id,
+    version: doc.version,
+    active: doc.active,
+    createdAt: doc.createdAt.toISOString(),
+    updatedAt: doc.updatedAt.toISOString(),
   };
-  for (const f of scalarFields(def)) {
+  for (const f of def.fields) {
     if (f.api === 'active') continue;
-    record[f.api] = toApiValue(f, row[f.column]);
+    const v = doc[f.api];
+    record[f.api] = f.kind === 'uuidArray' ? [...((v as string[] | undefined) ?? [])].sort() : v ?? null;
   }
-  for (const f of linkFields(def)) record[f.api] = row[f.api] ?? [];
   return record as MasterRecord;
+}
+
+function fieldsOf(def: MasterDef, input: MasterInput): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const f of def.fields) {
+    const v = input[f.api];
+    out[f.api] = f.kind === 'uuidArray' ? [...((v as string[] | undefined) ?? [])] : v ?? null;
+  }
+  return out;
 }
 
 function rangeOf(def: MasterDef, source: Record<string, unknown>): DateRange | null {
@@ -95,43 +87,26 @@ function rangeOf(def: MasterDef, source: Record<string, unknown>): DateRange | n
   return { from, to };
 }
 
-function mapDbError(def: MasterDef, error: unknown): never {
-  const code = (error as { code?: string }).code;
-  if (code === '23505') {
-    throw new MasterError(422, 'VALIDATION_ERROR', '既に登録されています。', [
-      { path: `/${def.uniqueField}`, code: 'duplicate', message: `${def.label}が既に登録されています。` },
-    ]);
-  }
-  if (code === '23P01') {
-    throw new MasterError(422, 'VALIDATION_ERROR', '適用期間が既存の有効なルールと重複しています。', [
-      { path: '/validFrom', code: 'overlap', message: '適用期間が既存の有効なルールと重複しています。' },
-    ]);
-  }
-  if (code === '23514') {
-    throw new MasterError(422, 'VALIDATION_ERROR', '入力値が制約に違反しています。', [
-      { path: '/', code: 'check', message: '入力値が制約に違反しています。' },
-    ]);
-  }
-  if (code === '23503') {
-    throw new MasterError(422, 'VALIDATION_ERROR', '参照先が存在しません。', [
-      { path: '/', code: 'not_found', message: '参照先が存在しません。' },
-    ]);
-  }
-  throw error;
-}
-
-async function lockRow(client: PoolClient, def: MasterDef, id: string): Promise<Record<string, unknown>> {
-  const result = await client.query(`${selectSql(def)} WHERE t.id = $1 FOR UPDATE OF t`, [id]);
-  const row = result.rows[0] as Record<string, unknown> | undefined;
-  if (row === undefined) throw notFound(def);
-  return row;
-}
-
 function notFound(def: MasterDef): MasterError {
   // GAP-014: 404 に対応する error code が辞書（17件）に無いため VALIDATION_ERROR + fields で表現
   return new MasterError(404, 'VALIDATION_ERROR', `${def.label}が見つかりません。`, [
     { path: '/id', code: 'not_found', message: `${def.label}が見つかりません。` },
   ]);
+}
+
+function duplicate(def: MasterDef): MasterError {
+  return new MasterError(422, 'VALIDATION_ERROR', '既に登録されています。', [
+    { path: `/${def.uniqueField}`, code: 'duplicate', message: `${def.label}が既に登録されています。` },
+  ]);
+}
+
+function defOf(type: MasterType): MasterDef {
+  const def = MASTER_DEFS[type];
+  if (def.blind === true) {
+    // CHG-006 F1: 請求専用マスタは提案書の対象外（Blind）。未定義の種別と同じく 404
+    throw new MasterError(404, 'VALIDATION_ERROR', 'マスタ種別が見つかりません。', [{ path: '/type', code: 'not_found', message: '未定義のマスタ種別です。' }]);
+  }
+  return def;
 }
 
 function versionConflict(current: MasterRecord, input: MasterInput): MasterError {
@@ -145,16 +120,19 @@ function versionConflict(current: MasterRecord, input: MasterInput): MasterError
   });
 }
 
-/** 親参照の存在・有効性・整合性（参照保護） */
-async function checkReferences(db: Queryable, def: MasterDef, input: MasterInput, onlyChanged?: MasterRecord): Promise<void> {
+function uniqueScopeOf(def: MasterDef, source: Record<string, unknown>): string {
+  return def.uniqueScope === null ? '-' : String(source[def.uniqueScope]);
+}
+
+/** 親参照の存在・有効性・整合性（参照保護）。transaction の読込段階で呼ぶ */
+async function checkReferences(db: DocReader, def: MasterDef, input: MasterInput, onlyChanged?: MasterRecord): Promise<void> {
   for (const f of def.fields) {
     if (f.parent === undefined) continue;
     const value = input[f.api];
     if (value === null || value === undefined) continue;
     if (onlyChanged !== undefined && onlyChanged[f.api] === value && onlyChanged.active === true) continue;
-    const r = await db.query<{ active: boolean }>(`SELECT active FROM app.${f.parent.table} WHERE id = $1`, [value]);
-    const parent = r.rows[0];
-    if (parent === undefined) {
+    const parent = await db.get<{ active: boolean }>(`${f.parent.collection}/${String(value)}`);
+    if (parent === null) {
       throw new MasterError(422, 'VALIDATION_ERROR', `${f.parent.label}が存在しません。`, [
         { path: `/${f.api}`, code: 'not_found', message: `${f.parent.label}が存在しません。` },
       ]);
@@ -165,25 +143,12 @@ async function checkReferences(db: Queryable, def: MasterDef, input: MasterInput
       ]);
     }
   }
-  // 作業種は同一品番配下であること
-  if (input['workTypeId'] && input['productId']) {
-    const r = await db.query<{ product_id: string }>(`SELECT product_id FROM app.work_types WHERE id = $1`, [input['workTypeId']]);
-    if (r.rows[0]?.product_id !== input['productId']) {
-      throw new MasterError(422, 'VALIDATION_ERROR', '作業種が品番に属していません。', [
-        { path: '/workTypeId', code: 'mismatch', message: '作業種が品番に属していません。' },
-      ]);
-    }
-  }
   // 担当品番は同一顧客の有効な品番であること
   for (const f of linkFields(def)) {
     const ids = (input[f.api] as string[] | undefined) ?? [];
-    for (const [i, productId] of ids.entries()) {
-      const r = await db.query<{ customer_id: string; active: boolean }>(
-        `SELECT customer_id, active FROM app.products WHERE id = $1`,
-        [productId],
-      );
-      const p = r.rows[0];
-      if (p === undefined || p.customer_id !== input['customerId']) {
+    const products = await db.getMany<{ customerId: string; active: boolean }>(ids.map((id) => `${C.products}/${id}`));
+    for (const [i, p] of products.entries()) {
+      if (p === null || p.customerId !== input['customerId']) {
         throw new MasterError(422, 'VALIDATION_ERROR', '担当品番が顧客に属していません。', [
           { path: `/${f.api}/${i}`, code: 'mismatch', message: '担当品番が顧客に属していません。' },
         ]);
@@ -209,171 +174,115 @@ function assertParentsUnchanged(def: MasterDef, current: MasterRecord, input: Ma
   }
 }
 
-async function writeLinks(client: PoolClient, def: MasterDef, id: string, input: MasterInput): Promise<void> {
-  const links = linkFields(def);
-  if (links.length === 0) return;
-  await client.query(`DELETE FROM app.product_contacts WHERE contact_id = $1`, [id]);
-  for (const f of links) {
-    for (const productId of (input[f.api] as string[] | undefined) ?? []) {
-      await client.query(`INSERT INTO app.product_contacts (product_id, contact_id, purpose) VALUES ($1, $2, $3)`, [
-        productId,
-        id,
-        f.column,
-      ]);
-    }
-  }
+async function countWhere(db: DocReader, collection: string, field: string, op: '==' | 'array-contains', value: string, activeOnly = false): Promise<number> {
+  const rows = await db.query<{ active?: boolean }>(collection, { where: [{ field, op, value }] });
+  return activeOnly ? rows.filter((r) => r.data.active === true).length : rows.length;
 }
 
-async function computeImpact(
-  db: Queryable,
-  def: MasterDef,
-  record: MasterRecord | null,
-  before: DateRange | null,
-  after: DateRange | null,
-  today: string,
-): Promise<MasterImpact> {
+/**
+ * 影響 preview。CHG-006: 実績の参照数は報告ヘッダの要約（最新の版の品番・作業者・車両・作業場所・不良種）で数える。
+ * 休日の遡及は確定済みの現在版の業務日（current.businessDate）で数える。請求 run は Blind のため常に 0。
+ */
+async function computeImpact(db: DocReader, def: MasterDef, record: MasterRecord | null, before: DateRange | null, after: DateRange | null, today: string): Promise<MasterImpact> {
   const retroactive = isRetroactiveChange(def.retroactive, before, after, today);
   let affectedRecordCount = 0;
-  let affectedOpenBillingRunCount = 0;
   const referencedBy: string[] = [];
-  const yesterday = new Date(new Date(`${today}T00:00:00Z`).getTime() - 86_400_000).toISOString().slice(0, 10);
-  const span = unionRange(before, after);
 
-  if (def.retroactive === 'RULE' && span !== null && record !== null) {
-    const productId = record['productId'] as string;
-    const pastTo = span.to === null || span.to > yesterday ? yesterday : span.to;
-    if (span.from <= pastTo) {
-      if (def.type === 'rates') {
-        const r = await db.query<{ n: string }>(
-          `SELECT count(*)::text AS n FROM app.work_reports r JOIN app.work_report_revisions v ON v.id = r.current_revision_id
-            WHERE v.product_id = $1 AND v.work_date BETWEEN $2 AND $3 AND r.status <> 'BILLING_LOCKED'
-              AND ($4::uuid IS NULL OR v.work_type_id = $4)`,
-          [productId, span.from, pastTo, record['workTypeId'] ?? null],
-        );
-        affectedRecordCount = Number(r.rows[0]?.n ?? 0);
-      } else if (def.type === 'transport-rules') {
-        const r = await db.query<{ n: string }>(
-          `SELECT count(DISTINCT r.id)::text AS n FROM app.delivery_reports r
-             JOIN app.delivery_report_revisions v ON v.id = r.current_revision_id
-             JOIN app.delivery_items i ON i.delivery_revision_id = v.id
-            WHERE i.product_id = $1 AND v.delivery_date BETWEEN $2 AND $3 AND r.status <> 'BILLING_LOCKED'`,
-          [productId, span.from, pastTo],
-        );
-        affectedRecordCount = Number(r.rows[0]?.n ?? 0);
-      }
-    }
-    const b = await db.query<{ n: string }>(
-      `SELECT count(*)::text AS n FROM app.billing_runs b JOIN app.products p ON p.customer_id = b.customer_id
-        WHERE p.id = $1 AND b.status::text = ANY($2)
-          AND daterange(b.period_start, b.period_end, '[]') && daterange($3::date, COALESCE($4::date, 'infinity'::date), '[]')`,
-      [productId, OPEN_BILLING_STATUSES, span.from, span.to],
-    );
-    affectedOpenBillingRunCount = Number(b.rows[0]?.n ?? 0);
-  } else if (def.retroactive === 'HOLIDAY') {
-    const dates = [before?.from, after?.from].filter((d): d is string => typeof d === 'string' && d < today);
+  if (def.retroactive === 'HOLIDAY') {
+    const dates = [...new Set([before?.from, after?.from].filter((d): d is string => typeof d === 'string' && d < today))];
     if (dates.length > 0) {
-      const r = await db.query<{ n: string }>(
-        `SELECT count(*)::text AS n FROM app.work_reports r JOIN app.work_report_revisions v ON v.id = r.current_revision_id
-          WHERE v.work_date = ANY($1::date[]) AND r.status <> 'BILLING_LOCKED'`,
-        [dates],
-      );
-      affectedRecordCount = Number(r.rows[0]?.n ?? 0);
-      const b = await db.query<{ n: string }>(
-        `SELECT count(*)::text AS n FROM app.billing_runs b
-          WHERE b.status::text = ANY($1) AND EXISTS (SELECT 1 FROM unnest($2::date[]) d WHERE d BETWEEN b.period_start AND b.period_end)`,
-        [OPEN_BILLING_STATUSES, dates],
-      );
-      affectedOpenBillingRunCount = Number(b.rows[0]?.n ?? 0);
+      const rows = await db.query(C.workReports, { where: [{ field: 'current.businessDate', op: 'in', value: dates }] });
+      affectedRecordCount = rows.length;
     }
   }
 
   if (record !== null) {
-    const refs: Partial<Record<MasterType, Array<[string, string]>>> = {
+    const id = record.id;
+    const refs: Partial<Record<MasterType, Array<[string, () => Promise<number>]>>> = {
       customers: [
-        ['products', `SELECT count(*)::text AS n FROM app.products WHERE customer_id = $1 AND active`],
-        ['contacts', `SELECT count(*)::text AS n FROM app.customer_contacts WHERE customer_id = $1 AND active`],
-        ['billingRuns', `SELECT count(*)::text AS n FROM app.billing_runs WHERE customer_id = $1`],
+        ['products', () => countWhere(db, C.products, 'customerId', '==', id, true)],
+        ['contacts', () => countWhere(db, C.customerContacts, 'customerId', '==', id, true)],
       ],
       products: [
-        ['workTypes', `SELECT count(*)::text AS n FROM app.work_types WHERE product_id = $1 AND active`],
-        ['defects', `SELECT count(*)::text AS n FROM app.defect_types WHERE product_id = $1 AND active`],
-        ['rates', `SELECT count(*)::text AS n FROM app.rate_rules WHERE product_id = $1 AND active`],
-        ['workRevisions', `SELECT count(*)::text AS n FROM app.work_report_revisions WHERE product_id = $1`],
+        ['workTypes', () => countWhere(db, C.workTypes, 'productId', '==', id, true)],
+        ['defects', () => countWhere(db, C.defectTypes, 'productId', '==', id, true)],
+        ['workRevisions', () => countWhere(db, C.workReports, 'productIds', 'array-contains', id)],
       ],
-      workers: [['workRevisions', `SELECT count(*)::text AS n FROM app.work_report_workers WHERE worker_id = $1`]],
+      workers: [['workRevisions', () => countWhere(db, C.workReports, 'workerIds', 'array-contains', id)]],
       vehicles: [
-        ['workRevisions', `SELECT count(*)::text AS n FROM app.work_report_revisions WHERE vehicle_id = $1`],
-        ['deliveryRevisions', `SELECT count(*)::text AS n FROM app.delivery_report_revisions WHERE vehicle_id = $1`],
+        ['workRevisions', () => countWhere(db, C.workReports, 'vehicleId', '==', id)],
+        ['deliveryRevisions', () => countWhere(db, C.deliveryReports, 'vehicleId', '==', id)],
       ],
-      'work-locations': [['workRevisions', `SELECT count(*)::text AS n FROM app.work_report_revisions WHERE work_location_id = $1`]],
-      'work-types': [['rates', `SELECT count(*)::text AS n FROM app.rate_rules WHERE work_type_id = $1 AND active`]],
-      defects: [['defectResults', `SELECT count(*)::text AS n FROM app.defect_results WHERE defect_type_id = $1`]],
-      contacts: [['productLinks', `SELECT count(*)::text AS n FROM app.product_contacts WHERE contact_id = $1`]],
+      'work-locations': [['workRevisions', () => countWhere(db, C.workReports, 'workLocationId', '==', id)]],
+      defects: [['defectResults', () => countWhere(db, C.workReports, 'defectTypeIds', 'array-contains', id)]],
+      contacts: [['productLinks', async () => ((record['dailyProductIds'] as string[]) ?? []).length + ((record['invoiceProductIds'] as string[]) ?? []).length]],
     };
-    for (const [label, sql] of refs[def.type] ?? []) {
-      const r = await db.query<{ n: string }>(sql, [record.id]);
-      const n = Number(r.rows[0]?.n ?? 0);
+    for (const [label, count] of refs[def.type] ?? []) {
+      const n = await count();
       if (n > 0) referencedBy.push(`${label}:${n}`);
     }
   }
 
-  return { retroactive, affectedRecordCount, affectedOpenBillingRunCount, finalizedBillingUnaffected: true, referencedBy };
+  return { retroactive, affectedRecordCount, affectedOpenBillingRunCount: 0, finalizedBillingUnaffected: true, referencedBy };
+}
+
+function compareBy(def: MasterDef): (a: { id: string; data: MasterDoc }, b: { id: string; data: MasterDoc }) => number {
+  return (a, b) => {
+    for (const k of def.sortKeys) {
+      const x = a.data[k.field] as string | number | null | undefined;
+      const y = b.data[k.field] as string | number | null | undefined;
+      if (x === y) continue;
+      if (x === null || x === undefined) return -1;
+      if (y === null || y === undefined) return 1;
+      const c = x < y ? -1 : 1;
+      return k.dir === 'desc' ? -c : c;
+    }
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  };
+}
+
+async function readCurrent(tx: DocReader, def: MasterDef, id: string): Promise<MasterRecord> {
+  const doc = await tx.get<MasterDoc>(`${def.collection}/${id}`);
+  if (doc === null) throw notFound(def);
+  return toRecord(def, id, doc);
 }
 
 export class MasterService {
-  constructor(private readonly pool: Pool) {}
+  constructor(private readonly store: DocStore) {}
 
   async list(type: MasterType, page: number, pageSize: number): Promise<{ data: MasterRecord[]; meta: { page: number; pageSize: number; total: number } }> {
-    const def = MASTER_DEFS[type];
-    const total = await this.pool.query<{ n: string }>(`SELECT count(*)::text AS n FROM app.${def.table}`);
-    const rows = await this.pool.query(`${selectSql(def)} ORDER BY ${def.orderBy.replace(/(^|, )/g, '$1t.')} LIMIT $1 OFFSET $2`, [
-      pageSize,
-      (page - 1) * pageSize,
-    ]);
+    const def = defOf(type);
+    // マスタは数百件規模のため全件を読み、アプリで並べ替える（複合索引を増やさない）
+    const rows = await this.store.query<MasterDoc>(def.collection);
+    rows.sort(compareBy(def));
+    const start = (page - 1) * pageSize;
     return {
-      data: rows.rows.map((row) => rowToRecord(def, row as Record<string, unknown>)),
-      meta: { page, pageSize, total: Number(total.rows[0]?.n ?? 0) },
+      data: rows.slice(start, start + pageSize).map((r) => toRecord(def, r.id, r.data)),
+      meta: { page, pageSize, total: rows.length },
     };
   }
 
   async get(type: MasterType, id: string): Promise<MasterRecord> {
-    const def = MASTER_DEFS[type];
-    const r = await this.pool.query(`${selectSql(def)} WHERE t.id = $1`, [id]);
-    const row = r.rows[0] as Record<string, unknown> | undefined;
-    if (row === undefined) throw notFound(def);
-    return rowToRecord(def, row);
+    const def = defOf(type);
+    return readCurrent(this.store, def, id);
   }
 
   async create(type: MasterType, input: MasterInput, ctx: MasterContext): Promise<MasterRecord> {
-    const def = MASTER_DEFS[type];
-    try {
-      return await withTransaction(this.pool, async (client) => {
-        await checkReferences(client, def, input);
-        const fields = scalarFields(def);
-        const result = await client.query<{ id: string }>(
-          `INSERT INTO app.${def.table} (${fields.map((f) => f.column).join(', ')})
-           VALUES (${fields.map((_, i) => `$${i + 1}`).join(', ')}) RETURNING id`,
-          fields.map((f) => input[f.api] ?? null),
-        );
-        const id = result.rows[0]?.id as string;
-        await writeLinks(client, def, id, input);
-        const created = rowToRecord(def, (await client.query(`${selectSql(def)} WHERE t.id = $1`, [id])).rows[0] as Record<string, unknown>);
-        const retroactive = isRetroactiveChange(def.retroactive, null, rangeOf(def, created), jstBusinessDate(ctx.now));
-        await new PgAuditRepository(client).append({
-          actorId: ctx.actorId,
-          action: 'MASTER_CREATE',
-          targetType: `MASTER:${type}`,
-          targetId: id,
-          afterData: { record: created, retroactive },
-          correlationId: ctx.correlationId,
-          occurredAt: ctx.now,
-        });
-        return created;
-      });
-    } catch (error) {
-      if (error instanceof MasterError) throw error;
-      return mapDbError(def, error);
-    }
+    const def = defOf(type);
+    const id = randomUUID();
+    return this.store.runTransaction(async (tx) => {
+      await checkReferences(tx, def, input);
+      const scope = uniqueScopeOf(def, input);
+      const uniqueValue = String(input[def.uniqueField]);
+      if ((await readUniqueOwner(tx, UNIQUE_KIND(def), scope, uniqueValue)) !== null) throw duplicate(def);
+      const doc: MasterDoc = { ...fieldsOf(def, input), version: 1, active: (input['active'] as boolean | undefined) ?? true, createdAt: ctx.now, updatedAt: ctx.now };
+      const created = toRecord(def, id, doc);
+      const retroactive = isRetroactiveChange(def.retroactive, null, rangeOf(def, created), jstBusinessDate(ctx.now));
+      claimUnique(tx, UNIQUE_KIND(def), scope, uniqueValue, id);
+      tx.create(`${def.collection}/${id}`, doc);
+      appendAudit(tx, { actorId: ctx.actorId, action: 'MASTER_CREATE', targetType: `MASTER:${type}`, targetId: id, afterData: { record: created, retroactive }, correlationId: ctx.correlationId, occurredAt: ctx.now }, ctx.now);
+      return created;
+    });
   }
 
   async update(
@@ -383,29 +292,43 @@ export class MasterService {
     ctx: MasterContext,
     preview: boolean,
   ): Promise<{ kind: 'record'; record: MasterRecord } | { kind: 'impact'; impact: MasterImpact }> {
-    const def = MASTER_DEFS[type];
-    try {
-      return await withTransaction(this.pool, async (client) => {
-        const current = rowToRecord(def, await lockRow(client, def, id));
-        if (current.version !== input['expectedVersion']) throw versionConflict(current, input);
-        assertParentsUnchanged(def, current, input);
-        const today = jstBusinessDate(ctx.now);
-        const before = rangeOf(def, current);
-        const after = rangeOf(def, input);
-        if (preview) {
-          return { kind: 'impact' as const, impact: await computeImpact(client, def, current, before, after, today) };
-        }
-        await checkReferences(client, def, input, current);
-        const fields = scalarFields(def);
-        await client.query(
-          `UPDATE app.${def.table} SET ${fields.map((f, i) => `${f.column} = $${i + 2}`).join(', ')},
-                  version = version + 1, updated_at = now() WHERE id = $1`,
-          [id, ...fields.map((f) => input[f.api] ?? null)],
-        );
-        await writeLinks(client, def, id, input);
-        const updated = rowToRecord(def, (await client.query(`${selectSql(def)} WHERE t.id = $1`, [id])).rows[0] as Record<string, unknown>);
-        const retroactive = isRetroactiveChange(def.retroactive, before, after, today);
-        await new PgAuditRepository(client).append({
+    const def = defOf(type);
+    return this.store.runTransaction(async (tx) => {
+      const current = await readCurrent(tx, def, id);
+      if (current.version !== input['expectedVersion']) throw versionConflict(current, input);
+      assertParentsUnchanged(def, current, input);
+      const today = jstBusinessDate(ctx.now);
+      const before = rangeOf(def, current);
+      const after = rangeOf(def, input);
+      if (preview) {
+        return { kind: 'impact' as const, impact: await computeImpact(tx, def, current, before, after, today) };
+      }
+      await checkReferences(tx, def, input, current);
+      const scope = uniqueScopeOf(def, current);
+      const oldValue = String(current[def.uniqueField]);
+      const newValue = String(input[def.uniqueField]);
+      const keyChanged = oldValue !== newValue;
+      if (keyChanged) {
+        const owner = await readUniqueOwner(tx, UNIQUE_KIND(def), scope, newValue);
+        if (owner !== null && owner !== id) throw duplicate(def);
+      }
+      const doc: MasterDoc = {
+        ...fieldsOf(def, input),
+        active: (input['active'] as boolean | undefined) ?? current.active,
+        version: current.version + 1,
+        createdAt: new Date(current.createdAt),
+        updatedAt: ctx.now,
+      };
+      const updated = toRecord(def, id, doc);
+      const retroactive = isRetroactiveChange(def.retroactive, before, after, today);
+      if (keyChanged) {
+        releaseUnique(tx, UNIQUE_KIND(def), scope, oldValue);
+        claimUnique(tx, UNIQUE_KIND(def), scope, newValue, id);
+      }
+      tx.set(`${def.collection}/${id}`, doc);
+      appendAudit(
+        tx,
+        {
           actorId: ctx.actorId,
           action: 'MASTER_UPDATE',
           targetType: `MASTER:${type}`,
@@ -415,13 +338,11 @@ export class MasterService {
           reason: input['reason'] as string,
           correlationId: ctx.correlationId,
           occurredAt: ctx.now,
-        });
-        return { kind: 'record' as const, record: updated };
-      });
-    } catch (error) {
-      if (error instanceof MasterError) throw error;
-      return mapDbError(def, error);
-    }
+        },
+        ctx.now,
+      );
+      return { kind: 'record' as const, record: updated };
+    });
   }
 
   async deactivate(
@@ -431,9 +352,9 @@ export class MasterService {
     ctx: MasterContext,
     preview: boolean,
   ): Promise<{ kind: 'done' } | { kind: 'impact'; impact: MasterImpact }> {
-    const def = MASTER_DEFS[type];
-    return withTransaction(this.pool, async (client) => {
-      const current = rowToRecord(def, await lockRow(client, def, id));
+    const def = defOf(type);
+    return this.store.runTransaction(async (tx: DocTransaction) => {
+      const current = await readCurrent(tx, def, id);
       if (current.version !== command.expectedVersion) {
         throw new MasterError(409, 'VERSION_CONFLICT', '他の利用者により更新されています。再読込してください。', [], {
           currentVersion: current.version,
@@ -446,7 +367,7 @@ export class MasterService {
       const today = jstBusinessDate(ctx.now);
       const before = rangeOf(def, current);
       if (preview) {
-        return { kind: 'impact' as const, impact: await computeImpact(client, def, current, before, null, today) };
+        return { kind: 'impact' as const, impact: await computeImpact(tx, def, current, before, null, today) };
       }
       const retroactive = isRetroactiveChange(def.retroactive, before, null, today);
       const reason = command.reason?.trim() ?? '';
@@ -455,19 +376,26 @@ export class MasterService {
           { path: '/reason', code: 'required', message: '過去期間に掛かる無効化は理由が必須です。' },
         ]);
       }
-      await client.query(`UPDATE app.${def.table} SET active = false, version = version + 1, updated_at = now() WHERE id = $1`, [id]);
-      await new PgAuditRepository(client).append({
-        actorId: ctx.actorId,
-        action: 'MASTER_DEACTIVATE',
-        targetType: `MASTER:${type}`,
-        targetId: id,
-        beforeData: { record: current },
-        afterData: { active: false, version: current.version + 1, retroactive },
-        ...(reason.length > 0 ? { reason } : {}),
-        correlationId: ctx.correlationId,
-        occurredAt: ctx.now,
-      });
+      tx.update(`${def.collection}/${id}`, { active: false, version: current.version + 1, updatedAt: ctx.now });
+      appendAudit(
+        tx,
+        {
+          actorId: ctx.actorId,
+          action: 'MASTER_DEACTIVATE',
+          targetType: `MASTER:${type}`,
+          targetId: id,
+          beforeData: { record: current },
+          afterData: { active: false, version: current.version + 1, retroactive },
+          ...(reason.length > 0 ? { reason } : {}),
+          correlationId: ctx.correlationId,
+          occurredAt: ctx.now,
+        },
+        ctx.now,
+      );
       return { kind: 'done' as const };
     });
   }
 }
+
+/** 試験・seed 用: FieldDef の参照（型の再輸出） */
+export type { FieldDef };

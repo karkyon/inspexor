@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { parse } from 'yaml';
 import Ajv2020 from 'ajv/dist/2020';
 import addFormats from 'ajv-formats';
-import { findSpecFile } from '../testing/fresh-db';
+import { findSpecFile } from '../testing/spec-files';
 import { MASTER_DEFS, MASTER_TYPES, type FieldDef } from '../masters/definitions';
 import { writeSchema, updateSchema } from '../masters/schemas';
 

@@ -2,37 +2,13 @@
  * 統合テスト用: ITEST_DATABASE_URL（管理DBへの接続URL）上に空DBを作り、仕様正本 schema.sql を適用する。
  * G1 Exit「fresh DB」= 毎回 schema.sql だけから構築したDBで検証する。
  */
-import { readFileSync, readdirSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { readdirSync as listDir } from 'node:fs';
 import { Pool } from 'pg';
 
-function findRepoRoot(start: string): string {
-  let dir = start;
-  for (;;) {
-    if (existsSync(join(dir, 'pnpm-workspace.yaml'))) return dir;
-    const parent = dirname(dir);
-    if (parent === dir) throw new Error('pnpm-workspace.yaml が見つかりません');
-    dir = parent;
-  }
-}
-
-export function findSpecFile(fileName: string, envVar: string): string {
-  const fromEnv = process.env[envVar];
-  if (fromEnv !== undefined && existsSync(fromEnv)) return fromEnv;
-  const root = findRepoRoot(process.cwd());
-  const stack = [root];
-  while (stack.length > 0) {
-    const dir = stack.pop() as string;
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (['node_modules', '.next', '.git', 'dist'].includes(entry.name)) continue;
-      const full = join(dir, entry.name);
-      if (entry.isDirectory()) stack.push(full);
-      else if (entry.name === fileName) return full;
-    }
-  }
-  throw new Error(`${fileName} がリポジトリ内に見つかりません`);
-}
+import { findSpecFile } from './spec-files';
+export { findSpecFile };
 
 export interface FreshDatabase {
   readonly pool: Pool;

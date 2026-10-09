@@ -45,6 +45,8 @@ export type FieldKind =
 
 export interface ParentRef {
   readonly table: string;
+  /** CHG-006: Firestore のコレクション名 */
+  readonly collection: string;
   readonly label: string;
 }
 
@@ -74,12 +76,20 @@ export interface MasterDef {
   readonly range?: { readonly fromApi: string; readonly toApi: string | null };
   /** 一意制約違反時に指す項目 */
   readonly uniqueField: string;
+  /** CHG-006: Firestore のコレクション名 */
+  readonly collection: string;
+  /** CHG-006: 一意の範囲（親の項目。全体で一意なら null）。PostgreSQL の UNIQUE(customer_id, code) 等に対応 */
+  readonly uniqueScope: string | null;
+  /** CHG-006: 一覧の並び順（orderBy と同じ。最後に id） */
+  readonly sortKeys: ReadonlyArray<{ readonly field: string; readonly dir: 'asc' | 'desc' }>;
+  /** CHG-006 F1: 請求専用（Blind）。Firestore に移行していないため API は 404 */
+  readonly blind?: true;
 }
 
 const active: FieldDef = { api: 'active', column: 'active', kind: 'bool', required: false, defaultValue: true };
-const customerRef: ParentRef = { table: 'customers', label: '顧客' };
-const productRef: ParentRef = { table: 'products', label: '品番' };
-const workTypeRef: ParentRef = { table: 'work_types', label: '作業種' };
+const customerRef: ParentRef = { table: 'customers', collection: 'customers', label: '顧客' };
+const productRef: ParentRef = { table: 'products', collection: 'products', label: '品番' };
+const workTypeRef: ParentRef = { table: 'work_types', collection: 'workTypes', label: '作業種' };
 
 export const MASTER_DEFS: Readonly<Record<MasterType, MasterDef>> = {
   customers: {
@@ -90,6 +100,9 @@ export const MASTER_DEFS: Readonly<Record<MasterType, MasterDef>> = {
     orderBy: 'code ASC, id ASC',
     retroactive: 'NONE',
     uniqueField: 'code',
+    collection: 'customers',
+    uniqueScope: null,
+    sortKeys: [{ field: 'code', dir: 'asc' }],
     fields: [
       { api: 'code', column: 'code', kind: 'code', required: true, max: 30 },
       { api: 'name', column: 'name', kind: 'text', required: true, max: 200 },
@@ -105,6 +118,9 @@ export const MASTER_DEFS: Readonly<Record<MasterType, MasterDef>> = {
     orderBy: 'customer_id ASC, code ASC, id ASC',
     retroactive: 'NONE',
     uniqueField: 'code',
+    collection: 'customerContacts',
+    uniqueScope: 'customerId',
+    sortKeys: [{ field: 'customerId', dir: 'asc' }, { field: 'code', dir: 'asc' }],
     fields: [
       { api: 'customerId', column: 'customer_id', kind: 'uuid', required: true, parent: customerRef },
       { api: 'code', column: 'code', kind: 'code', required: true, max: 30 },
@@ -125,6 +141,9 @@ export const MASTER_DEFS: Readonly<Record<MasterType, MasterDef>> = {
     orderBy: 'code ASC, id ASC',
     retroactive: 'NONE',
     uniqueField: 'code',
+    collection: 'workers',
+    uniqueScope: null,
+    sortKeys: [{ field: 'code', dir: 'asc' }],
     fields: [
       { api: 'code', column: 'code', kind: 'code', required: true, max: 30 },
       { api: 'name', column: 'name', kind: 'text', required: true, max: 100 },
@@ -139,6 +158,9 @@ export const MASTER_DEFS: Readonly<Record<MasterType, MasterDef>> = {
     orderBy: 'customer_id ASC, code ASC, id ASC',
     retroactive: 'NONE',
     uniqueField: 'code',
+    collection: 'products',
+    uniqueScope: 'customerId',
+    sortKeys: [{ field: 'customerId', dir: 'asc' }, { field: 'code', dir: 'asc' }],
     fields: [
       { api: 'customerId', column: 'customer_id', kind: 'uuid', required: true, parent: customerRef },
       { api: 'code', column: 'code', kind: 'code', required: true, max: 80 },
@@ -156,6 +178,9 @@ export const MASTER_DEFS: Readonly<Record<MasterType, MasterDef>> = {
     orderBy: 'product_id ASC, code ASC, id ASC',
     retroactive: 'NONE',
     uniqueField: 'code',
+    collection: 'workTypes',
+    uniqueScope: 'productId',
+    sortKeys: [{ field: 'productId', dir: 'asc' }, { field: 'code', dir: 'asc' }],
     fields: [
       { api: 'productId', column: 'product_id', kind: 'uuid', required: true, parent: productRef },
       { api: 'code', column: 'code', kind: 'code', required: true, max: 50 },
@@ -171,6 +196,9 @@ export const MASTER_DEFS: Readonly<Record<MasterType, MasterDef>> = {
     orderBy: 'product_id ASC, sort_order ASC, code ASC, id ASC',
     retroactive: 'NONE',
     uniqueField: 'code',
+    collection: 'defectTypes',
+    uniqueScope: 'productId',
+    sortKeys: [{ field: 'productId', dir: 'asc' }, { field: 'sortOrder', dir: 'asc' }, { field: 'code', dir: 'asc' }],
     fields: [
       { api: 'productId', column: 'product_id', kind: 'uuid', required: true, parent: productRef },
       { api: 'code', column: 'code', kind: 'code', required: true, max: 50 },
@@ -188,6 +216,9 @@ export const MASTER_DEFS: Readonly<Record<MasterType, MasterDef>> = {
     retroactive: 'HOLIDAY',
     range: { fromApi: 'holidayDate', toApi: 'holidayDate' },
     uniqueField: 'holidayDate',
+    collection: 'holidays',
+    uniqueScope: null,
+    sortKeys: [{ field: 'holidayDate', dir: 'asc' }],
     fields: [
       { api: 'holidayDate', column: 'holiday_date', kind: 'date', required: true },
       { api: 'name', column: 'name', kind: 'text', required: true, max: 100 },
@@ -203,6 +234,10 @@ export const MASTER_DEFS: Readonly<Record<MasterType, MasterDef>> = {
     retroactive: 'RULE',
     range: { fromApi: 'validFrom', toApi: 'validTo' },
     uniqueField: 'validFrom',
+    collection: 'rateRules',
+    uniqueScope: null,
+    sortKeys: [{ field: 'productId', dir: 'asc' }, { field: 'validFrom', dir: 'desc' }],
+    blind: true,
     fields: [
       { api: 'productId', column: 'product_id', kind: 'uuid', required: true, parent: productRef },
       { api: 'workTypeId', column: 'work_type_id', kind: 'uuidNullable', required: false, parent: workTypeRef },
@@ -222,6 +257,10 @@ export const MASTER_DEFS: Readonly<Record<MasterType, MasterDef>> = {
     retroactive: 'RULE',
     range: { fromApi: 'validFrom', toApi: 'validTo' },
     uniqueField: 'validFrom',
+    collection: 'transportRules',
+    uniqueScope: null,
+    sortKeys: [{ field: 'productId', dir: 'asc' }, { field: 'validFrom', dir: 'desc' }],
+    blind: true,
     fields: [
       { api: 'productId', column: 'product_id', kind: 'uuid', required: true, parent: productRef },
       { api: 'workTypeId', column: 'work_type_id', kind: 'uuidNullable', required: false, parent: workTypeRef },
@@ -242,6 +281,10 @@ export const MASTER_DEFS: Readonly<Record<MasterType, MasterDef>> = {
     retroactive: 'RULE',
     range: { fromApi: 'validFrom', toApi: 'validTo' },
     uniqueField: 'validFrom',
+    collection: 'fixedChargeRules',
+    uniqueScope: null,
+    sortKeys: [{ field: 'productId', dir: 'asc' }, { field: 'validFrom', dir: 'desc' }],
+    blind: true,
     fields: [
       { api: 'productId', column: 'product_id', kind: 'uuid', required: true, parent: productRef },
       { api: 'label', column: 'label', kind: 'text', required: true, max: 200 },
@@ -259,6 +302,9 @@ export const MASTER_DEFS: Readonly<Record<MasterType, MasterDef>> = {
     orderBy: 'code ASC, id ASC',
     retroactive: 'NONE',
     uniqueField: 'code',
+    collection: 'vehicles',
+    uniqueScope: null,
+    sortKeys: [{ field: 'code', dir: 'asc' }],
     fields: [
       { api: 'code', column: 'code', kind: 'code', required: true, max: 30 },
       { api: 'name', column: 'name', kind: 'text', required: true, max: 100 },
@@ -273,6 +319,9 @@ export const MASTER_DEFS: Readonly<Record<MasterType, MasterDef>> = {
     orderBy: 'code ASC, id ASC',
     retroactive: 'NONE',
     uniqueField: 'code',
+    collection: 'workLocations',
+    uniqueScope: null,
+    sortKeys: [{ field: 'code', dir: 'asc' }],
     fields: [
       { api: 'code', column: 'code', kind: 'code', required: true, max: 30 },
       { api: 'name', column: 'name', kind: 'text', required: true, max: 100 },

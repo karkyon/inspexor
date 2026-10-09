@@ -78,6 +78,18 @@ export class TxAuditRepository implements AuditRepository {
   }
 }
 
+/** transaction の外で1件だけ監査を書く（入口ガードの拒否記録など） */
+export class StoreAuditRepository implements AuditRepository {
+  constructor(
+    private readonly store: DocStore,
+    private readonly now: () => Date = () => new Date(),
+  ) {}
+
+  async append(record: AuditRecord): Promise<string> {
+    return this.store.runTransaction(async (tx) => appendAudit(tx, record, this.now()));
+  }
+}
+
 /** 監査の読出し（試験・調査用）。before/after は復元して返す */
 export async function auditEventsFor(db: DocReader, targetType: string, targetId: string): Promise<Array<AuditDoc & { id: string; beforeData: unknown; afterData: unknown }>> {
   const rows = await db.query<AuditDoc>(C.auditEvents, { where: [{ field: 'targetId', op: '==', value: targetId }] });

@@ -28,7 +28,8 @@ function parsePath(request: Request, expectId: boolean): ParsedPath {
   const i = segments.indexOf('masters');
   const type = segments[i + 1] ?? '';
   const id = segments[i + 2] ?? null;
-  if (!isMasterType(type)) {
+  // CHG-006 F1: 請求専用マスタ（Blind）は Firestore に移行していないため未定義と同じ 404
+  if (!isMasterType(type) || MASTER_DEFS[type].blind === true) {
     throw new RequestError(404, 'VALIDATION_ERROR', 'マスタ種別が見つかりません。', [{ path: '/type', code: 'not_found', message: '未定義のマスタ種別です。' }]);
   }
   if (expectId && (id === null || !UUID_RE.test(id))) {

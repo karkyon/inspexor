@@ -105,16 +105,7 @@ test.describe('G2-E2E: SCR-13 マスター管理', () => {
     await expect(page.getByRole('cell', { name: code, exact: true })).toBeVisible();
   });
 
-  test('単価ルール: 影響を確認（遡及は警告表示・保存はしない）', async ({ page }) => {
-    await login(page);
-    await page.goto('/admin/masters/rates');
-    await page.getByRole('link', { name: /を編集$/ }).first().click();
-    await expect(page.getByRole('heading', { level: 1, name: /単価ルールの編集/ })).toBeVisible();
-    await page.getByRole('button', { name: '影響を確認' }).click();
-    await expect(page.getByRole('status').filter({ hasText: '過去の期間に影響する変更です' })).toBeVisible();
-    await expect(page.getByText('確定済みの請求書は変更されません')).toBeVisible();
-  });
-
+  // CHG-006 F1: 単価ルール（請求専用マスタ）は Firestore に移行しない（Blind）ため、影響確認の E2E は削除
   test('事務(OFFICE)ロールは参照のみ（追加ボタンなし）', async ({ page }) => {
     test.skip(process.env['E2E_OFFICE_PASSWORD'] === undefined, 'OFFICE ユーザー未用意の環境ではスキップ');
     await page.goto('/login');

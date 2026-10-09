@@ -8,7 +8,7 @@ import { parse } from 'yaml';
 import Ajv2020 from 'ajv/dist/2020';
 import addFormats from 'ajv-formats';
 import type { ZodTypeAny } from 'zod';
-import { findSpecFile } from '../testing/fresh-db';
+import { findSpecFile } from '../testing/spec-files';
 import { deliveryDraftSchema, deliveryUpdateSchema, fieldCommandSchema, workDraftSchema, workUpdateSchema } from '../field/schemas';
 
 const doc = parse(readFileSync(findSpecFile('openapi.yaml', 'OPENAPI_PATH'), 'utf8')) as {
