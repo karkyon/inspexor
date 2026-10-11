@@ -15,3 +15,5 @@ export * from './field-report';
 export * from './documents';
 export * from './monthly-summary';
 export * from './features';
+export * from './billing-period';
+export * from './billing-engine';

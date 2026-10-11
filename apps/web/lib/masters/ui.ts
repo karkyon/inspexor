@@ -6,7 +6,7 @@ import { MASTER_DEFS, type FieldDef, type MasterDef, type MasterType } from './d
 
 /**
  * CHG-004: 提案書「マスタ管理（簡易）: 客先・品番・作業者・不良項目」＋作業場所・車両（D1）を表示する。
- * 単価/運搬/固定費ルール（請求）は対象外のため一覧に出さない（Blind。URL 直指定・API は従来どおり）。
+ * 単価/運搬/固定費ルール（請求）は対象外のため一覧に出さない（Blind）。CHG-009: 請求機能が有効なら表示する（masterNav）。
  * お客様担当者は CHG-005 で日報（作業結果報告書）の「担当者」欄に使うため表示する（メール送信は停止中）。
  */
 export const ALL_MASTER_LABELS: Readonly<Record<MasterType, string>> = {
@@ -26,7 +26,15 @@ export const ALL_MASTER_LABELS: Readonly<Record<MasterType, string>> = {
 
 const VISIBLE_MASTERS: readonly MasterType[] = ['customers', 'contacts', 'products', 'work-types', 'defects', 'workers', 'work-locations', 'vehicles', 'holidays'];
 
+/** CHG-009: 請求機能（BILLING_ENABLED）が有効なときだけ表示する請求マスタ */
+const BILLING_MASTERS: readonly MasterType[] = ['rates', 'transport-rules', 'fixed-charges'];
+
 export const MASTER_NAV: ReadonlyArray<{ type: MasterType; label: string }> = VISIBLE_MASTERS.map((type) => ({ type, label: ALL_MASTER_LABELS[type] }));
+
+/** マスター種別の一覧（請求機能が有効なら 単価・運搬・固定費ルールを足す） */
+export function masterNav(billing: boolean): ReadonlyArray<{ type: MasterType; label: string }> {
+  return billing ? [...MASTER_NAV, ...BILLING_MASTERS.map((type) => ({ type, label: ALL_MASTER_LABELS[type] }))] : MASTER_NAV;
+}
 
 export const NAV_LABEL: Readonly<Record<MasterType, string>> = ALL_MASTER_LABELS;
 

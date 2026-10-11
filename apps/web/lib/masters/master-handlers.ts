@@ -2,7 +2,7 @@
  * API-014〜018（/api/v1/masters/{type}[/{id}]）。入口ガード（認証→CSRF→認可）は createApiHandler、
  * ここでは path/query 解析 → Zod（未知field拒否）→ MasterService の順に処理する（ADR-0001）。
  */
-import type { OperationId } from '@inspexor/domain';
+import { featureFlags, type OperationId } from '@inspexor/domain';
 import { createApiHandler, type ApiContext, type ApiHandlerDeps } from '../http/api-handler';
 import { errorResponse, dataResponse } from '../http/api-response';
 import { MASTER_DEFS, isMasterType, type MasterType } from './definitions';
@@ -23,13 +23,13 @@ class RequestError extends Error {
   }
 }
 
-function parsePath(request: Request, expectId: boolean): ParsedPath {
+function parsePath(request: Request, expectId: boolean, billing: boolean): ParsedPath {
   const segments = new URL(request.url).pathname.split('/').filter((s) => s.length > 0);
   const i = segments.indexOf('masters');
   const type = segments[i + 1] ?? '';
   const id = segments[i + 2] ?? null;
-  // CHG-006 F1: 請求専用マスタ（Blind）は Firestore に移行していないため未定義と同じ 404
-  if (!isMasterType(type) || MASTER_DEFS[type].blind === true) {
+  // CHG-006 F1 / CHG-009: 請求専用マスタは請求機能（BILLING_ENABLED）が無効なら未定義と同じ 404（Blind）
+  if (!isMasterType(type) || (MASTER_DEFS[type].blind === true && !billing)) {
     throw new RequestError(404, 'VALIDATION_ERROR', 'マスタ種別が見つかりません。', [{ path: '/type', code: 'not_found', message: '未定義のマスタ種別です。' }]);
   }
   if (expectId && (id === null || !UUID_RE.test(id))) {
@@ -94,7 +94,11 @@ function toResponse(error: unknown, correlationId: string): Response {
 export interface MasterRouteDeps {
   readonly service: () => MasterService;
   readonly api: () => ApiHandlerDeps;
+  /** CHG-009: 機能の有効化設定の参照元（試験用。既定は process.env） */
+  readonly env?: () => Readonly<Record<string, string | undefined>>;
 }
+
+const billingOn = (deps: MasterRouteDeps): boolean => featureFlags(deps.env?.() ?? process.env).billing;
 
 function actorId(ctx: ApiContext): string {
   if (ctx.actor === null) throw new Error('actor required');
@@ -118,7 +122,7 @@ function handler(operationId: OperationId, deps: MasterRouteDeps, body: (ctx: Ap
 export function masterCollectionHandlers(deps: MasterRouteDeps) {
   return {
     GET: handler('listMasters', deps, async (ctx) => {
-      const { type } = parsePath(ctx.request, false);
+      const { type } = parsePath(ctx.request, false, billingOn(deps));
       const q = parseQuery(ctx.request, ['page', 'pageSize']);
       const page = intParam(q, 'page', 1, 1, 1_000_000);
       const pageSize = intParam(q, 'pageSize', 25, 1, 100);
@@ -126,7 +130,7 @@ export function masterCollectionHandlers(deps: MasterRouteDeps) {
       return Response.json(result, { status: 200 });
     }),
     POST: handler('createMaster', deps, async (ctx) => {
-      const { type } = parsePath(ctx.request, false);
+      const { type } = parsePath(ctx.request, false, billingOn(deps));
       parseQuery(ctx.request, []);
       const parsed = writeSchema(MASTER_DEFS[type]).safeParse(await readJson(ctx.request));
       if (!parsed.success) {
@@ -145,12 +149,12 @@ export function masterCollectionHandlers(deps: MasterRouteDeps) {
 export function masterItemHandlers(deps: MasterRouteDeps) {
   return {
     GET: handler('getMaster', deps, async (ctx) => {
-      const { type, id } = parsePath(ctx.request, true);
+      const { type, id } = parsePath(ctx.request, true, billingOn(deps));
       parseQuery(ctx.request, []);
       return dataResponse(200, await deps.service().get(type, id as string), ctx.correlationId);
     }),
     PATCH: handler('updateMaster', deps, async (ctx) => {
-      const { type, id } = parsePath(ctx.request, true);
+      const { type, id } = parsePath(ctx.request, true, billingOn(deps));
       const preview = previewParam(parseQuery(ctx.request, ['preview']));
       const parsed = updateSchema(MASTER_DEFS[type]).safeParse(await readJson(ctx.request));
       if (!parsed.success) {
@@ -164,7 +168,7 @@ export function masterItemHandlers(deps: MasterRouteDeps) {
       return dataResponse(200, result.kind === 'record' ? result.record : result.impact, ctx.correlationId);
     }),
     DELETE: handler('deactivateMaster', deps, async (ctx) => {
-      const { type, id } = parsePath(ctx.request, true);
+      const { type, id } = parsePath(ctx.request, true, billingOn(deps));
       const preview = previewParam(parseQuery(ctx.request, ['preview']));
       const parsed = commandSchema.safeParse(await readJson(ctx.request));
       if (!parsed.success) {

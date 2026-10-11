@@ -7,8 +7,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { apiRequest } from '../../lib/api/client';
 import { MASTER_DEFS, type MasterType } from '../../lib/masters/definitions';
-import { LIST_COLUMNS, MASTER_NAV, NAV_LABEL, fieldLabel, formatCell } from '../../lib/masters/ui';
-import { canEditMasters, useAdminUser } from './AdminShell';
+import { LIST_COLUMNS, NAV_LABEL, fieldLabel, formatCell, masterNav } from '../../lib/masters/ui';
+import { canEditMasters, hasFeature, useAdminUser } from './AdminShell';
 import { useLookups } from './useLookups';
 
 type Row = Record<string, unknown> & { id: string; active: boolean; version: number };
@@ -17,6 +17,8 @@ const PAGE_SIZE = 25;
 export function MasterScreen({ type, notice }: { readonly type: MasterType; readonly notice?: string | undefined }) {
   const user = useAdminUser();
   const editable = canEditMasters(user);
+  const billing = hasFeature(user, 'billing');
+  const nav = masterNav(billing);
   const def = MASTER_DEFS[type];
   const { lookups } = useLookups();
   const [counts, setCounts] = useState<Partial<Record<MasterType, number>>>({});
@@ -30,7 +32,7 @@ export function MasterScreen({ type, notice }: { readonly type: MasterType; read
   useEffect(() => {
     let cancelled = false;
     void Promise.all(
-      MASTER_NAV.map(async (n) => {
+      masterNav(billing).map(async (n) => {
         const res = await apiRequest<unknown[]>('GET', `/masters/${n.type}?pageSize=1`);
         return [n.type, res.ok ? (res.meta?.total ?? 0) : undefined] as const;
       }),
@@ -40,7 +42,7 @@ export function MasterScreen({ type, notice }: { readonly type: MasterType; read
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [billing]);
 
   useEffect(() => {
     let cancelled = false;
@@ -98,7 +100,7 @@ export function MasterScreen({ type, notice }: { readonly type: MasterType; read
       ) : null}
       <div className="ix-masterlayout">
         <nav className="ix-masternav" aria-label="マスター種別">
-          {MASTER_NAV.map((n) => (
+          {nav.map((n) => (
             <a key={n.type} href={`/admin/masters/${n.type}`} className={n.type === type ? 'active' : ''} aria-current={n.type === type ? 'page' : undefined}>
               {n.label}
               <b>{counts[n.type] ?? ''}</b>

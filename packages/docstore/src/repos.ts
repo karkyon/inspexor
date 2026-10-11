@@ -33,6 +33,12 @@ export const C = {
   outbox: 'outbox',
   idempotency: 'idempotency',
   auditEvents: 'auditEvents',
+  // CHG-009 請求（BILLING_ENABLED）
+  rateRules: 'rateRules',
+  transportRules: 'transportRules',
+  fixedChargeRules: 'fixedChargeRules',
+  billingRuns: 'billingRuns',
+  invoices: 'invoices',
 } as const;
 
 // ---------------- 監査 ----------------

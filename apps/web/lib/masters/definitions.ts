@@ -82,8 +82,13 @@ export interface MasterDef {
   readonly uniqueScope: string | null;
   /** CHG-006: 一覧の並び順（orderBy と同じ。最後に id） */
   readonly sortKeys: ReadonlyArray<{ readonly field: string; readonly dir: 'asc' | 'desc' }>;
-  /** CHG-006 F1: 請求専用（Blind）。Firestore に移行していないため API は 404 */
+  /** CHG-006 F1 / CHG-009: 請求専用。請求機能（BILLING_ENABLED）が無効のときは Blind（API は未定義の種別と同じ 404、画面に出さない） */
   readonly blind?: true;
+  /**
+   * CHG-009: 適用期間の重なり禁止（PostgreSQL の EXCLUDE ... WHERE (active) に対応）。
+   * 有効なルールどうしで、ここに挙げた項目が同じ値かつ適用期間（validFrom〜validTo、null は無期限）が重なれば 422。一意キー（uniqueKeys）は使わない
+   */
+  readonly overlapKeys?: readonly string[];
 }
 
 const active: FieldDef = { api: 'active', column: 'active', kind: 'bool', required: false, defaultValue: true };
@@ -238,6 +243,7 @@ export const MASTER_DEFS: Readonly<Record<MasterType, MasterDef>> = {
     uniqueScope: null,
     sortKeys: [{ field: 'productId', dir: 'asc' }, { field: 'validFrom', dir: 'desc' }],
     blind: true,
+    overlapKeys: ['productId', 'workTypeId'],
     fields: [
       { api: 'productId', column: 'product_id', kind: 'uuid', required: true, parent: productRef },
       { api: 'workTypeId', column: 'work_type_id', kind: 'uuidNullable', required: false, parent: workTypeRef },
@@ -261,6 +267,7 @@ export const MASTER_DEFS: Readonly<Record<MasterType, MasterDef>> = {
     uniqueScope: null,
     sortKeys: [{ field: 'productId', dir: 'asc' }, { field: 'validFrom', dir: 'desc' }],
     blind: true,
+    overlapKeys: ['productId', 'workTypeId', 'transportType'],
     fields: [
       { api: 'productId', column: 'product_id', kind: 'uuid', required: true, parent: productRef },
       { api: 'workTypeId', column: 'work_type_id', kind: 'uuidNullable', required: false, parent: workTypeRef },
@@ -285,6 +292,7 @@ export const MASTER_DEFS: Readonly<Record<MasterType, MasterDef>> = {
     uniqueScope: null,
     sortKeys: [{ field: 'productId', dir: 'asc' }, { field: 'validFrom', dir: 'desc' }],
     blind: true,
+    overlapKeys: ['productId', 'label'],
     fields: [
       { api: 'productId', column: 'product_id', kind: 'uuid', required: true, parent: productRef },
       { api: 'label', column: 'label', kind: 'text', required: true, max: 200 },

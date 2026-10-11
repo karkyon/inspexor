@@ -177,6 +177,73 @@ describe('CHG-006 F1: 請求専用マスタ（単価・運搬・固定費ルー�
   });
 });
 
+describe('CHG-009: 請求機能が有効なら請求マスタを使える（適用期間の重なり禁止）', () => {
+  const billingDeps = (): MasterRouteDeps => ({
+    service: () => new MasterService(t.store, { billing: true }),
+    api: deps.api,
+    env: () => ({ APPROVAL_ENABLED: 'true', BILLING_ENABLED: 'true' }),
+  });
+  const bc = () => masterCollectionHandlers(billingDeps());
+  const bi = () => masterItemHandlers(billingDeps());
+  const make = async (type: string, body: Record<string, unknown>) => {
+    const res = await bc().POST(req('POST', type, body));
+    return { status: res.status, body: await json(res) };
+  };
+
+  it('APPROVAL_ENABLED なしで BILLING_ENABLED だけでは無効（404）', async () => {
+    const res = await masterCollectionHandlers({ ...billingDeps(), env: () => ({ BILLING_ENABLED: 'true' }) }).GET(req('GET', 'rates'));
+    expect(res.status).toBe(404);
+  });
+
+  it('単価ルール: 作成・一覧。同じ品番・作業内容で期間が重なれば 422 overlap、作業内容が違えば可、無効化すれば同じ期間で再登録可', async () => {
+    const c = await create('customers', { code: 'CU-BIL', name: '請求顧客', closingDay: 31 });
+    const p = await create('products', { customerId: c.id, code: 'P-BIL', name: '請求品', settlementType: 'QUANTITY' });
+    const wt = await create('work-types', { productId: p.id, code: 'WT1', name: '検査' });
+    const r1 = await make('rates', { productId: p.id, unitPrice: '4.4', validFrom: '2026-01-01', validTo: '2026-06-30' });
+    expect(r1.status).toBe(201);
+    expect(masterRecordSchema?.(r1.body.data)).toBe(true);
+    expect(r1.body.data).toMatchObject({ unitPrice: '4.4', overtimeMultiplier: '1.25', workTypeId: null });
+    const clash = await make('rates', { productId: p.id, unitPrice: '5', validFrom: '2026-06-30' });
+    expect(clash.status).toBe(422);
+    expect(clash.body.error?.fields?.[0]).toMatchObject({ path: '/validFrom', code: 'overlap' });
+    expect((await make('rates', { productId: p.id, unitPrice: '5', validFrom: '2026-07-01' })).status).toBe(201);
+    expect((await make('rates', { productId: p.id, workTypeId: wt.id, unitPrice: '6', validFrom: '2026-01-01' })).status).toBe(201);
+    // 無効化した期間には再登録できる
+    expect((await bi().DELETE(req('DELETE', `rates/${r1.body.data?.id}`, { expectedVersion: 1, reason: '単価改定' }))).status).toBe(204);
+    expect((await make('rates', { productId: p.id, unitPrice: '4.5', validFrom: '2026-01-01', validTo: '2026-06-30' })).status).toBe(201);
+    const list = await json(await bc().GET(req('GET', 'rates?pageSize=100')));
+    expect((list.meta?.total ?? 0) >= 4).toBe(true);
+  });
+
+  it('単価ルール: 適用終了日 < 開始日・割増倍率 < 1・別品番の作業内容は 422。更新でも重なりを検査（自分自身は除く）', async () => {
+    const c = await create('customers', { code: 'CU-BIL2', name: '請求顧客2', closingDay: 20 });
+    const p = await create('products', { customerId: c.id, code: 'P-BIL2', name: '品2', settlementType: 'TIME' });
+    const q = await create('products', { customerId: c.id, code: 'P-BIL3', name: '品3', settlementType: 'TIME' });
+    const wtq = await create('work-types', { productId: q.id, code: 'WTQ', name: '別品番の作業' });
+    expect((await make('rates', { productId: p.id, unitPrice: '1', validFrom: '2026-02-01', validTo: '2026-01-31' })).body.error?.fields?.[0]).toMatchObject({ path: '/validTo', code: 'range' });
+    expect((await make('rates', { productId: p.id, unitPrice: '1', overtimeMultiplier: '0.9', validFrom: '2026-01-01' })).body.error?.fields?.[0]).toMatchObject({ path: '/overtimeMultiplier', code: 'min' });
+    expect((await make('rates', { productId: p.id, workTypeId: wtq.id, unitPrice: '1', validFrom: '2026-01-01' })).body.error?.fields?.[0]).toMatchObject({ path: '/workTypeId', code: 'mismatch' });
+    const a = await make('rates', { productId: p.id, unitPrice: '1980', validFrom: '2026-01-01', validTo: '2026-03-31' });
+    const b = await make('rates', { productId: p.id, unitPrice: '2000', validFrom: '2026-04-01' });
+    expect([a.status, b.status]).toEqual([201, 201]);
+    const self = await bi().PATCH(req('PATCH', `rates/${a.body.data?.id}`, { productId: p.id, unitPrice: '1990', validFrom: '2026-01-01', validTo: '2026-03-31', expectedVersion: 1, reason: '単価修正' }));
+    expect(self.status).toBe(200);
+    const extend = await bi().PATCH(req('PATCH', `rates/${a.body.data?.id}`, { productId: p.id, unitPrice: '1990', validFrom: '2026-01-01', validTo: '2026-04-30', expectedVersion: 2, reason: '延長' }));
+    expect(extend.status).toBe(422);
+  });
+
+  it('運搬ルール: 運搬区分が違えば重なっても可（品番・作業内容・区分で判定）。固定費は品番＋費目', async () => {
+    const c = await create('customers', { code: 'CU-BIL3', name: '請求顧客3', closingDay: 31 });
+    const p = await create('products', { customerId: c.id, code: 'P-BIL4', name: '品4', settlementType: 'QUANTITY' });
+    expect((await make('transport-rules', { productId: p.id, transportType: 'ALLOCATED', amountYen: 2500, validFrom: '2026-01-01' })).status).toBe(201);
+    expect((await make('transport-rules', { productId: p.id, transportType: 'PER_TRIP', amountYen: 1000, validFrom: '2026-01-01' })).status).toBe(201);
+    expect((await make('transport-rules', { productId: p.id, transportType: 'ALLOCATED', amountYen: 3000, validFrom: '2026-05-01' })).status).toBe(422);
+    expect((await make('fixed-charges', { productId: p.id, label: '保管料', amountYen: 5000, validFrom: '2026-01-01' })).status).toBe(201);
+    expect((await make('fixed-charges', { productId: p.id, label: '管理費', amountYen: 1000, validFrom: '2026-01-01' })).status).toBe(201);
+    expect((await make('fixed-charges', { productId: p.id, label: '保管料', amountYen: 6000, validFrom: '2026-03-01' })).status).toBe(422);
+  });
+});
+
 describe('T-MST-001 休日・担当者', () => {
   it('過去日の休日作成は audit に retroactive=true、無効化は reason 必須', async () => {
     const h = await create('holidays', { holidayDate: '2026-05-06', name: '振替休日' });

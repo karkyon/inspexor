@@ -5,12 +5,14 @@
  *  - 参照保護: 物理削除なし（無効化のみ）、親参照は作成後変更不可、無効な親への新規参照は 422 MASTER_INACTIVE
  *  - 遡及（CHG-001 D7）: 休日の過去日に掛かる更新・無効化は reason 必須、audit に retroactive を記録
  *  - preview=true: 書込まず MasterImpact を返す（REQ-MST-001 遡及影響preview）
- *  - CHG-006 F1: 請求専用マスタ（単価・運搬・固定費ルール）は移行しない（Blind）。API は 404
+ *  - CHG-006 F1 / CHG-009: 請求専用マスタ（単価・運搬・固定費ルール）は請求機能（BILLING_ENABLED）が有効なときだけ使える。無効なら 404（Blind）
+ *  - CHG-009: ルールは一意キーの代わりに「有効なルールどうしの適用期間の重なり禁止」（overlapKeys）。validTo≧validFrom、割増倍率≧1、作業内容は同じ品番のもの
  */
 import { randomUUID } from 'node:crypto';
-import { isRetroactiveChange, jstBusinessDate, type DateRange } from '@inspexor/domain';
+import { isRetroactiveChange, jstBusinessDate, rangesOverlap, type DateRange } from '@inspexor/domain';
 import { appendAudit, C, claimUnique, readUniqueOwner, releaseUnique, type DocReader, type DocStore, type DocTransaction } from '@inspexor/docstore';
 import { MASTER_DEFS, type FieldDef, type MasterDef, type MasterType } from './definitions';
+import { countOpenBillingRuns } from '../billing/billing-service';
 import type { MasterInput } from './schemas';
 
 export class MasterError extends Error {
@@ -100,10 +102,10 @@ function duplicate(def: MasterDef): MasterError {
   ]);
 }
 
-function defOf(type: MasterType): MasterDef {
+function defOf(type: MasterType, billing: boolean): MasterDef {
   const def = MASTER_DEFS[type];
-  if (def.blind === true) {
-    // CHG-006 F1: 請求専用マスタは提案書の対象外（Blind）。未定義の種別と同じく 404
+  if (def.blind === true && !billing) {
+    // CHG-006 F1: 請求専用マスタは提案書の対象外（Blind）。請求機能が無効なら未定義の種別と同じく 404
     throw new MasterError(404, 'VALIDATION_ERROR', 'マスタ種別が見つかりません。', [{ path: '/type', code: 'not_found', message: '未定義のマスタ種別です。' }]);
   }
   return def;
@@ -181,7 +183,7 @@ async function countWhere(db: DocReader, collection: string, field: string, op: 
 
 /**
  * 影響 preview。CHG-006: 実績の参照数は報告ヘッダの要約（最新の版の品番・作業者・車両・作業場所・不良種）で数える。
- * 休日の遡及は確定済みの現在版の業務日（current.businessDate）で数える。請求 run は Blind のため常に 0。
+ * 休日の遡及は確定済みの現在版の業務日（current.businessDate）で数える。CHG-009: 確定前の請求 run の数も数える。
  */
 async function computeImpact(db: DocReader, def: MasterDef, record: MasterRecord | null, before: DateRange | null, after: DateRange | null, today: string): Promise<MasterImpact> {
   const retroactive = isRetroactiveChange(def.retroactive, before, after, today);
@@ -223,7 +225,56 @@ async function computeImpact(db: DocReader, def: MasterDef, record: MasterRecord
     }
   }
 
-  return { retroactive, affectedRecordCount, affectedOpenBillingRunCount: 0, finalizedBillingUnaffected: true, referencedBy };
+  // CHG-009: 確定前の請求 run のうち、期間が重なるもの（ルールはその品番のお客様、休日は全お客様）。確定済みは snapshot のため影響しない
+  let affectedOpenBillingRunCount = 0;
+  const ranges = [before, after].filter((r): r is DateRange => r !== null);
+  if (ranges.length > 0 && (def.retroactive === 'RULE' || def.retroactive === 'HOLIDAY')) {
+    const from = ranges.map((r) => r.from).sort()[0] as string;
+    const to = ranges.some((r) => r.to === null) ? null : (ranges.map((r) => r.to as string).sort().reverse()[0] as string);
+    let customerId: string | null = null;
+    if (def.retroactive === 'RULE') {
+      const productId = (record?.['productId'] ?? null) as string | null;
+      const product = productId === null ? null : await db.get<{ customerId: string }>(`${C.products}/${productId}`);
+      customerId = product?.customerId ?? null;
+    }
+    if (def.retroactive === 'HOLIDAY' || customerId !== null) affectedOpenBillingRunCount = await countOpenBillingRuns(db, { customerId, from, to });
+  }
+
+  return { retroactive, affectedRecordCount, affectedOpenBillingRunCount, finalizedBillingUnaffected: true, referencedBy };
+}
+
+const ruleError = (path: string, code: string, message: string): MasterError => new MasterError(422, 'VALIDATION_ERROR', message, [{ path, code, message }]);
+
+/**
+ * CHG-009: 請求ルール（単価・運搬・固定費）の検査。transaction の読込段階で呼ぶ。
+ * 有効なルールどうしで overlapKeys が同じ値かつ適用期間が重なれば 422（PostgreSQL の EXCLUDE USING gist ... WHERE (active) と同じ）
+ */
+async function checkRule(db: DocReader, def: MasterDef, input: MasterInput, selfId: string | null, active: boolean): Promise<void> {
+  const from = input['validFrom'] as string;
+  const to = (input['validTo'] as string | null | undefined) ?? null;
+  if (to !== null && to < from) throw ruleError('/validTo', 'range', '適用終了日は適用開始日以降の日付にしてください。');
+  const multiplier = input['overtimeMultiplier'];
+  if (typeof multiplier === 'string' && Number(multiplier) < 1) throw ruleError('/overtimeMultiplier', 'min', '割増倍率は 1 以上にしてください。');
+  const workTypeId = input['workTypeId'];
+  if (typeof workTypeId === 'string') {
+    const wt = await db.get<{ productId: string }>(`${C.workTypes}/${workTypeId}`);
+    if (wt !== null && wt.productId !== input['productId']) throw ruleError('/workTypeId', 'mismatch', '作業内容が品番に属していません。');
+  }
+  if (!active || def.overlapKeys === undefined) return;
+  const rows = await db.query<Record<string, unknown> & { active: boolean }>(def.collection, { where: [{ field: 'productId', op: '==', value: input['productId'] as string }] });
+  const clash = rows.find(
+    (r) =>
+      r.id !== selfId &&
+      r.data.active &&
+      (def.overlapKeys ?? []).every((k) => (r.data[k] ?? null) === (input[k] ?? null)) &&
+      rangesOverlap({ from, to }, { from: r.data['validFrom'] as string, to: (r.data['validTo'] as string | null | undefined) ?? null }),
+  );
+  if (clash !== undefined) {
+    const range = `${clash.data['validFrom'] as string}〜${(clash.data['validTo'] as string | null) ?? '無期限'}`;
+    throw new MasterError(422, 'VALIDATION_ERROR', `適用期間が既存の${def.label}（${range}）と重なっています。`, [
+      { path: '/validFrom', code: 'overlap', message: `適用期間が既存の${def.label}（${range}）と重なっています。` },
+    ], { conflictId: clash.id });
+  }
 }
 
 function compareBy(def: MasterDef): (a: { id: string; data: MasterDoc }, b: { id: string; data: MasterDoc }) => number {
@@ -248,10 +299,18 @@ async function readCurrent(tx: DocReader, def: MasterDef, id: string): Promise<M
 }
 
 export class MasterService {
-  constructor(private readonly store: DocStore) {}
+  private readonly billing: boolean;
+
+  /** options.billing: 請求機能（BILLING_ENABLED）が有効か。無効なら請求専用マスタは 404 */
+  constructor(
+    private readonly store: DocStore,
+    options: { readonly billing?: boolean } = {},
+  ) {
+    this.billing = options.billing === true;
+  }
 
   async list(type: MasterType, page: number, pageSize: number): Promise<{ data: MasterRecord[]; meta: { page: number; pageSize: number; total: number } }> {
-    const def = defOf(type);
+    const def = defOf(type, this.billing);
     // マスタは数百件規模のため全件を読み、アプリで並べ替える（複合索引を増やさない）
     const rows = await this.store.query<MasterDoc>(def.collection);
     rows.sort(compareBy(def));
@@ -263,22 +322,27 @@ export class MasterService {
   }
 
   async get(type: MasterType, id: string): Promise<MasterRecord> {
-    const def = defOf(type);
+    const def = defOf(type, this.billing);
     return readCurrent(this.store, def, id);
   }
 
   async create(type: MasterType, input: MasterInput, ctx: MasterContext): Promise<MasterRecord> {
-    const def = defOf(type);
+    const def = defOf(type, this.billing);
     const id = randomUUID();
     return this.store.runTransaction(async (tx) => {
       await checkReferences(tx, def, input);
+      const activeValue = (input['active'] as boolean | undefined) ?? true;
       const scope = uniqueScopeOf(def, input);
       const uniqueValue = String(input[def.uniqueField]);
-      if ((await readUniqueOwner(tx, UNIQUE_KIND(def), scope, uniqueValue)) !== null) throw duplicate(def);
-      const doc: MasterDoc = { ...fieldsOf(def, input), version: 1, active: (input['active'] as boolean | undefined) ?? true, createdAt: ctx.now, updatedAt: ctx.now };
+      if (def.overlapKeys !== undefined) {
+        await checkRule(tx, def, input, null, activeValue);
+      } else if ((await readUniqueOwner(tx, UNIQUE_KIND(def), scope, uniqueValue)) !== null) {
+        throw duplicate(def);
+      }
+      const doc: MasterDoc = { ...fieldsOf(def, input), version: 1, active: activeValue, createdAt: ctx.now, updatedAt: ctx.now };
       const created = toRecord(def, id, doc);
       const retroactive = isRetroactiveChange(def.retroactive, null, rangeOf(def, created), jstBusinessDate(ctx.now));
-      claimUnique(tx, UNIQUE_KIND(def), scope, uniqueValue, id);
+      if (def.overlapKeys === undefined) claimUnique(tx, UNIQUE_KIND(def), scope, uniqueValue, id);
       tx.create(`${def.collection}/${id}`, doc);
       appendAudit(tx, { actorId: ctx.actorId, action: 'MASTER_CREATE', targetType: `MASTER:${type}`, targetId: id, afterData: { record: created, retroactive }, correlationId: ctx.correlationId, occurredAt: ctx.now }, ctx.now);
       return created;
@@ -292,7 +356,7 @@ export class MasterService {
     ctx: MasterContext,
     preview: boolean,
   ): Promise<{ kind: 'record'; record: MasterRecord } | { kind: 'impact'; impact: MasterImpact }> {
-    const def = defOf(type);
+    const def = defOf(type, this.billing);
     return this.store.runTransaction(async (tx) => {
       const current = await readCurrent(tx, def, id);
       if (current.version !== input['expectedVersion']) throw versionConflict(current, input);
@@ -307,7 +371,8 @@ export class MasterService {
       const scope = uniqueScopeOf(def, current);
       const oldValue = String(current[def.uniqueField]);
       const newValue = String(input[def.uniqueField]);
-      const keyChanged = oldValue !== newValue;
+      const keyChanged = def.overlapKeys === undefined && oldValue !== newValue;
+      if (def.overlapKeys !== undefined) await checkRule(tx, def, input, id, (input['active'] as boolean | undefined) ?? current.active);
       if (keyChanged) {
         const owner = await readUniqueOwner(tx, UNIQUE_KIND(def), scope, newValue);
         if (owner !== null && owner !== id) throw duplicate(def);
@@ -352,7 +417,7 @@ export class MasterService {
     ctx: MasterContext,
     preview: boolean,
   ): Promise<{ kind: 'done' } | { kind: 'impact'; impact: MasterImpact }> {
-    const def = defOf(type);
+    const def = defOf(type, this.billing);
     return this.store.runTransaction(async (tx: DocTransaction) => {
       const current = await readCurrent(tx, def, id);
       if (current.version !== command.expectedVersion) {

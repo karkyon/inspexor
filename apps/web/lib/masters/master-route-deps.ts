@@ -1,3 +1,4 @@
+import { featureFlags } from '@inspexor/domain';
 import { StoreAuditRepository } from '@inspexor/docstore';
 import { getDocStore } from '../db/docstore';
 import { getSessionSecret } from '../auth/session-secret';
@@ -6,7 +7,7 @@ import type { MasterRouteDeps } from './master-handlers';
 import { appUserGuard } from '../auth/app-user-guard';
 
 export const masterRouteDeps: MasterRouteDeps = {
-  service: () => new MasterService(getDocStore()),
+  service: () => new MasterService(getDocStore(), { billing: featureFlags(process.env).billing }),
   api: () => ({
     sessionSecret: getSessionSecret(),
     now: () => new Date(),

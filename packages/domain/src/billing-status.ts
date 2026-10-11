@@ -1,10 +1,10 @@
 /**
  * INSPEXOR_システム基本設計書_v5.1.md §状態遷移（Billing行）準拠。
  *
- * GAP: schema.sqlのapp.billing_statusにはVOIDEDが定義されているが、
- * どの資料にもVOIDEDへの遷移元/遷移先/guard/roleの記載が見つからなかった。
- * 推測で遷移を作らず、未解決のまま UNDOCUMENTED_BILLING_STATES として明示する。
- * （未決事項・変更管理台帳へのGAP登録を推奨）
+ * CHG-009 で次を追加した（設計書に記載が無かった遷移）:
+ *  - 再計算: CALCULATED / NEEDS_REVIEW / REVIEWED → calculate → CALCULATING（仕様書「再計算は新calc_versionで旧結果を保持」）
+ *  - 取消: OPEN / CALCULATED / NEEDS_REVIEW / REVIEWED → void → VOIDED（確定前の請求 run の取消。理由必須）
+ *    確定後（FINALIZED 以降）の無効化は請求書の無効化（API-023 void、遅延訂正）で扱う
  */
 
 export type BillingStatus =
@@ -18,11 +18,12 @@ export type BillingStatus =
   | 'SENT'
   | 'VOIDED';
 
-export const UNDOCUMENTED_BILLING_STATES: readonly BillingStatus[] = ['VOIDED'] as const;
+/** CHG-009 で VOIDED の遷移を定義したため空 */
+export const UNDOCUMENTED_BILLING_STATES: readonly BillingStatus[] = [] as const;
 
 export type BillingRole = 'OFFICE' | 'ADMIN' | 'SYSTEM';
 
-export type BillingCommand = 'calculate' | 'complete' | 'review' | 'finalize' | 'issue' | 'mailSent';
+export type BillingCommand = 'calculate' | 'complete' | 'review' | 'finalize' | 'issue' | 'mailSent' | 'void';
 
 export interface BillingTransitionRule {
   readonly from: BillingStatus;
@@ -34,12 +35,19 @@ export interface BillingTransitionRule {
 
 export const BILLING_TRANSITIONS: readonly BillingTransitionRule[] = [
   { from: 'OPEN', command: 'calculate', to: 'CALCULATING', allowedRoles: ['OFFICE', 'ADMIN'], guardNote: 'period unique' },
+  { from: 'CALCULATED', command: 'calculate', to: 'CALCULATING', allowedRoles: ['OFFICE', 'ADMIN'], guardNote: 'CHG-009 再計算（新calc_version）' },
+  { from: 'NEEDS_REVIEW', command: 'calculate', to: 'CALCULATING', allowedRoles: ['OFFICE', 'ADMIN'], guardNote: 'CHG-009 再計算（新calc_version）' },
+  { from: 'REVIEWED', command: 'calculate', to: 'CALCULATING', allowedRoles: ['OFFICE', 'ADMIN'], guardNote: 'CHG-009 再計算（新calc_version）' },
   { from: 'CALCULATING', command: 'complete', to: { withWarnings: 'NEEDS_REVIEW', withoutWarnings: 'CALCULATED' }, allowedRoles: ['SYSTEM'], guardNote: 'warning有無' },
   { from: 'NEEDS_REVIEW', command: 'review', to: 'REVIEWED', allowedRoles: ['OFFICE', 'ADMIN'], guardNote: '全warning disposition' },
   { from: 'CALCULATED', command: 'finalize', to: 'FINALIZED', allowedRoles: ['OFFICE', 'ADMIN'], guardNote: 'source versions一致' },
   { from: 'REVIEWED', command: 'finalize', to: 'FINALIZED', allowedRoles: ['OFFICE', 'ADMIN'], guardNote: 'source versions一致' },
   { from: 'FINALIZED', command: 'issue', to: 'ISSUED', allowedRoles: ['SYSTEM'], guardNote: 'PDF hash有' },
   { from: 'ISSUED', command: 'mailSent', to: 'SENT', allowedRoles: ['SYSTEM'], guardNote: 'provider id有' },
+  { from: 'OPEN', command: 'void', to: 'VOIDED', allowedRoles: ['OFFICE', 'ADMIN'], guardNote: 'CHG-009 確定前の取消、理由必須' },
+  { from: 'CALCULATED', command: 'void', to: 'VOIDED', allowedRoles: ['OFFICE', 'ADMIN'], guardNote: 'CHG-009 確定前の取消、理由必須' },
+  { from: 'NEEDS_REVIEW', command: 'void', to: 'VOIDED', allowedRoles: ['OFFICE', 'ADMIN'], guardNote: 'CHG-009 確定前の取消、理由必須' },
+  { from: 'REVIEWED', command: 'void', to: 'VOIDED', allowedRoles: ['OFFICE', 'ADMIN'], guardNote: 'CHG-009 確定前の取消、理由必須' },
 ] as const;
 
 export interface BillingActor {

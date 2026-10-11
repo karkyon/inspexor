@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { MASTER_DEFS, MASTER_TYPES } from './definitions';
-import { MASTER_NAV, NAV_LABEL, LIST_COLUMNS, FIELD_LABELS, emptyFormState, formStateToPayload, recordToFormState, formatCell, type Lookups } from './ui';
+import { MASTER_NAV, masterNav, NAV_LABEL, LIST_COLUMNS, FIELD_LABELS, emptyFormState, formStateToPayload, recordToFormState, formatCell, type Lookups } from './ui';
 import { writeSchema } from './schemas';
 
 const lookups: Lookups = {
@@ -15,6 +15,9 @@ describe('SCR-13 表示定義', () => {
     expect(nav).toEqual(['customers', 'contacts', 'products', 'work-types', 'defects', 'workers', 'work-locations', 'vehicles', 'holidays']);
     expect(new Set(nav).size).toBe(nav.length);
     for (const hidden of ['rates', 'transport-rules', 'fixed-charges']) expect(nav).not.toContain(hidden);
+    // CHG-009: 請求機能が有効なら請求マスタを足す
+    expect(masterNav(true).map((n) => n.type).slice(-3)).toEqual(['rates', 'transport-rules', 'fixed-charges']);
+    expect(masterNav(false)).toBe(MASTER_NAV);
     for (const type of MASTER_TYPES) expect(NAV_LABEL[type]).toBeTruthy();
   });
   it('一覧列・全項目にラベルがあり、定義済み項目だけを使う', () => {

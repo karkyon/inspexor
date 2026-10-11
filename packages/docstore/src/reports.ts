@@ -81,6 +81,8 @@ export interface ReportHeaderDoc {
   readonly submittedAt?: Date | null;
   /** 直近の承認・差戻し・取消（修正で新しい版を作っても残す。次の判断で上書き。履歴は監査） */
   readonly decision?: RecordDecision | null;
+  // ---- CHG-009 請求（BILLING_ENABLED）。請求確定（BILLING_LOCKED）にした請求 run
+  readonly billingRunId?: string | null;
 }
 
 export interface RecordDecision {

@@ -40,8 +40,22 @@ describe('billing-status: システム基本設計書 §状態遷移 準拠', ()
     expect(resolveBillingTransition('ISSUED', 'mailSent', { roles: ['SYSTEM'] })).toEqual({ ok: true, to: 'SENT' });
   });
 
-  it('VOIDEDは未解決状態としてマークされている', () => {
-    expect(UNDOCUMENTED_BILLING_STATES).toContain('VOIDED');
+  it('CHG-009: VOIDED の遷移を定義したため未解決状態は無い', () => {
+    expect(UNDOCUMENTED_BILLING_STATES).toEqual([]);
+  });
+
+  it('CHG-009: 再計算（CALCULATED/NEEDS_REVIEW/REVIEWED → CALCULATING）と確定前の取消（→ VOIDED）', () => {
+    for (const from of ['CALCULATED', 'NEEDS_REVIEW', 'REVIEWED'] as const) {
+      expect(resolveBillingTransition(from, 'calculate', { roles: ['OFFICE'] })).toEqual({ ok: true, to: 'CALCULATING' });
+    }
+    for (const from of ['OPEN', 'CALCULATED', 'NEEDS_REVIEW', 'REVIEWED'] as const) {
+      expect(resolveBillingTransition(from, 'void', { roles: ['ADMIN'] })).toEqual({ ok: true, to: 'VOIDED' });
+    }
+    for (const from of ['CALCULATING', 'FINALIZED', 'ISSUED', 'SENT', 'VOIDED'] as const) {
+      expect(resolveBillingTransition(from, 'void', { roles: ['ADMIN'] }).ok).toBe(false);
+    }
+    expect(resolveBillingTransition('FINALIZED', 'calculate', { roles: ['ADMIN'] }).ok).toBe(false);
+    expect(resolveBillingTransition('NEEDS_REVIEW', 'finalize', { roles: ['ADMIN'] }).ok).toBe(false);
   });
 
   it('未定義の遷移はSTATE_CONFLICT', () => {

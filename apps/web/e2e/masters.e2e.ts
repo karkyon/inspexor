@@ -13,6 +13,17 @@ async function login(page: Page): Promise<void> {
   await expect(page).toHaveURL(/\/$/);
 }
 
+async function billingEnabled(page: Page): Promise<boolean> {
+  const me = (await (await page.request.get('/api/v1/me')).json()) as { data?: { features?: { billing?: boolean } } };
+  return me.data?.features?.billing === true;
+}
+
+/** 2100年以降で実行ごとに異なる日（既存ルールと期間が重ならないように） */
+function uniqueFarDate(): string {
+  const d = new Date(Date.UTC(2100, 0, 1) + (Math.floor(Date.now() / 1000) % 36_000) * 86_400_000);
+  return d.toISOString().slice(0, 10);
+}
+
 test.describe('G2-E2E: SCR-13 マスター管理', () => {
   test.beforeAll(() => {
     if (PASSWORD.length === 0) throw new Error('E2E_PASSWORD が未設定です');
@@ -92,7 +103,9 @@ test.describe('G2-E2E: SCR-13 マスター管理', () => {
     const nav = page.getByRole('navigation', { name: 'マスター種別' });
     await expect(nav.getByRole('link', { name: /車両/ })).toBeVisible();
     await expect(nav.getByRole('link', { name: /作業場所/ })).toBeVisible();
-    for (const hidden of [/単価ルール/, /運搬ルール/, /固定費/]) await expect(nav.getByRole('link', { name: hidden })).toHaveCount(0);
+    // CHG-009: 請求マスタは請求機能（BILLING_ENABLED）が有効なときだけ表示
+    const billing = await billingEnabled(page);
+    for (const hidden of [/単価ルール/, /運搬ルール/, /固定費/]) await expect(nav.getByRole('link', { name: hidden })).toHaveCount(billing ? 1 : 0);
     await expect(nav.getByRole('link', { name: /お客様担当者/ })).toBeVisible(); // CHG-005: 日報の担当者欄
     await nav.getByRole('link', { name: /車両/ }).click();
     await expect(page).toHaveURL(/\/admin\/masters\/vehicles$/);
@@ -103,6 +116,36 @@ test.describe('G2-E2E: SCR-13 マスター管理', () => {
     await page.getByRole('button', { name: '登録する' }).click();
     await expect(page).toHaveURL(/\/admin\/masters\/vehicles\?saved=created$/);
     await expect(page.getByRole('cell', { name: code, exact: true })).toBeVisible();
+  });
+
+  test('CHG-009: 請求機能が有効なら単価ルールを追加 → 期間の重なりは項目エラー → 無効化', async ({ page }) => {
+    await login(page);
+    test.skip(!(await billingEnabled(page)), '請求機能（BILLING_ENABLED）が無効の環境ではスキップ');
+    const day = uniqueFarDate();
+    await page.goto('/admin/masters/rates');
+    await expect(page.getByRole('heading', { level: 1, name: 'マスター管理' })).toBeVisible();
+    for (let i = 0; i < 2; i += 1) {
+      await page.goto('/admin/masters/rates/new');
+      await page.getByLabel(/^品番/).selectOption({ label: 'SYN-P01 合成品番01（運搬対象）' });
+      await page.getByLabel(/^単価/).fill('4.4');
+      await page.getByLabel(/^適用開始日/).fill(day);
+      await page.getByLabel(/^適用終了日/).fill(day);
+      await page.getByRole('button', { name: '登録する' }).click();
+      if (i === 0) await expect(page).toHaveURL(/\/admin\/masters\/rates\?saved=created$/);
+    }
+    // 2件目は同じ品番・全作業・同じ期間のため 422（適用期間の重なり）
+    await expect(page.getByLabel(/^適用開始日/)).toHaveAttribute('aria-invalid', 'true');
+    await expect(page.locator('.ix-errorsummary')).toContainText('重なっています');
+    // 後始末: 1件目を無効化
+    const list = (await (await page.request.get('/api/v1/masters/rates?pageSize=100')).json()) as { data: Array<{ id: string; validFrom: string; active: boolean }> };
+    const created = list.data.find((r) => r.validFrom === day && r.active);
+    expect(created).toBeDefined();
+    await page.goto(`/admin/masters/rates/${created?.id ?? ''}`);
+    await page.getByRole('button', { name: '無効化', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByLabel(/理由/).fill('E2E の後片付け');
+    await dialog.getByRole('button', { name: '無効化する' }).click();
+    await expect(page).toHaveURL(/saved=deactivated$/);
   });
 
   // CHG-006 F1: 単価ルール（請求専用マスタ）は Firestore に移行しない（Blind）ため、影響確認の E2E は削除

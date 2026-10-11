@@ -86,6 +86,8 @@ export const OPERATION_POLICIES = {
   createUser: { apiId: 'API-031', method: 'POST', path: '/users', access: roles(['ADMIN']), idempotent: false },
   updateUser: { apiId: 'API-032', method: 'PATCH', path: '/users/{id}', access: roles(['ADMIN']), idempotent: false },
   userAction: { apiId: 'API-033', method: 'POST', path: '/users/{id}/{action}', access: roles(['ADMIN']), idempotent: false },
+  // CHG-009: 請求 run の一覧（SCR-14）。BILLING_ENABLED のときだけ提供
+  listBillingRuns: { apiId: 'API-034', method: 'GET', path: '/billing-runs', access: roles(['OFFICE', 'ADMIN', 'AUDITOR']), idempotent: false },
 } as const satisfies Record<string, OperationPolicy>;
 
 export type OperationId = keyof typeof OPERATION_POLICIES;
