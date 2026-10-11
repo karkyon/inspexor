@@ -45,16 +45,29 @@ export function loadFixtureTemplate(type: TemplateType, dir = TEMPLATE_DIR): Loa
 /**
  * registry に登録（無ければ追加）。登録済みの sha256 と原本が違う場合は使わない（version 固定の破れ＝TEMPLATE_INVALID）。
  */
+/** 登録確認済みの template（store ごと。同じ process では2回目以降 Firestore を読まない） */
+const registered = new WeakMap<DocStore, Set<string>>();
+
 export async function ensureRegistered(store: DocStore, t: LoadedTemplate, now: Date): Promise<'ok' | 'hash_mismatch'> {
   const path = templateVersionPath(t.type, 'V1');
-  const current = await store.runTransaction(async (tx) => {
-    const found = await tx.get<TemplateVersionDoc>(path);
-    if (found !== null) return found;
-    const doc: TemplateVersionDoc = { templateType: t.type, version: 'V1', providerTemplateId: t.providerTemplateId, sha256: t.sha256, activeFrom: now };
-    tx.create(path, doc);
-    return doc;
-  });
-  return current.sha256 === t.sha256 ? 'ok' : 'hash_mismatch';
+  const cacheKey = `${path}:${t.sha256}`;
+  if (registered.get(store)?.has(cacheKey) === true) return 'ok';
+  // 登録済みなら transaction 不要（通常はこちら）
+  const existing = await store.get<TemplateVersionDoc>(path);
+  const current =
+    existing ??
+    (await store.runTransaction(async (tx) => {
+      const found = await tx.get<TemplateVersionDoc>(path);
+      if (found !== null) return found;
+      const doc: TemplateVersionDoc = { templateType: t.type, version: 'V1', providerTemplateId: t.providerTemplateId, sha256: t.sha256, activeFrom: now };
+      tx.create(path, doc);
+      return doc;
+    }));
+  if (current.sha256 !== t.sha256) return 'hash_mismatch';
+  const set = registered.get(store) ?? new Set<string>();
+  set.add(cacheKey);
+  registered.set(store, set);
+  return 'ok';
 }
 
 const n = (v: number) => v.toLocaleString('ja-JP');

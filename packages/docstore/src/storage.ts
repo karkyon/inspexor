@@ -81,7 +81,11 @@ function gcsError(error: unknown, op: string): StorageError {
 }
 
 export class GcsStorage implements StorageAdapter {
-  private readonly storage = new Storage();
+  /**
+   * 1回の HTTP 要求は 30 秒で打ち切り、再試行は最大3回・間隔8秒まで・合計60秒（既定は合計600秒で、障害時に job が長く止まるため）。
+   * それでも失敗したら DEPENDENCY_UNAVAILABLE（retry 対象）として job の再試行に任せる。
+   */
+  private readonly storage = new Storage({ timeout: 30_000, retryOptions: { maxRetries: 3, maxRetryDelay: 8, totalTimeout: 60 } });
 
   constructor(private readonly bucket: string) {}
 

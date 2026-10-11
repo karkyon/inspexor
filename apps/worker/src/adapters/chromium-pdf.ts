@@ -35,15 +35,25 @@ export class ChromiumPdfRenderer implements PdfRenderer {
     const file = join(dir, 'document.html');
     try {
       await writeFile(file, html.replace('</head>', `${fontLinks()}</head>`), 'utf8');
+      const t0 = Date.now();
       const browser = await this.getBrowser();
       const page = await browser.newPage();
+      const t1 = Date.now();
       try {
         await page.route('**/*', (route) => (route.request().url().startsWith('file:') ? route.continue() : route.abort()));
         await page.goto(pathToFileURL(file).href, { waitUntil: 'load', timeout: 60_000 });
+        const t2 = Date.now();
         await page.evaluate(async () => {
           await document.fonts.ready;
         });
-        return await page.pdf({ format: 'A4', printBackground: true, preferCSSPageSize: true });
+        const t3 = Date.now();
+        const pdf = await page.pdf({ format: 'A4', printBackground: true, preferCSSPageSize: true });
+        const t4 = Date.now();
+        // 遅いときだけ内訳を記録（起動・読込・フォント・PDF化）
+        if (t4 - t0 >= 10_000 && process.env['VITEST'] === undefined) {
+          console.log(`[worker] render slow browser=${t1 - t0} load=${t2 - t1} fonts=${t3 - t2} pdf=${t4 - t3}`);
+        }
+        return pdf;
       } finally {
         await page.close();
       }

@@ -84,9 +84,37 @@ async function claim(store: DocStore, now: Date): Promise<JobRow | null> {
   return null;
 }
 
+/**
+ * 処理時間の記録（工程ごと）。遅い工程を worker のログで特定できるようにする（CHG-006 g24b）。
+ * 出力: [worker] job <id 先頭8桁> <template> <結果> claim=… snapshot=… template=… render=… put=… get=… commit=… total=…（ms）
+ */
+class StepTimer {
+  private readonly started = Date.now();
+  private last = this.started;
+  private readonly steps: Array<[string, number]> = [];
+
+  lap(name: string): void {
+    const now = Date.now();
+    this.steps.push([name, now - this.last]);
+    this.last = now;
+  }
+
+  line(job: JobRow, outcome: string): string {
+    const parts = this.steps.map(([k, v]) => `${k}=${v}`).join(' ');
+    return `[worker] job ${job.id.slice(0, 8)} ${job.templateVersion} ${outcome} ${parts} total=${Date.now() - this.started}`;
+  }
+}
+
+/** 試験では出さない（WORKER_TIMING=0 で抑止。既定は出す） */
+function logTiming(line: string): void {
+  if (process.env['WORKER_TIMING'] !== '0' && process.env['VITEST'] === undefined) console.log(line);
+}
+
 export async function processOneDocumentJob(deps: DocumentDeps): Promise<'none' | 'generated' | 'retry' | 'final'> {
+  const timer = new StepTimer();
   const job = await claim(deps.store, deps.now());
   if (job === null) return 'none';
+  timer.lap('claim');
   const template = job.templateVersion as TemplateType;
   try {
     const src = { reportId: job.reportId, revisionId: job.revisionId };
@@ -95,6 +123,7 @@ export async function processOneDocumentJob(deps: DocumentDeps): Promise<'none' 
         ? await workSnapshot(deps.store, src, template === 'DAILY_REPORT_V1' ? 'DAILY_REPORT_V1' : 'DAILY_REPORT_V2')
         : await deliverySnapshot(deps.store, src);
     if (snapshot === null || snapshot.type !== template) throw new FinalFailure('SOURCE_NOT_FOUND', '確定済み revision が見つかりません');
+    timer.lap('snapshot');
     let loaded;
     try {
       loaded = loadFixtureTemplate(template, deps.templateDir);
@@ -105,13 +134,17 @@ export async function processOneDocumentJob(deps: DocumentDeps): Promise<'none' 
     const html = renderTemplate(loaded.html, snapshot.values);
     const unresolved = findUnresolvedPlaceholders(html);
     if (unresolved.length > 0) throw new FinalFailure('TEMPLATE_INVALID', `未置換 placeholder: ${unresolved.join(', ')}`);
+    timer.lap('template');
     const pdf = await deps.pdf.render(html);
+    timer.lap('render');
     if (pdf.byteLength > MAIL_MAX_TOTAL_BYTES) throw new FinalFailure('FILE_TOO_LARGE', `PDF が上限を超えています（${pdf.byteLength} bytes）`);
     const sha256 = createHash('sha256').update(pdf).digest('hex');
     const fileName = documentFileName(template, snapshot.fileName);
     const storageKey = `documents/${job.documentType}/${snapshot.reportNo}/${job.id}/${fileName}`;
     await deps.storage.put(storageKey, pdf, 'application/pdf');
+    timer.lap('put');
     const readBack = await deps.storage.get(storageKey);
+    timer.lap('get');
     if (createHash('sha256').update(readBack.bytes).digest('hex') !== sha256) throw new FinalFailure('HASH_MISMATCH', '保存した PDF の hash が一致しません');
 
     const now = deps.now();
@@ -174,6 +207,8 @@ export async function processOneDocumentJob(deps: DocumentDeps): Promise<'none' 
       }
       if (mail !== null) mail();
     });
+    timer.lap('commit');
+    logTiming(timer.line(job, 'generated'));
     return 'generated';
   } catch (error) {
     const final = error instanceof FinalFailure;
@@ -206,6 +241,8 @@ export async function processOneDocumentJob(deps: DocumentDeps): Promise<'none' 
         });
       }
     });
+    timer.lap('fail');
+    logTiming(`${timer.line(job, outcome.status)} error=${code}`);
     return outcome.status === 'FAILED_FINAL' ? 'final' : 'retry';
   }
 }

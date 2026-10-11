@@ -6,7 +6,11 @@ import { processOneMailJob, type MailDeps } from './mail-jobs';
 export interface WorkerDeps extends DocumentDeps, MailDeps {}
 
 export async function runOnce(deps: WorkerDeps, maxJobs = 10): Promise<{ dispatched: number; documents: string[]; mails: string[] }> {
+  const started = Date.now();
   const dispatched = await dispatchOutbox(deps.store, deps.now());
+  const ms = Date.now() - started;
+  // 配送が遅いときだけ記録（遅い工程の特定用。試験では出さない）
+  if (ms >= 2000 && process.env['WORKER_TIMING'] !== '0' && process.env['VITEST'] === undefined) console.log(`[worker] dispatch events=${dispatched} ms=${ms}`);
   const documents: string[] = [];
   for (let i = 0; i < maxJobs; i += 1) {
     const r = await processOneDocumentJob(deps);
