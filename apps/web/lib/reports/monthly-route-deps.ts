@@ -1,9 +1,9 @@
-import { getPool } from '../db/pg';
-import { PgAuditRepository } from '../db/pg-audit-repository';
+import { StoreAuditRepository } from '@inspexor/docstore';
+import { getDocStore } from '../db/docstore';
 import { getSessionSecret } from '../auth/session-secret';
 import type { MonthlyRouteDeps } from './monthly-handlers';
 
 export const monthlyRouteDeps: MonthlyRouteDeps = {
-  pool: () => getPool(),
-  api: () => ({ sessionSecret: getSessionSecret(), now: () => new Date(), auditRepository: new PgAuditRepository(getPool()) }),
+  store: () => getDocStore(),
+  api: () => ({ sessionSecret: getSessionSecret(), now: () => new Date(), auditRepository: new StoreAuditRepository(getDocStore()) }),
 };

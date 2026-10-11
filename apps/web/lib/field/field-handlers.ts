@@ -10,8 +10,7 @@ import { createApiHandler, type ApiContext, type ApiHandlerDeps } from '../http/
 import { errorResponse, dataResponse } from '../http/api-response';
 import { zodIssueMessageJa, type ZodIssueLike } from '../http/zod-messages';
 import { beginIdempotentRequest, computeRequestHash } from '../idempotency/idempotency-service';
-import { PgIdempotencyRepository } from '../db/pg-idempotency-repository';
-import type { Pool } from 'pg';
+import type { IdempotencyRepository } from '@inspexor/application';
 import { FieldError, type FieldContext, type FieldReportService, type FieldReportType } from './field-report-service';
 import { deliveryDraftSchema, deliveryFeeSchema, deliveryUpdateSchema, fieldCommandSchema, workDraftSchema, workUpdateSchema } from './schemas';
 
@@ -23,7 +22,8 @@ const LABEL: Record<FieldReportType, string> = { WORK: '作業日報', DELIVERY:
 
 export interface FieldRouteDeps {
   readonly service: () => FieldReportService;
-  readonly pool: () => Pool;
+  /** CHG-006: 冪等性の保存先（Firestore） */
+  readonly idempotency: () => IdempotencyRepository;
   readonly api: () => ApiHandlerDeps;
 }
 
@@ -178,7 +178,7 @@ export function fieldConfirmHandlers(type: FieldReportType, deps: FieldRouteDeps
       const cmd = parseBody(fieldCommandSchema, raw);
       const field = ctxOf(ctx);
       const route = `POST /${SEGMENT[type]}/${id}/confirm`;
-      const repo = new PgIdempotencyRepository(deps.pool());
+      const repo = deps.idempotency();
       const begin = await beginIdempotentRequest(
         repo,
         { actorId: field.actor.userId, route, key: ctx.idempotencyKey as string },
@@ -263,7 +263,7 @@ export function recordTransitionHandlers(deps: FieldRouteDeps) {
       }
       const field = ctxOf(ctx);
       const route = `POST /records/${type}/${id.toLowerCase()}/revise`;
-      const repo = new PgIdempotencyRepository(deps.pool());
+      const repo = deps.idempotency();
       const begin = await beginIdempotentRequest(repo, { actorId: field.actor.userId, route, key: ctx.idempotencyKey as string }, computeRequestHash('POST', route, raw), ctx.now);
       if (begin.kind === 'REPLAY') {
         return Response.json(begin.responseBody, { status: begin.responseStatus, headers: { 'x-correlation-id': ctx.correlationId, 'idempotent-replayed': 'true' } });

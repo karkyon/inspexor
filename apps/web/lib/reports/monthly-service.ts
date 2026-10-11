@@ -4,8 +4,9 @@
  *  - 絞込: お客様・品番（運搬は明細に含む報告）・種別
  *  - 出力: 画面用 JSON、Excel（集計・日別・品番別・作業内容別・明細の5シート）、CSV（シート単位、UTF-8 BOM）
  *  運搬費は手入力分の合計のみ（按分・単価・請求額の計算はしない＝提案書の対象外）。
+ *  CHG-006: 報告ヘッダの current（確定済みの現在版の要約）を業務日の範囲で読み、お客様・品番はアプリで絞り込む。
  */
-import type { Pool } from 'pg';
+import { C, REPORT_COLLECTION, type DeliveryCurrent, type DocStore, type ReportHeaderDoc, type WorkCurrent } from '@inspexor/docstore';
 import { minutesToHours, monthRange, summarizeMonth, toCsv, type MonthlySummary, type SummaryRow } from '@inspexor/domain';
 import { buildXlsx, type Cell, type Sheet } from './xlsx';
 
@@ -33,77 +34,67 @@ export interface MonthlyView extends MonthlySummary {
   };
 }
 
-function safeInt(v: unknown, label: string): number {
-  const n = Number(v);
-  if (!Number.isSafeInteger(n)) throw new Error(`unsafe integer: ${label}`);
-  return n;
-}
-
 export class MonthlyService {
-  constructor(private readonly pool: Pool) {}
+  constructor(private readonly store: DocStore) {}
+
+  private async currents<T extends WorkCurrent | DeliveryCurrent>(collection: string, from: string, to: string): Promise<Array<{ id: string; h: ReportHeaderDoc; c: T }>> {
+    const rows = await this.store.query<ReportHeaderDoc>(collection, {
+      where: [
+        { field: 'current.businessDate', op: '>=', value: from },
+        { field: 'current.businessDate', op: '<=', value: to },
+      ],
+    });
+    return rows.filter((r) => r.data.current !== null).map((r) => ({ id: r.id, h: r.data, c: r.data.current as T }));
+  }
 
   async summary(q: MonthlyQuery): Promise<MonthlyView> {
     const { from, to } = monthRange(q.month);
     const rows: SummaryRow[] = [];
     if (q.type !== 'DELIVERY') {
-      const r = await this.pool.query<{
-        id: string; report_no: string; revision_no: number; d: string; customer_id: string; product_id: string; work_type_id: string;
-        quantity: number; actual: number; person: number; defects: string;
-      }>(
-        `SELECT h.id, h.report_no, r.revision_no, r.work_date::text AS d, r.customer_id, r.product_id, r.work_type_id, r.quantity,
-                r.regular_minutes + r.overtime_minutes AS actual, r.regular_person_minutes + r.overtime_person_minutes AS person,
-                COALESCE((SELECT sum(x.quantity) FROM app.defect_results x WHERE x.revision_id = r.id), 0)::text AS defects
-           FROM app.work_reports h JOIN app.work_report_revisions r ON r.id = h.current_revision_id
-          WHERE r.work_date BETWEEN $1::date AND $2::date
-            AND ($3::uuid IS NULL OR r.customer_id = $3) AND ($4::uuid IS NULL OR r.product_id = $4)`,
-        [from, to, q.customerId, q.productId],
-      );
-      for (const x of r.rows) {
+      for (const { id, h, c } of await this.currents<WorkCurrent>(REPORT_COLLECTION.WORK, from, to)) {
+        if (q.customerId !== null && c.customerId !== q.customerId) continue;
+        if (q.productId !== null && c.productId !== q.productId) continue;
         rows.push({
-          type: 'WORK', reportId: x.id, reportNo: x.report_no, revisionNo: x.revision_no, date: x.d, customerId: x.customer_id, productId: x.product_id,
-          workTypeId: x.work_type_id, quantity: x.quantity, defectQuantity: safeInt(x.defects, 'defects'), actualMinutes: x.actual, personMinutes: x.person,
+          type: 'WORK', reportId: id, reportNo: h.reportNo, revisionNo: c.revisionNo, date: c.businessDate, customerId: c.customerId, productId: c.productId,
+          workTypeId: c.workTypeId, quantity: c.quantity, defectQuantity: c.defectQuantity, actualMinutes: c.actualMinutes, personMinutes: c.personMinutes,
         });
       }
     }
     if (q.type !== 'WORK') {
-      const r = await this.pool.query<{
-        id: string; report_no: string; revision_no: number; d: string; customer_id: string; trip_count: number; fee: string | null;
-        items: Array<{ productId: string; quantity: number }>;
-      }>(
-        `SELECT h.id, h.report_no, r.revision_no, r.delivery_date::text AS d, r.customer_id, r.trip_count, h.delivery_fee_yen::text AS fee,
-                COALESCE((SELECT json_agg(json_build_object('productId', i.product_id, 'quantity', i.quantity) ORDER BY p.code, p.id)
-                            FROM app.delivery_items i JOIN app.products p ON p.id = i.product_id WHERE i.delivery_revision_id = r.id), '[]'::json) AS items
-           FROM app.delivery_reports h JOIN app.delivery_report_revisions r ON r.id = h.current_revision_id
-          WHERE r.delivery_date BETWEEN $1::date AND $2::date
-            AND ($3::uuid IS NULL OR r.customer_id = $3)
-            AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM app.delivery_items i WHERE i.delivery_revision_id = r.id AND i.product_id = $4))`,
-        [from, to, q.customerId, q.productId],
-      );
-      for (const x of r.rows) {
+      for (const { id, h, c } of await this.currents<DeliveryCurrent>(REPORT_COLLECTION.DELIVERY, from, to)) {
+        if (q.customerId !== null && c.customerId !== q.customerId) continue;
+        if (q.productId !== null && !c.items.some((i) => i.productId === q.productId)) continue;
         rows.push({
-          type: 'DELIVERY', reportId: x.id, reportNo: x.report_no, revisionNo: x.revision_no, date: x.d, customerId: x.customer_id,
-          items: x.items, tripCount: x.trip_count, deliveryFeeYen: x.fee === null ? null : safeInt(x.fee, 'fee'),
+          type: 'DELIVERY', reportId: id, reportNo: h.reportNo, revisionNo: c.revisionNo, date: c.businessDate, customerId: c.customerId,
+          items: c.items.map((i) => ({ productId: i.productId, quantity: i.quantity })), tripCount: c.tripCount, deliveryFeeYen: h.deliveryFeeYen,
         });
       }
     }
+    // 並びは PostgreSQL 版と同じく業務日→報告番号（summarizeMonth の明細順の入力を安定させる）
+    rows.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.reportNo < b.reportNo ? -1 : a.reportNo > b.reportNo ? 1 : 0));
     const s = summarizeMonth(q.month, rows, q.productId);
     const customerIds = [...new Set(rows.map((x) => x.customerId))];
     const productIds = [...new Set(rows.flatMap((x) => (x.type === 'WORK' ? [x.productId] : x.items.map((i) => i.productId))))];
     const workTypeIds = [...new Set(rows.flatMap((x) => (x.type === 'WORK' ? [x.workTypeId] : [])))];
-    const named = async (table: string, ids: string[]): Promise<Record<string, Named>> => {
+    const named = async (collection: string, ids: string[]): Promise<Record<string, Named>> => {
       if (ids.length === 0) return {};
-      const r = await this.pool.query<{ id: string; code: string; name: string }>(`SELECT id, code, name FROM app.${table} WHERE id = ANY($1::uuid[])`, [ids]);
-      return Object.fromEntries(r.rows.map((x) => [x.id, { code: x.code, name: x.name }]));
+      const docs = await this.store.getMany<{ code: string; name: string }>(ids.map((id) => `${collection}/${id}`));
+      const out: Record<string, Named> = {};
+      ids.forEach((id, i) => {
+        const d = docs[i];
+        if (d !== null && d !== undefined) out[id] = { code: d.code, name: d.name };
+      });
+      return out;
     };
-    const products = await named('products', productIds);
+    const products = await named(C.products, productIds);
     return {
       ...s,
       filters: q,
       byProduct: [...s.byProduct].sort((a, b) => (products[a.productId]?.code ?? '').localeCompare(products[b.productId]?.code ?? '')),
       names: {
-        customers: await named('customers', customerIds),
+        customers: await named(C.customers, customerIds),
         products,
-        workTypes: Object.fromEntries(Object.entries(await named('work_types', workTypeIds)).map(([k, v]) => [k, { name: v.name }])),
+        workTypes: Object.fromEntries(Object.entries(await named(C.workTypes, workTypeIds)).map(([k, v]) => [k, { name: v.name }])),
       },
     };
   }

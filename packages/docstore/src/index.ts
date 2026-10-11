@@ -5,3 +5,4 @@ export * from './memory';
 export * from './firestore';
 export * from './repos';
 export * from './users';
+export * from './reports';

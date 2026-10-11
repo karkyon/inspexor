@@ -124,6 +124,7 @@
     "lib/field/field-report-service.ts",
     "lib/field/field-route-deps.ts",
     "lib/field/field.itest.ts",
+    "lib/field/list-queries.itest.ts",
     "lib/field/schemas.ts",
     "lib/field/wizard.test.ts",
     "lib/field/wizard.ts",

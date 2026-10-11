@@ -91,6 +91,16 @@ export class FirestoreDocStore implements DocStore {
     }
   }
 
+  async count(collection: string, spec: QuerySpec = {}): Promise<number> {
+    const { limit: _ignored, ...rest } = spec;
+    try {
+      const snap = await this.buildQuery(collection, rest).count().get();
+      return snap.data().count;
+    } catch (error) {
+      throw mapError(error);
+    }
+  }
+
   async runTransaction<T>(work: (tx: DocTransaction) => Promise<T>): Promise<T> {
     try {
       return await this.db.runTransaction(async (t: Transaction) => {

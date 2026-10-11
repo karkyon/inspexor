@@ -1,22 +1,23 @@
 /**
- * G3 現場入力サービス（FR-002 運搬 / FR-003 作業 / FR-004 revision / CHG-002）。
+ * G3 現場入力サービス（FR-002 運搬 / FR-003 作業 / FR-004 revision / CHG-002）。CHG-006: Firestore 版。
  *
- * command pipeline（機能別詳細設計書）: transaction → root FOR UPDATE → expectedVersion → owner/scope → state guard
- *   → domain invariant（master 有効性・関係・時間・数量） → revision/audit/outbox → version+1 → commit。
+ * command pipeline（機能別詳細設計書）: transaction（読込）→ header 読込 → owner/scope → expectedVersion → state guard
+ *   → domain invariant（master 有効性・関係・時間・数量） → （書込）revision/header/audit/outbox → version+1 → commit。
+ *   Firestore の transaction は「読込がすべて書込より前」のため、検証と読込を終えてから書込をまとめて行う。
  *
- *  - 作成（API-004/008）: header（DRAFT）＋未確定 revision（confirmed_at NULL）。報告番号は作成日JSTの月で採番（CHG-002 §2.3）
- *  - 更新（API-006/010）: DRAFT の未確定 revision を置換（作業者・不良・明細は削除→再作成）
- *  - 確定（API-007/011）: master/関係/時間/数量を再検証 → revision.confirmed_at（以後 DB trigger で不変）
- *                         → current_revision_id → CONFIRMED → outbox（WorkReportConfirmed / DeliveryReportConfirmed）
+ *  - 作成（API-004/008）: header（DRAFT）＋未確定 revision（confirmedAt null）。報告番号は作成日JSTの月で採番（counters）
+ *  - 更新（API-006/010）: DRAFT の未確定 revision を置換
+ *  - 確定（API-007/011）: master/関係/時間/数量を再検証 → revision.confirmedAt（以後は書き換えない）
+ *                         → currentRevisionId・current（月次用の要約）→ CONFIRMED → outbox
  *  - 参照（API-005/009）: owner か OFFICE/ADMIN/AUDITOR のみ。それ以外は存在を秘匿して 404
  *  - 報告者は本人のみ（SPEC-CONFLICT-G3-01: 代理入力は別CHG）
  *  - CHG-004: 作業場所・使用車・備考（作業）、使用車両・運搬回数（運搬 revision）、運搬費（運搬 header、空欄可）
+ *  - CHG-006 F1: 運搬明細の allocationEligible（按分対象）は請求（Blind）用のため常に false
  */
 import { randomUUID } from 'node:crypto';
-import type { Pool, PoolClient } from 'pg';
 import {
   computeBusinessTime,
-  nextReportNo,
+  formatReportNo,
   reportMonthOf,
   validateDeliveryItems,
   validateWorkQuantities,
@@ -25,9 +26,25 @@ import {
   type ReportKind,
 } from '@inspexor/domain';
 import type { OutboxEventType } from '@inspexor/application';
-import { withTransaction, type Queryable } from '../db/pg';
-import { PgAuditRepository } from '../db/pg-audit-repository';
-import { PgOutboxRepository } from '../db/pg-outbox-repository';
+import {
+  appendAudit,
+  C,
+  enqueueOutbox,
+  readCounter,
+  reportPath,
+  REPORT_COLLECTION,
+  revisionPath,
+  writeCounter,
+  type DeliveryCurrent,
+  type DeliveryRevisionDoc,
+  type DocReader,
+  type DocStore,
+  type DocTransaction,
+  type Filter,
+  type ReportHeaderDoc,
+  type WorkCurrent,
+  type WorkRevisionDoc,
+} from '@inspexor/docstore';
 import type { DeliveryDraftInput, WorkDraftInput } from './schemas';
 
 export type FieldReportType = 'WORK' | 'DELIVERY';
@@ -89,26 +106,22 @@ export interface RecordListQuery {
 /** 確定後修正（D3）を始められる状態。承認（Blind）を使わないため CONFIRMED/SUBMITTED も対象 */
 export const REVISABLE_STATUSES = ['CONFIRMED', 'SUBMITTED', 'REJECTED', 'REVOKED'] as const;
 
-interface HeaderRow {
-  id: string;
-  report_no: string;
-  status: string;
-  owner_id: string;
-  version: number;
-  current_revision_id: string | null;
-}
+/** 期間指定なしの一覧で、アプリ側の絞込が必要なときに読む最大件数（種別ごと）。期間指定ありは期間内を全件読む */
+export const LIST_SCAN_LIMIT = 500;
 
 const KIND: Record<FieldReportType, ReportKind> = { WORK: 'WR', DELIVERY: 'DR' };
-const TABLES = {
-  WORK: { header: 'work_reports', revision: 'work_report_revisions', dateColumn: 'work_date', label: '作業日報', target: 'WORK_REPORT' },
-  DELIVERY: { header: 'delivery_reports', revision: 'delivery_report_revisions', dateColumn: 'delivery_date', label: '運搬実績', target: 'DELIVERY_REPORT' },
+const LABEL = {
+  WORK: { label: '作業日報', target: 'WORK_REPORT' },
+  DELIVERY: { label: '運搬実績', target: 'DELIVERY_REPORT' },
 } as const;
 const READ_ALL_ROLES = ['OFFICE', 'ADMIN', 'AUDITOR'];
 
+type Header = ReportHeaderDoc & { readonly id: string };
+
 function notFound(type: FieldReportType): FieldError {
   // GAP-014: 404 に対応する error code が辞書に無いため VALIDATION_ERROR + /id（G2 と同じ扱い）
-  return new FieldError(404, 'VALIDATION_ERROR', `${TABLES[type].label}が見つかりません。`, [
-    { path: '/id', code: 'not_found', message: `${TABLES[type].label}が見つかりません。` },
+  return new FieldError(404, 'VALIDATION_ERROR', `${LABEL[type].label}が見つかりません。`, [
+    { path: '/id', code: 'not_found', message: `${LABEL[type].label}が見つかりません。` },
   ]);
 }
 
@@ -121,28 +134,13 @@ function canReadAll(actor: FieldActor): boolean {
 }
 
 /** OFFICE（owner/OFFICE型の対象ロール）以外は所有者のみ更新可 */
-function canWrite(actor: FieldActor, header: HeaderRow): boolean {
-  return actor.roles.includes('OFFICE') || header.owner_id === actor.userId;
+function canWrite(actor: FieldActor, header: Header): boolean {
+  return actor.roles.includes('OFFICE') || header.ownerId === actor.userId;
 }
 
-async function lockHeader(client: Queryable, type: FieldReportType, id: string): Promise<HeaderRow | null> {
-  const r = await client.query<HeaderRow>(
-    `SELECT id, report_no, status, owner_id, version, current_revision_id FROM app.${TABLES[type].header} WHERE id = $1 FOR UPDATE`,
-    [id],
-  );
-  return r.rows[0] ?? null;
-}
-
-async function allocateReportNo(client: Queryable, type: FieldReportType, now: Date): Promise<string> {
-  const kind = KIND[type];
-  const month = reportMonthOf(now);
-  // 同月・同種の採番を直列化（transaction 終了で解放）
-  await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`inspexor:report_no:${kind}:${month}`]);
-  const r = await client.query<{ max: string | null }>(
-    `SELECT max(report_no) AS max FROM app.${TABLES[type].header} WHERE report_no LIKE $1`,
-    [`${kind}-${month}-%`],
-  );
-  return nextReportNo(kind, now, r.rows[0]?.max ?? null);
+async function readHeader(db: DocReader, type: FieldReportType, id: string): Promise<Header | null> {
+  const h = await db.get<ReportHeaderDoc>(reportPath(type, id));
+  return h === null ? null : { ...h, id };
 }
 
 // ------------------------------------------------------------------ master 検証
@@ -155,21 +153,27 @@ interface WorkComputed {
   readonly overtimePersonMinutes: number;
 }
 
-interface MasterRow {
-  id: string;
+interface MasterDoc {
   active: boolean;
-  customer_id?: string;
-  product_id?: string;
-  lot_required?: boolean;
+  code?: string;
+  customerId?: string;
+  productId?: string;
+  lotRequired?: boolean;
+  sortOrder?: number;
 }
 
-async function rowsById(db: Queryable, table: string, ids: readonly string[], extra = ''): Promise<Map<string, MasterRow>> {
-  if (ids.length === 0) return new Map();
-  const r = await db.query<MasterRow>(`SELECT id, active${extra} FROM app.${table} WHERE id = ANY($1::uuid[])`, [[...new Set(ids)]]);
-  return new Map(r.rows.map((row) => [row.id, row]));
+async function docsById(db: DocReader, collection: string, ids: readonly string[]): Promise<Map<string, MasterDoc>> {
+  const unique = [...new Set(ids)];
+  const docs = await db.getMany<MasterDoc>(unique.map((id) => `${collection}/${id}`));
+  const out = new Map<string, MasterDoc>();
+  unique.forEach((id, i) => {
+    const d = docs[i];
+    if (d !== null && d !== undefined) out.set(id, d);
+  });
+  return out;
 }
 
-function checkActive(issues: FieldIssue[], row: MasterRow | undefined, path: string, label: string): row is MasterRow {
+function checkActive(issues: FieldIssue[], row: MasterDoc | undefined, path: string, label: string): row is MasterDoc {
   if (row === undefined) {
     issues.push({ path, code: 'not_found', message: `${label}が見つかりません。` });
     return false;
@@ -181,252 +185,268 @@ function checkActive(issues: FieldIssue[], row: MasterRow | undefined, path: str
   return true;
 }
 
+const byCodeThenId =
+  (rows: Map<string, MasterDoc>) =>
+  (a: string, b: string): number => {
+    const ca = rows.get(a)?.code ?? '';
+    const cb = rows.get(b)?.code ?? '';
+    return ca < cb ? -1 : ca > cb ? 1 : a < b ? -1 : a > b ? 1 : 0;
+  };
+
+interface WorkValidated {
+  readonly computed: WorkComputed;
+  readonly workerIds: string[];
+  readonly defects: Array<{ defectTypeId: string; quantity: number }>;
+}
+
 /** expectedReporterId: 作成時=本人、更新・確定時=下書きの報告者（OFFICE が他人の下書きを直しても報告者は変えない） */
-async function validateWork(db: Queryable, input: WorkDraftInput, expectedReporterId: string): Promise<WorkComputed> {
+async function validateWork(db: DocReader, input: WorkDraftInput, expectedReporterId: string): Promise<WorkValidated> {
   const issues: FieldIssue[] = [];
   if (input.reporterId !== expectedReporterId) {
     issues.push({ path: '/reporterId', code: 'proxy_unsupported', message: '報告者はログイン中の本人を指定してください（代理入力は未対応です）。' });
   }
-  const customers = await rowsById(db, 'customers', [input.customerId]);
+  const customers = await docsById(db, C.customers, [input.customerId]);
   checkActive(issues, customers.get(input.customerId), '/customerId', 'お客様');
-  const products = await rowsById(db, 'products', [input.productId], ', customer_id, lot_required');
-  const product = products.get(input.productId);
-  if (checkActive(issues, product, '/productId', '品番') && product.customer_id !== input.customerId) {
+  const product = (await docsById(db, C.products, [input.productId])).get(input.productId);
+  if (checkActive(issues, product, '/productId', '品番') && product.customerId !== input.customerId) {
     issues.push({ path: '/productId', code: 'mismatch', message: '品番が選択したお客様のものではありません。' });
   }
-  const workTypes = await rowsById(db, 'work_types', [input.workTypeId], ', product_id');
-  const workType = workTypes.get(input.workTypeId);
-  if (checkActive(issues, workType, '/workTypeId', '作業内容') && workType.product_id !== input.productId) {
+  const workType = (await docsById(db, C.workTypes, [input.workTypeId])).get(input.workTypeId);
+  if (checkActive(issues, workType, '/workTypeId', '作業内容') && workType.productId !== input.productId) {
     issues.push({ path: '/workTypeId', code: 'mismatch', message: '作業内容が選択した品番のものではありません。' });
   }
-  if (product?.lot_required === true && (input.lotNo === null || input.lotNo === '')) {
+  if (product?.lotRequired === true && (input.lotNo === null || input.lotNo === '')) {
     issues.push({ path: '/lotNo', code: 'required', message: 'この品番はロット番号の入力が必須です。' });
   }
-  const workers = await rowsById(db, 'workers', input.workerIds);
+  const workers = await docsById(db, C.workers, input.workerIds);
   input.workerIds.forEach((id, i) => checkActive(issues, workers.get(id), `/workerIds/${i}`, '作業者'));
-  const defectTypes = await rowsById(db, 'defect_types', input.defects.map((d) => d.defectTypeId), ', product_id');
+  const defectTypes = await docsById(db, C.defectTypes, input.defects.map((d) => d.defectTypeId));
   input.defects.forEach((d, i) => {
     const row = defectTypes.get(d.defectTypeId);
-    if (checkActive(issues, row, `/defects/${i}/defectTypeId`, '不良種別') && row.product_id !== input.productId) {
+    if (checkActive(issues, row, `/defects/${i}/defectTypeId`, '不良種別') && row.productId !== input.productId) {
       issues.push({ path: `/defects/${i}/defectTypeId`, code: 'mismatch', message: '不良種別が選択した品番のものではありません。' });
     }
   });
   // 任意項目は Zod で null に正規化済み。内部呼出（worker 試験等）で省略された場合も null と同じ扱い
   if (input.workLocationId != null) {
-    checkActive(issues, (await rowsById(db, 'work_locations', [input.workLocationId])).get(input.workLocationId), '/workLocationId', '作業場所');
+    checkActive(issues, (await docsById(db, C.workLocations, [input.workLocationId])).get(input.workLocationId), '/workLocationId', '作業場所');
   }
   if (input.vehicleId != null) {
-    checkActive(issues, (await rowsById(db, 'vehicles', [input.vehicleId])).get(input.vehicleId), '/vehicleId', '使用車');
+    checkActive(issues, (await docsById(db, C.vehicles, [input.vehicleId])).get(input.vehicleId), '/vehicleId', '使用車');
   }
   issues.push(...validateWorkQuantities(input));
   const span = validateWorkSpan(input.workDate, new Date(input.startAt), new Date(input.endAt));
   if (!span.ok) issues.push(...span.issues);
   if (issues.length > 0 || !span.ok) throw invalid(issues);
-  const holiday = await db.query('SELECT 1 FROM app.holidays WHERE holiday_date = $1 AND active', [input.workDate]);
-  return computeBusinessTime({ date: input.workDate, start: span.start, end: span.end, workers: input.workerIds.length, isHoliday: (holiday.rowCount ?? 0) > 0 });
+  const holiday = (await db.query<{ active: boolean }>(C.holidays, { where: [{ field: 'holidayDate', op: '==', value: input.workDate }] })).some((h) => h.data.active);
+  const computed = computeBusinessTime({ date: input.workDate, start: span.start, end: span.end, workers: input.workerIds.length, isHoliday: holiday });
+  const defectOrder = (a: { defectTypeId: string }, b: { defectTypeId: string }): number => {
+    const x = defectTypes.get(a.defectTypeId);
+    const y = defectTypes.get(b.defectTypeId);
+    const so = (x?.sortOrder ?? 0) - (y?.sortOrder ?? 0);
+    if (so !== 0) return so;
+    const cx = x?.code ?? '';
+    const cy = y?.code ?? '';
+    return cx < cy ? -1 : cx > cy ? 1 : 0;
+  };
+  return {
+    computed,
+    workerIds: [...input.workerIds].sort(byCodeThenId(workers)),
+    defects: input.defects.map((d) => ({ defectTypeId: d.defectTypeId, quantity: d.quantity })).sort(defectOrder),
+  };
 }
 
-async function validateDelivery(db: Queryable, input: DeliveryDraftInput): Promise<void> {
+async function validateDelivery(db: DocReader, input: DeliveryDraftInput): Promise<{ items: Array<{ productId: string; quantity: number; allocationEligible: boolean }> }> {
   const issues: FieldIssue[] = [];
-  const drivers = await rowsById(db, 'workers', [input.driverId]);
-  checkActive(issues, drivers.get(input.driverId), '/driverId', '運転者');
-  const customers = await rowsById(db, 'customers', [input.customerId]);
-  checkActive(issues, customers.get(input.customerId), '/customerId', 'お客様');
-  const products = await rowsById(db, 'products', input.items.map((it) => it.productId), ', customer_id');
+  checkActive(issues, (await docsById(db, C.workers, [input.driverId])).get(input.driverId), '/driverId', '運転者');
+  checkActive(issues, (await docsById(db, C.customers, [input.customerId])).get(input.customerId), '/customerId', 'お客様');
+  const products = await docsById(db, C.products, input.items.map((it) => it.productId));
   input.items.forEach((it, i) => {
     const p = products.get(it.productId);
-    if (checkActive(issues, p, `/items/${i}/productId`, '品番') && p.customer_id !== input.customerId) {
+    if (checkActive(issues, p, `/items/${i}/productId`, '品番') && p.customerId !== input.customerId) {
       issues.push({ path: `/items/${i}/productId`, code: 'mismatch', message: '品番が選択したお客様のものではありません。' });
     }
   });
   if (input.vehicleId != null) {
-    checkActive(issues, (await rowsById(db, 'vehicles', [input.vehicleId])).get(input.vehicleId), '/vehicleId', '使用車両');
+    checkActive(issues, (await docsById(db, C.vehicles, [input.vehicleId])).get(input.vehicleId), '/vehicleId', '使用車両');
   }
   issues.push(...validateDeliveryItems(input.items));
   if (issues.length > 0) throw invalid(issues);
+  const order = byCodeThenId(products);
+  return {
+    items: input.items
+      .map((it) => ({ productId: it.productId, quantity: it.quantity, allocationEligible: false }))
+      .sort((a, b) => order(a.productId, b.productId)),
+  };
 }
 
-// ------------------------------------------------------------------ revision 書込
+// ------------------------------------------------------------------ 文書の組立
 
-async function writeWorkRevision(client: PoolClient, revisionId: string, input: WorkDraftInput, computed: WorkComputed, insert: { reportId: string; revisionNo: number; parentRevisionId: string | null } | null): Promise<void> {
-  const values = [
-    input.workDate, input.reporterId, input.customerId, input.productId, input.workTypeId, input.lotNo,
-    input.startAt, input.endAt, computed.breakMinutes, computed.regularMinutes, computed.overtimeMinutes,
-    computed.regularPersonMinutes, computed.overtimePersonMinutes, input.quantity, input.workLocationId ?? null, input.vehicleId ?? null, input.remarks ?? null,
-  ];
-  if (insert !== null) {
-    await client.query(
-      `INSERT INTO app.work_report_revisions
-         (id, report_id, parent_revision_id, revision_no, work_date, reporter_id, customer_id, product_id, work_type_id, lot_no,
-          start_at, end_at, break_minutes, regular_minutes, overtime_minutes, regular_person_minutes, overtime_person_minutes, quantity,
-          work_location_id, vehicle_id, remarks)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
-      [revisionId, insert.reportId, insert.parentRevisionId, insert.revisionNo, ...values],
-    );
-  } else {
-    await client.query('DELETE FROM app.work_report_workers WHERE revision_id = $1', [revisionId]);
-    await client.query('DELETE FROM app.defect_results WHERE revision_id = $1', [revisionId]);
-    await client.query(
-      `UPDATE app.work_report_revisions SET work_date=$2, reporter_id=$3, customer_id=$4, product_id=$5, work_type_id=$6, lot_no=$7,
-              start_at=$8, end_at=$9, break_minutes=$10, regular_minutes=$11, overtime_minutes=$12,
-              regular_person_minutes=$13, overtime_person_minutes=$14, quantity=$15,
-              work_location_id=$16, vehicle_id=$17, remarks=$18
-        WHERE id = $1 AND confirmed_at IS NULL`,
-      [revisionId, ...values],
-    );
-  }
-  for (const workerId of input.workerIds) {
-    await client.query('INSERT INTO app.work_report_workers (revision_id, worker_id) VALUES ($1, $2)', [revisionId, workerId]);
-  }
-  for (const d of input.defects) {
-    await client.query('INSERT INTO app.defect_results (revision_id, defect_type_id, quantity) VALUES ($1, $2, $3)', [revisionId, d.defectTypeId, d.quantity]);
-  }
+function workRevisionDoc(input: WorkDraftInput, v: WorkValidated, meta: { revisionNo: number; parentRevisionId: string | null }): WorkRevisionDoc {
+  return {
+    revisionNo: meta.revisionNo,
+    parentRevisionId: meta.parentRevisionId,
+    confirmedAt: null,
+    workDate: input.workDate,
+    reporterId: input.reporterId,
+    customerId: input.customerId,
+    productId: input.productId,
+    workTypeId: input.workTypeId,
+    lotNo: input.lotNo ?? null,
+    workerIds: v.workerIds,
+    startAt: new Date(input.startAt),
+    endAt: new Date(input.endAt),
+    ...v.computed,
+    quantity: input.quantity,
+    defects: v.defects,
+    workLocationId: input.workLocationId ?? null,
+    vehicleId: input.vehicleId ?? null,
+    remarks: input.remarks ?? null,
+  };
 }
 
-async function writeDeliveryRevision(client: PoolClient, revisionId: string, input: DeliveryDraftInput, insert: { reportId: string; revisionNo: number; parentRevisionId: string | null } | null): Promise<void> {
-  if (insert !== null) {
-    await client.query(
-      `INSERT INTO app.delivery_report_revisions (id, report_id, parent_revision_id, revision_no, delivery_date, driver_id, customer_id, vehicle_id, trip_count)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-      [revisionId, insert.reportId, insert.parentRevisionId, insert.revisionNo, input.deliveryDate, input.driverId, input.customerId, input.vehicleId ?? null, input.tripCount ?? 1],
-    );
-  } else {
-    await client.query('DELETE FROM app.delivery_items WHERE delivery_revision_id = $1', [revisionId]);
-    await client.query(
-      'UPDATE app.delivery_report_revisions SET delivery_date=$2, driver_id=$3, customer_id=$4, vehicle_id=$5, trip_count=$6 WHERE id = $1 AND confirmed_at IS NULL',
-      [revisionId, input.deliveryDate, input.driverId, input.customerId, input.vehicleId ?? null, input.tripCount ?? 1],
-    );
-  }
-  // 運搬費は header（D2: 運搬報告1件に1金額）
-  const report = insert?.reportId ?? (await client.query<{ report_id: string }>('SELECT report_id FROM app.delivery_report_revisions WHERE id = $1', [revisionId])).rows[0]?.report_id;
-  await client.query('UPDATE app.delivery_reports SET delivery_fee_yen = $2 WHERE id = $1', [report, input.deliveryFeeYen ?? null]);
-  for (const it of input.items) {
-    await client.query('INSERT INTO app.delivery_items (delivery_revision_id, product_id, quantity) VALUES ($1, $2, $3)', [revisionId, it.productId, it.quantity]);
-  }
+function deliveryRevisionDoc(input: DeliveryDraftInput, items: DeliveryRevisionDoc['items'], meta: { revisionNo: number; parentRevisionId: string | null }): DeliveryRevisionDoc {
+  return {
+    revisionNo: meta.revisionNo,
+    parentRevisionId: meta.parentRevisionId,
+    confirmedAt: null,
+    deliveryDate: input.deliveryDate,
+    driverId: input.driverId,
+    customerId: input.customerId,
+    vehicleId: input.vehicleId ?? null,
+    tripCount: input.tripCount ?? 1,
+    items,
+  };
+}
+
+/** ヘッダの一覧・参照数用の要約（最新の版） */
+function workSummary(r: WorkRevisionDoc): Partial<ReportHeaderDoc> {
+  return {
+    businessDate: r.workDate,
+    customerId: r.customerId,
+    productIds: [r.productId],
+    quantity: r.quantity,
+    tripCount: null,
+    workerIds: r.workerIds,
+    vehicleId: r.vehicleId,
+    workLocationId: r.workLocationId,
+    defectTypeIds: r.defects.map((d) => d.defectTypeId),
+  };
+}
+
+function deliverySummary(r: DeliveryRevisionDoc): Partial<ReportHeaderDoc> {
+  return {
+    businessDate: r.deliveryDate,
+    customerId: r.customerId,
+    productIds: r.items.map((i) => i.productId),
+    quantity: r.items.reduce((s, i) => s + i.quantity, 0),
+    tripCount: r.tripCount,
+    workerIds: [r.driverId],
+    vehicleId: r.vehicleId,
+    workLocationId: null,
+    defectTypeIds: [],
+  };
+}
+
+function workCurrent(revisionId: string, r: WorkRevisionDoc): WorkCurrent {
+  return {
+    revisionId,
+    revisionNo: r.revisionNo,
+    businessDate: r.workDate,
+    customerId: r.customerId,
+    productId: r.productId,
+    workTypeId: r.workTypeId,
+    quantity: r.quantity,
+    defectQuantity: r.defects.reduce((s, d) => s + d.quantity, 0),
+    actualMinutes: r.regularMinutes + r.overtimeMinutes,
+    personMinutes: r.regularPersonMinutes + r.overtimePersonMinutes,
+  };
+}
+
+function deliveryCurrent(revisionId: string, r: DeliveryRevisionDoc): DeliveryCurrent {
+  return {
+    revisionId,
+    revisionNo: r.revisionNo,
+    businessDate: r.deliveryDate,
+    customerId: r.customerId,
+    tripCount: r.tripCount,
+    items: r.items.map((i) => ({ productId: i.productId, quantity: i.quantity })),
+  };
 }
 
 // ------------------------------------------------------------------ 読取
 
-interface RevisionHead {
-  id: string;
-  revision_no: number;
-  parent_revision_id: string | null;
-  confirmed_at: Date | null;
-}
-
-async function latestRevision(db: Queryable, type: FieldReportType, reportId: string): Promise<RevisionHead | null> {
-  const r = await db.query<RevisionHead>(
-    `SELECT id, revision_no, parent_revision_id, confirmed_at FROM app.${TABLES[type].revision} WHERE report_id = $1 ORDER BY revision_no DESC LIMIT 1`,
-    [reportId],
-  );
-  return r.rows[0] ?? null;
-}
-
-/** 最新 revision の最新帳票 job（G4 / CHG-003: documentStatus・documentId） */
-async function latestDocument(db: Queryable, revisionId: unknown): Promise<{ id: string; status: string } | null> {
-  const r = await db.query<{ id: string; status: string }>(
-    `SELECT id, status::text AS status FROM app.document_jobs WHERE source_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`,
-    [revisionId],
-  );
-  return r.rows[0] ?? null;
-}
-
-function toIso(v: unknown): string {
-  return v instanceof Date ? v.toISOString() : new Date(String(v)).toISOString();
-}
-
-async function workDetail(db: Queryable, header: HeaderRow): Promise<Record<string, unknown>> {
-  const rev = (
-    await db.query(
-      `SELECT * FROM app.work_report_revisions WHERE report_id = $1 ORDER BY revision_no DESC LIMIT 1`,
-      [header.id],
-    )
-  ).rows[0] as Record<string, unknown>;
-  const doc = await latestDocument(db, rev['id']);
-  const workers = await db.query<{ worker_id: string }>(
-    `SELECT w.worker_id FROM app.work_report_workers w JOIN app.workers m ON m.id = w.worker_id WHERE w.revision_id = $1 ORDER BY m.code, m.id`,
-    [rev['id']],
-  );
-  const defects = await db.query<{ defect_type_id: string; quantity: number }>(
-    `SELECT d.defect_type_id, d.quantity FROM app.defect_results d JOIN app.defect_types t ON t.id = d.defect_type_id
-      WHERE d.revision_id = $1 ORDER BY t.sort_order, t.code`,
-    [rev['id']],
-  );
+function workDetail(header: Header, revisionId: string, rev: WorkRevisionDoc): Record<string, unknown> {
   return {
     id: header.id,
-    reportNo: header.report_no,
+    reportNo: header.reportNo,
     status: header.status,
     version: header.version,
-    documentStatus: doc?.status ?? null,
-    documentId: doc?.id ?? null,
-    ownerId: header.owner_id,
-    revisionId: rev['id'],
-    revisionNo: rev['revision_no'],
-    parentRevisionId: rev['parent_revision_id'] ?? null,
-    confirmedAt: rev['confirmed_at'] === null ? null : toIso(rev['confirmed_at']),
-    workDate: rev['work_date'],
-    reporterId: rev['reporter_id'],
-    customerId: rev['customer_id'],
-    productId: rev['product_id'],
-    workTypeId: rev['work_type_id'],
-    lotNo: rev['lot_no'] ?? null,
-    workerIds: workers.rows.map((w) => w.worker_id),
-    startAt: toIso(rev['start_at']),
-    endAt: toIso(rev['end_at']),
-    quantity: rev['quantity'],
-    defects: defects.rows.map((d) => ({ defectTypeId: d.defect_type_id, quantity: d.quantity })),
-    breakMinutes: rev['break_minutes'],
-    regularMinutes: rev['regular_minutes'],
-    overtimeMinutes: rev['overtime_minutes'],
-    regularPersonMinutes: rev['regular_person_minutes'],
-    overtimePersonMinutes: rev['overtime_person_minutes'],
-    workLocationId: rev['work_location_id'] ?? null,
-    vehicleId: rev['vehicle_id'] ?? null,
-    remarks: rev['remarks'] ?? null,
+    documentStatus: header.documentStatus,
+    documentId: header.documentId,
+    ownerId: header.ownerId,
+    revisionId,
+    revisionNo: rev.revisionNo,
+    parentRevisionId: rev.parentRevisionId,
+    confirmedAt: rev.confirmedAt === null ? null : rev.confirmedAt.toISOString(),
+    workDate: rev.workDate,
+    reporterId: rev.reporterId,
+    customerId: rev.customerId,
+    productId: rev.productId,
+    workTypeId: rev.workTypeId,
+    lotNo: rev.lotNo,
+    workerIds: [...rev.workerIds],
+    startAt: rev.startAt.toISOString(),
+    endAt: rev.endAt.toISOString(),
+    quantity: rev.quantity,
+    defects: rev.defects.map((d) => ({ defectTypeId: d.defectTypeId, quantity: d.quantity })),
+    breakMinutes: rev.breakMinutes,
+    regularMinutes: rev.regularMinutes,
+    overtimeMinutes: rev.overtimeMinutes,
+    regularPersonMinutes: rev.regularPersonMinutes,
+    overtimePersonMinutes: rev.overtimePersonMinutes,
+    workLocationId: rev.workLocationId,
+    vehicleId: rev.vehicleId,
+    remarks: rev.remarks,
   };
 }
 
-/** bigint（運搬費）→ 安全な整数（00契約: 金額は整数円。JS の安全範囲外は扱わない） */
-function yenOrNull(v: unknown): number | null {
-  if (v === null || v === undefined) return null;
-  const n = Number(v);
-  if (!Number.isSafeInteger(n)) throw new Error('unsafe integer in delivery_fee_yen');
-  return n;
-}
-
-async function deliveryDetail(db: Queryable, header: HeaderRow): Promise<Record<string, unknown>> {
-  const rev = (
-    await db.query(`SELECT * FROM app.delivery_report_revisions WHERE report_id = $1 ORDER BY revision_no DESC LIMIT 1`, [header.id])
-  ).rows[0] as Record<string, unknown>;
-  const doc = await latestDocument(db, rev['id']);
-  const items = await db.query<{ product_id: string; quantity: number; allocation_eligible: boolean }>(
-    `SELECT i.product_id, i.quantity, i.allocation_eligible FROM app.delivery_items i JOIN app.products p ON p.id = i.product_id
-      WHERE i.delivery_revision_id = $1 ORDER BY p.code, p.id`,
-    [rev['id']],
-  );
+function deliveryDetail(header: Header, revisionId: string, rev: DeliveryRevisionDoc): Record<string, unknown> {
   return {
     id: header.id,
-    reportNo: header.report_no,
+    reportNo: header.reportNo,
     status: header.status,
     version: header.version,
-    documentStatus: doc?.status ?? null,
-    documentId: doc?.id ?? null,
-    ownerId: header.owner_id,
-    revisionId: rev['id'],
-    revisionNo: rev['revision_no'],
-    parentRevisionId: rev['parent_revision_id'] ?? null,
-    confirmedAt: rev['confirmed_at'] === null ? null : toIso(rev['confirmed_at']),
-    deliveryDate: rev['delivery_date'],
-    driverId: rev['driver_id'],
-    customerId: rev['customer_id'],
-    items: items.rows.map((i) => ({ productId: i.product_id, quantity: i.quantity, allocationEligible: i.allocation_eligible })),
-    vehicleId: rev['vehicle_id'] ?? null,
-    tripCount: rev['trip_count'],
-    deliveryFeeYen: yenOrNull((await db.query<{ delivery_fee_yen: string | null }>('SELECT delivery_fee_yen FROM app.delivery_reports WHERE id = $1', [header.id])).rows[0]?.delivery_fee_yen),
+    documentStatus: header.documentStatus,
+    documentId: header.documentId,
+    ownerId: header.ownerId,
+    revisionId,
+    revisionNo: rev.revisionNo,
+    parentRevisionId: rev.parentRevisionId,
+    confirmedAt: rev.confirmedAt === null ? null : rev.confirmedAt.toISOString(),
+    deliveryDate: rev.deliveryDate,
+    driverId: rev.driverId,
+    customerId: rev.customerId,
+    items: rev.items.map((i) => ({ productId: i.productId, quantity: i.quantity, allocationEligible: i.allocationEligible })),
+    vehicleId: rev.vehicleId,
+    tripCount: rev.tripCount,
+    deliveryFeeYen: header.deliveryFeeYen,
   };
 }
 
-function versionConflict(header: HeaderRow, detail: Record<string, unknown>, input: Record<string, unknown>): FieldError {
+async function readLatest<R>(db: DocReader, type: FieldReportType, header: Header): Promise<R> {
+  const rev = await db.get<R>(revisionPath(type, header.id, header.latestRevisionId));
+  if (rev === null) throw new Error(`revision missing: ${header.id}/${header.latestRevisionId}`);
+  return rev;
+}
+
+async function detailOf(db: DocReader, type: FieldReportType, header: Header): Promise<Record<string, unknown>> {
+  return type === 'WORK'
+    ? workDetail(header, header.latestRevisionId, await readLatest<WorkRevisionDoc>(db, type, header))
+    : deliveryDetail(header, header.latestRevisionId, await readLatest<DeliveryRevisionDoc>(db, type, header));
+}
+
+function versionConflict(header: Header, detail: Record<string, unknown>, input: Record<string, unknown>): FieldError {
   const changedFields = Object.keys(input)
     .filter((k) => k !== 'expectedVersion' && k !== 'reason' && k in detail)
     .filter((k) => JSON.stringify(detail[k]) !== JSON.stringify(input[k]))
@@ -437,274 +457,366 @@ function versionConflict(header: HeaderRow, detail: Record<string, unknown>, inp
   });
 }
 
-function stateConflict(header: HeaderRow, message: string): FieldError {
+function stateConflict(header: Header, message: string): FieldError {
   return new FieldError(409, 'STATE_CONFLICT', message, [], { currentVersion: header.version, currentStatus: header.status });
+}
+
+function summaryOf(type: FieldReportType, header: Header | ReportHeaderDoc & { id: string }): RecordSummary {
+  return {
+    id: header.id,
+    reportNo: header.reportNo,
+    status: header.status,
+    version: header.version,
+    documentStatus: header.documentStatus,
+    type,
+    businessDate: header.businessDate,
+    revisionNo: header.latestRevisionNo,
+  };
 }
 
 // ------------------------------------------------------------------ service
 
 export class FieldReportService {
-  constructor(private readonly pool: Pool) {}
+  constructor(private readonly store: DocStore) {}
 
   async get(type: FieldReportType, id: string, actor: FieldActor): Promise<Record<string, unknown>> {
-    const r = await this.pool.query<HeaderRow>(
-      `SELECT id, report_no, status, owner_id, version, current_revision_id FROM app.${TABLES[type].header} WHERE id = $1`,
-      [id],
-    );
-    const header = r.rows[0];
-    if (header === undefined || (!canReadAll(actor) && header.owner_id !== actor.userId)) throw notFound(type);
-    return type === 'WORK' ? workDetail(this.pool, header) : deliveryDetail(this.pool, header);
+    const header = await readHeader(this.store, type, id);
+    if (header === null || (!canReadAll(actor) && header.ownerId !== actor.userId)) throw notFound(type);
+    return detailOf(this.store, type, header);
+  }
+
+  /** 報告番号の採番（読込段階） */
+  private async nextNo(tx: DocTransaction, type: FieldReportType, now: Date): Promise<{ reportNo: string; counter: string; seq: number }> {
+    const kind = KIND[type];
+    const month = reportMonthOf(now);
+    const counter = `${kind}-${month}`;
+    const seq = (await readCounter(tx, counter)) + 1;
+    return { reportNo: formatReportNo(kind, month, seq), counter, seq };
+  }
+
+  private newHeader(type: FieldReportType, reportNo: string, ownerId: string, revisionId: string, summary: Partial<ReportHeaderDoc>, deliveryFeeYen: number | null, now: Date): ReportHeaderDoc {
+    return {
+      reportNo,
+      status: 'DRAFT',
+      ownerId,
+      version: 1,
+      createdAt: now,
+      updatedAt: now,
+      latestRevisionId: revisionId,
+      latestRevisionNo: 1,
+      currentRevisionId: null,
+      businessDate: '',
+      customerId: '',
+      productIds: [],
+      quantity: 0,
+      tripCount: null,
+      workerIds: [],
+      vehicleId: null,
+      workLocationId: null,
+      defectTypeIds: [],
+      ...summary,
+      deliveryFeeYen: type === 'DELIVERY' ? deliveryFeeYen : null,
+      documentId: null,
+      documentStatus: null,
+      current: null,
+    };
   }
 
   async createWork(input: WorkDraftInput, ctx: FieldContext): Promise<RecordSummary> {
-    return withTransaction(this.pool, async (client) => {
-      const computed = await validateWork(client, input, ctx.actor.userId);
-      const reportNo = await allocateReportNo(client, 'WORK', ctx.now);
-      const reportId = randomUUID();
-      const revisionId = randomUUID();
-      await client.query(`INSERT INTO app.work_reports (id, report_no, status, owner_id) VALUES ($1, $2, 'DRAFT', $3)`, [reportId, reportNo, ctx.actor.userId]);
-      await writeWorkRevision(client, revisionId, input, computed, { reportId, revisionNo: 1, parentRevisionId: null });
-      await new PgAuditRepository(client).append({
-        actorId: ctx.actor.userId,
-        action: 'WORK_REPORT_CREATE',
-        targetType: TABLES.WORK.target,
-        targetId: reportId,
-        afterData: { reportNo, revisionId, revisionNo: 1, status: 'DRAFT', ...computed },
-        correlationId: ctx.correlationId,
-        occurredAt: ctx.now,
-      });
-      return { id: reportId, reportNo, status: 'DRAFT', version: 1, documentStatus: null, type: 'WORK', businessDate: input.workDate, revisionNo: 1 };
+    const reportId = randomUUID();
+    const revisionId = randomUUID();
+    return this.store.runTransaction(async (tx) => {
+      const v = await validateWork(tx, input, ctx.actor.userId);
+      const no = await this.nextNo(tx, 'WORK', ctx.now);
+      const rev = workRevisionDoc(input, v, { revisionNo: 1, parentRevisionId: null });
+      const header = this.newHeader('WORK', no.reportNo, ctx.actor.userId, revisionId, workSummary(rev), null, ctx.now);
+      writeCounter(tx, no.counter, no.seq);
+      tx.create(reportPath('WORK', reportId), header);
+      tx.create(revisionPath('WORK', reportId, revisionId), rev);
+      appendAudit(
+        tx,
+        {
+          actorId: ctx.actor.userId,
+          action: 'WORK_REPORT_CREATE',
+          targetType: LABEL.WORK.target,
+          targetId: reportId,
+          afterData: { reportNo: no.reportNo, revisionId, revisionNo: 1, status: 'DRAFT', ...v.computed },
+          correlationId: ctx.correlationId,
+          occurredAt: ctx.now,
+        },
+        ctx.now,
+      );
+      return summaryOf('WORK', { ...header, id: reportId });
     });
   }
 
   async createDelivery(input: DeliveryDraftInput, ctx: FieldContext): Promise<RecordSummary> {
-    return withTransaction(this.pool, async (client) => {
-      await validateDelivery(client, input);
-      const reportNo = await allocateReportNo(client, 'DELIVERY', ctx.now);
-      const reportId = randomUUID();
-      const revisionId = randomUUID();
-      await client.query(`INSERT INTO app.delivery_reports (id, report_no, status, owner_id) VALUES ($1, $2, 'DRAFT', $3)`, [reportId, reportNo, ctx.actor.userId]);
-      await writeDeliveryRevision(client, revisionId, input, { reportId, revisionNo: 1, parentRevisionId: null });
-      await new PgAuditRepository(client).append({
-        actorId: ctx.actor.userId,
-        action: 'DELIVERY_REPORT_CREATE',
-        targetType: TABLES.DELIVERY.target,
-        targetId: reportId,
-        afterData: { reportNo, revisionId, revisionNo: 1, status: 'DRAFT', itemCount: input.items.length },
-        correlationId: ctx.correlationId,
-        occurredAt: ctx.now,
-      });
-      return { id: reportId, reportNo, status: 'DRAFT', version: 1, documentStatus: null, type: 'DELIVERY', businessDate: input.deliveryDate, revisionNo: 1 };
+    const reportId = randomUUID();
+    const revisionId = randomUUID();
+    return this.store.runTransaction(async (tx) => {
+      const v = await validateDelivery(tx, input);
+      const no = await this.nextNo(tx, 'DELIVERY', ctx.now);
+      const rev = deliveryRevisionDoc(input, v.items, { revisionNo: 1, parentRevisionId: null });
+      const header = this.newHeader('DELIVERY', no.reportNo, ctx.actor.userId, revisionId, deliverySummary(rev), input.deliveryFeeYen ?? null, ctx.now);
+      writeCounter(tx, no.counter, no.seq);
+      tx.create(reportPath('DELIVERY', reportId), header);
+      tx.create(revisionPath('DELIVERY', reportId, revisionId), rev);
+      appendAudit(
+        tx,
+        {
+          actorId: ctx.actor.userId,
+          action: 'DELIVERY_REPORT_CREATE',
+          targetType: LABEL.DELIVERY.target,
+          targetId: reportId,
+          afterData: { reportNo: no.reportNo, revisionId, revisionNo: 1, status: 'DRAFT', itemCount: input.items.length },
+          correlationId: ctx.correlationId,
+          occurredAt: ctx.now,
+        },
+        ctx.now,
+      );
+      return summaryOf('DELIVERY', { ...header, id: reportId });
     });
   }
 
-  /** 共通: lock → scope → version → state(DRAFT + 未確定revision) */
-  private async lockDraft(client: PoolClient, type: FieldReportType, id: string, expectedVersion: number, input: Record<string, unknown>, ctx: FieldContext): Promise<{ header: HeaderRow; revision: RevisionHead }> {
-    const header = await lockHeader(client, type, id);
-    if (header === null || (!canReadAll(ctx.actor) && header.owner_id !== ctx.actor.userId)) throw notFound(type);
+  /** 共通: header 読込 → scope → version → state(DRAFT + 未確定revision) */
+  private async readDraft<R extends { confirmedAt: Date | null }>(
+    tx: DocTransaction,
+    type: FieldReportType,
+    id: string,
+    expectedVersion: number,
+    input: Record<string, unknown>,
+    ctx: FieldContext,
+  ): Promise<{ header: Header; revision: R }> {
+    const header = await readHeader(tx, type, id);
+    if (header === null || (!canReadAll(ctx.actor) && header.ownerId !== ctx.actor.userId)) throw notFound(type);
     if (!canWrite(ctx.actor, header)) {
       throw new FieldError(403, 'FORBIDDEN', 'この操作を行う権限がありません。');
     }
+    const revision = await readLatest<R>(tx, type, header);
     if (header.version !== expectedVersion) {
-      const detail = type === 'WORK' ? await workDetail(client, header) : await deliveryDetail(client, header);
+      const detail =
+        type === 'WORK'
+          ? workDetail(header, header.latestRevisionId, revision as unknown as WorkRevisionDoc)
+          : deliveryDetail(header, header.latestRevisionId, revision as unknown as DeliveryRevisionDoc);
       throw versionConflict(header, detail, input);
     }
-    const revision = await latestRevision(client, type, id);
-    if (header.status !== 'DRAFT' || revision === null || revision.confirmed_at !== null) {
+    if (header.status !== 'DRAFT' || revision.confirmedAt !== null) {
       throw stateConflict(header, '下書き以外は変更・確定できません。');
     }
     return { header, revision };
   }
 
   async updateWork(id: string, input: WorkDraftInput & { expectedVersion: number }, ctx: FieldContext): Promise<RecordSummary> {
-    return withTransaction(this.pool, async (client) => {
-      const { header, revision } = await this.lockDraft(client, 'WORK', id, input.expectedVersion, input, ctx);
-      const before = await workDetail(client, header);
-      const computed = await validateWork(client, input, before['reporterId'] as string);
-      await writeWorkRevision(client, revision.id, input, computed, null);
-      const version = await this.bumpVersion(client, 'WORK', id, null);
-      await new PgAuditRepository(client).append({
-        actorId: ctx.actor.userId,
-        action: 'WORK_REPORT_UPDATE',
-        targetType: TABLES.WORK.target,
-        targetId: id,
-        beforeData: summarizeWork(before),
-        afterData: { ...summarizeWork({ ...input }), ...computed, version },
-        correlationId: ctx.correlationId,
-        occurredAt: ctx.now,
-      });
-      return { id, reportNo: header.report_no, status: 'DRAFT', version, documentStatus: null, type: 'WORK', businessDate: input.workDate, revisionNo: revision.revision_no };
+    return this.store.runTransaction(async (tx) => {
+      const { header, revision } = await this.readDraft<WorkRevisionDoc>(tx, 'WORK', id, input.expectedVersion, input, ctx);
+      const before = workDetail(header, header.latestRevisionId, revision);
+      const v = await validateWork(tx, input, revision.reporterId);
+      const rev = workRevisionDoc(input, v, { revisionNo: revision.revisionNo, parentRevisionId: revision.parentRevisionId });
+      const version = header.version + 1;
+      tx.set(revisionPath('WORK', id, header.latestRevisionId), rev);
+      tx.update(reportPath('WORK', id), { ...workSummary(rev), version, updatedAt: ctx.now });
+      appendAudit(
+        tx,
+        {
+          actorId: ctx.actor.userId,
+          action: 'WORK_REPORT_UPDATE',
+          targetType: LABEL.WORK.target,
+          targetId: id,
+          beforeData: summarizeWork(before),
+          afterData: { ...summarizeWork({ ...input }), ...v.computed, version },
+          correlationId: ctx.correlationId,
+          occurredAt: ctx.now,
+        },
+        ctx.now,
+      );
+      return { id, reportNo: header.reportNo, status: 'DRAFT', version, documentStatus: null, type: 'WORK', businessDate: input.workDate, revisionNo: revision.revisionNo };
     });
   }
 
   async updateDelivery(id: string, input: DeliveryDraftInput & { expectedVersion: number }, ctx: FieldContext): Promise<RecordSummary> {
-    return withTransaction(this.pool, async (client) => {
-      const { header, revision } = await this.lockDraft(client, 'DELIVERY', id, input.expectedVersion, input, ctx);
-      const before = await deliveryDetail(client, header);
-      await validateDelivery(client, input);
-      await writeDeliveryRevision(client, revision.id, input, null);
-      const version = await this.bumpVersion(client, 'DELIVERY', id, null);
-      await new PgAuditRepository(client).append({
-        actorId: ctx.actor.userId,
-        action: 'DELIVERY_REPORT_UPDATE',
-        targetType: TABLES.DELIVERY.target,
-        targetId: id,
-        beforeData: summarizeDelivery(before),
-        afterData: { ...summarizeDelivery({ ...input }), version },
-        correlationId: ctx.correlationId,
-        occurredAt: ctx.now,
-      });
-      return { id, reportNo: header.report_no, status: 'DRAFT', version, documentStatus: null, type: 'DELIVERY', businessDate: input.deliveryDate, revisionNo: revision.revision_no };
+    return this.store.runTransaction(async (tx) => {
+      const { header, revision } = await this.readDraft<DeliveryRevisionDoc>(tx, 'DELIVERY', id, input.expectedVersion, input, ctx);
+      const before = deliveryDetail(header, header.latestRevisionId, revision);
+      const v = await validateDelivery(tx, input);
+      const rev = deliveryRevisionDoc(input, v.items, { revisionNo: revision.revisionNo, parentRevisionId: revision.parentRevisionId });
+      const version = header.version + 1;
+      tx.set(revisionPath('DELIVERY', id, header.latestRevisionId), rev);
+      // 運搬費は header（D2: 運搬報告1件に1金額）
+      tx.update(reportPath('DELIVERY', id), { ...deliverySummary(rev), deliveryFeeYen: input.deliveryFeeYen ?? null, version, updatedAt: ctx.now });
+      appendAudit(
+        tx,
+        {
+          actorId: ctx.actor.userId,
+          action: 'DELIVERY_REPORT_UPDATE',
+          targetType: LABEL.DELIVERY.target,
+          targetId: id,
+          beforeData: summarizeDelivery(before),
+          afterData: { ...summarizeDelivery({ ...input }), version },
+          correlationId: ctx.correlationId,
+          occurredAt: ctx.now,
+        },
+        ctx.now,
+      );
+      return { id, reportNo: header.reportNo, status: 'DRAFT', version, documentStatus: null, type: 'DELIVERY', businessDate: input.deliveryDate, revisionNo: revision.revisionNo };
     });
-  }
-
-  private async bumpVersion(client: PoolClient, type: FieldReportType, id: string, confirm: { status: 'CONFIRMED'; revisionId: string } | null): Promise<number> {
-    const r = await client.query<{ version: number }>(
-      confirm === null
-        ? `UPDATE app.${TABLES[type].header} SET version = version + 1, updated_at = now() WHERE id = $1 RETURNING version`
-        : `UPDATE app.${TABLES[type].header} SET version = version + 1, updated_at = now(), status = 'CONFIRMED', current_revision_id = $2 WHERE id = $1 RETURNING version`,
-      confirm === null ? [id] : [id, confirm.revisionId],
-    );
-    return r.rows[0]?.version as number;
   }
 
   /** confirm は caller（handler）が Idempotency を管理し、ここは 1 transaction で確定する */
   async confirm(type: FieldReportType, id: string, expectedVersion: number, ctx: FieldContext): Promise<RecordSummary> {
-    return withTransaction(this.pool, async (client) => {
-      const { header, revision } = await this.lockDraft(client, type, id, expectedVersion, { expectedVersion }, ctx);
-      const detail = type === 'WORK' ? await workDetail(client, header) : await deliveryDetail(client, header);
+    return this.store.runTransaction(async (tx) => {
       let businessDate: string;
       let auditExtra: Record<string, unknown>;
+      let header: Header;
+      let revisionNo: number;
+      const write: Array<() => void> = [];
+      const version = expectedVersion + 1;
       if (type === 'WORK') {
-        const input = detailToWorkInput(detail);
-        const computed = await validateWork(client, input, input.reporterId);
-        await client.query(
-          `UPDATE app.work_report_revisions SET break_minutes=$2, regular_minutes=$3, overtime_minutes=$4,
-                  regular_person_minutes=$5, overtime_person_minutes=$6, confirmed_at = $7 WHERE id = $1 AND confirmed_at IS NULL`,
-          [revision.id, computed.breakMinutes, computed.regularMinutes, computed.overtimeMinutes, computed.regularPersonMinutes, computed.overtimePersonMinutes, ctx.now.toISOString()],
-        );
+        const d = await this.readDraft<WorkRevisionDoc>(tx, 'WORK', id, expectedVersion, { expectedVersion }, ctx);
+        header = d.header;
+        const input = revisionToWorkInput(d.revision);
+        const v = await validateWork(tx, input, d.revision.reporterId);
+        const rev: WorkRevisionDoc = { ...workRevisionDoc(input, v, { revisionNo: d.revision.revisionNo, parentRevisionId: d.revision.parentRevisionId }), confirmedAt: ctx.now };
+        write.push(() => {
+          tx.set(revisionPath('WORK', id, header.latestRevisionId), rev);
+          tx.update(reportPath('WORK', id), {
+            ...workSummary(rev),
+            status: 'CONFIRMED',
+            currentRevisionId: header.latestRevisionId,
+            current: workCurrent(header.latestRevisionId, rev),
+            version,
+            updatedAt: ctx.now,
+          });
+        });
         businessDate = input.workDate;
-        auditExtra = { ...computed };
+        revisionNo = rev.revisionNo;
+        auditExtra = { ...v.computed };
       } else {
-        const input = detailToDeliveryInput(detail);
-        await validateDelivery(client, input);
-        // GAP-016: 運搬日に有効な ALLOCATED 運搬ルールがある品番を按分対象とする（CHG-002 D3）
-        await client.query(
-          `UPDATE app.delivery_items i SET allocation_eligible = EXISTS (
-              SELECT 1 FROM app.transport_rules r
-               WHERE r.product_id = i.product_id AND r.active AND r.type = 'ALLOCATED'
-                 AND r.valid_from <= $2::date AND (r.valid_to IS NULL OR r.valid_to >= $2::date))
-            WHERE i.delivery_revision_id = $1`,
-          [revision.id, input.deliveryDate],
-        );
-        await client.query('UPDATE app.delivery_report_revisions SET confirmed_at = $2 WHERE id = $1 AND confirmed_at IS NULL', [revision.id, ctx.now.toISOString()]);
+        const d = await this.readDraft<DeliveryRevisionDoc>(tx, 'DELIVERY', id, expectedVersion, { expectedVersion }, ctx);
+        header = d.header;
+        const input = revisionToDeliveryInput(d.revision, header.deliveryFeeYen);
+        const v = await validateDelivery(tx, input);
+        const rev: DeliveryRevisionDoc = { ...deliveryRevisionDoc(input, v.items, { revisionNo: d.revision.revisionNo, parentRevisionId: d.revision.parentRevisionId }), confirmedAt: ctx.now };
+        write.push(() => {
+          tx.set(revisionPath('DELIVERY', id, header.latestRevisionId), rev);
+          tx.update(reportPath('DELIVERY', id), {
+            ...deliverySummary(rev),
+            status: 'CONFIRMED',
+            currentRevisionId: header.latestRevisionId,
+            current: deliveryCurrent(header.latestRevisionId, rev),
+            version,
+            updatedAt: ctx.now,
+          });
+        });
         businessDate = input.deliveryDate;
-        const eligible = await client.query<{ n: string }>('SELECT count(*) AS n FROM app.delivery_items WHERE delivery_revision_id = $1 AND allocation_eligible', [revision.id]);
-        auditExtra = { itemCount: input.items.length, allocationEligibleCount: Number(eligible.rows[0]?.n ?? 0) };
+        revisionNo = rev.revisionNo;
+        // CHG-006 F1: 按分対象の判定（運搬ルール）は Blind のため 0
+        auditExtra = { itemCount: input.items.length, allocationEligibleCount: 0 };
       }
-      const version = await this.bumpVersion(client, type, id, { status: 'CONFIRMED', revisionId: revision.id });
+      // ---- 書込
+      for (const w of write) w();
       const eventType: OutboxEventType = type === 'WORK' ? 'WorkReportConfirmed' : 'DeliveryReportConfirmed';
-      await new PgOutboxRepository(client).enqueue({
-        eventId: randomUUID(),
-        type: eventType,
-        version: 1,
-        occurredAt: ctx.now.toISOString(),
-        aggregateType: type === 'WORK' ? 'Work' : 'Delivery',
-        aggregateId: id,
-        correlationId: ctx.correlationId,
-        causationId: null,
-        payload: { reportId: id, reportNo: header.report_no, revisionId: revision.id, revisionNo: revision.revision_no, version, actorId: ctx.actor.userId },
-      });
-      await new PgAuditRepository(client).append({
-        actorId: ctx.actor.userId,
-        action: type === 'WORK' ? 'WORK_REPORT_CONFIRM' : 'DELIVERY_REPORT_CONFIRM',
-        targetType: TABLES[type].target,
-        targetId: id,
-        beforeData: { status: 'DRAFT', version: header.version },
-        afterData: { status: 'CONFIRMED', version, revisionId: revision.id, revisionNo: revision.revision_no, ...auditExtra },
-        correlationId: ctx.correlationId,
-        occurredAt: ctx.now,
-      });
-      return { id, reportNo: header.report_no, status: 'CONFIRMED', version, documentStatus: null, type, businessDate, revisionNo: revision.revision_no };
+      enqueueOutbox(
+        tx,
+        {
+          eventId: randomUUID(),
+          type: eventType,
+          version: 1,
+          occurredAt: ctx.now.toISOString(),
+          aggregateType: type === 'WORK' ? 'Work' : 'Delivery',
+          aggregateId: id,
+          correlationId: ctx.correlationId,
+          causationId: null,
+          payload: { reportId: id, reportNo: header.reportNo, revisionId: header.latestRevisionId, revisionNo, version, actorId: ctx.actor.userId },
+        },
+        ctx.now,
+      );
+      appendAudit(
+        tx,
+        {
+          actorId: ctx.actor.userId,
+          action: type === 'WORK' ? 'WORK_REPORT_CONFIRM' : 'DELIVERY_REPORT_CONFIRM',
+          targetType: LABEL[type].target,
+          targetId: id,
+          beforeData: { status: 'DRAFT', version: header.version },
+          afterData: { status: 'CONFIRMED', version, revisionId: header.latestRevisionId, revisionNo, ...auditExtra },
+          correlationId: ctx.correlationId,
+          occurredAt: ctx.now,
+        },
+        ctx.now,
+      );
+      return { id, reportNo: header.reportNo, status: 'CONFIRMED', version, documentStatus: null, type, businessDate, revisionNo };
     });
   }
 
-  /** API-012: 業務日 DESC, 作成日時 DESC, id ASC（CHG-004 D5: 同じ日は新しい登録が先）。FIELD（全件参照ロール無し）は owner=本人のみ（CHG-002）。
-   *  CHG-004 D6: 種別・お客様・品番の絞込と、一覧表示用の要約（お客様・品番・数量・運搬回数・運搬費） */
+  /**
+   * API-012: 業務日 DESC, 作成日時 DESC, id ASC（CHG-004 D5: 同じ日は新しい登録が先）。FIELD（全件参照ロール無し）は owner=本人のみ（CHG-002）。
+   * CHG-004 D6: 種別・お客様・品番の絞込と、一覧表示用の要約（お客様・品番・数量・運搬回数・運搬費）。
+   *
+   * CHG-006: 種別ごとのコレクションを検索して合わせる。絞込のうち1つ（本人 > 品番 > お客様 > 状態）を Firestore の検索に含め、
+   *   それだけで済む場合は「並び順＋件数制限＋count」で必要な件数だけ読む。2つ以上の絞込がある場合は、期間内を全件
+   *   （期間指定なしは種別ごとに新しい順で最大 LIST_SCAN_LIMIT 件）読んで残りをアプリで絞り込む。
+   */
   async list(actor: FieldActor, q: RecordListQuery): Promise<{ data: RecordListItem[]; meta: { page: number; pageSize: number; total: number } }> {
-    const params: unknown[] = [];
-    const where: string[] = [];
-    if (!canReadAll(actor)) {
-      params.push(actor.userId);
-      where.push(`owner_id = $${params.length}`);
+    const types: FieldReportType[] = q.type === 'WORK' || q.type === 'DELIVERY' ? [q.type] : ['WORK', 'DELIVERY'];
+    const equality: Filter[] = [];
+    if (!canReadAll(actor)) equality.push({ field: 'ownerId', op: '==', value: actor.userId });
+    if (q.productId) equality.push({ field: 'productIds', op: 'array-contains', value: q.productId });
+    if (q.customerId) equality.push({ field: 'customerId', op: '==', value: q.customerId });
+    if (q.status) equality.push({ field: 'status', op: '==', value: q.status });
+    const pushed = equality.slice(0, 1);
+    const rest = equality.slice(1);
+    const range: Filter[] = [];
+    if (q.dateFrom) range.push({ field: 'businessDate', op: '>=', value: q.dateFrom });
+    if (q.dateTo) range.push({ field: 'businessDate', op: '<=', value: q.dateTo });
+    const orderBy = [
+      { field: 'businessDate', dir: 'desc' as const },
+      { field: 'createdAt', dir: 'desc' as const },
+    ];
+    const where = [...pushed, ...range];
+    const matchesRest = (h: ReportHeaderDoc): boolean =>
+      rest.every((f) => (f.op === 'array-contains' ? (h[f.field as keyof ReportHeaderDoc] as readonly string[]).includes(f.value as string) : h[f.field as keyof ReportHeaderDoc] === f.value));
+
+    const rows: Array<{ type: FieldReportType; id: string; h: ReportHeaderDoc }> = [];
+    let total = 0;
+    const need = q.page * q.pageSize;
+    for (const type of types) {
+      if (rest.length === 0) {
+        const found = await this.store.query<ReportHeaderDoc>(REPORT_COLLECTION[type], { where, orderBy, limit: need });
+        rows.push(...found.map((r) => ({ type, id: r.id, h: r.data })));
+        total += await this.store.count(REPORT_COLLECTION[type], { where, orderBy });
+      } else {
+        const limit = range.length === 0 ? LIST_SCAN_LIMIT : undefined;
+        const found = await this.store.query<ReportHeaderDoc>(REPORT_COLLECTION[type], { where, orderBy, ...(limit !== undefined ? { limit } : {}) });
+        const hit = found.filter((r) => matchesRest(r.data));
+        rows.push(...hit.map((r) => ({ type, id: r.id, h: r.data })));
+        total += hit.length;
+      }
     }
-    if (q.status !== null) {
-      params.push(q.status);
-      where.push(`status = $${params.length}`);
-    }
-    if (q.dateFrom !== null) {
-      params.push(q.dateFrom);
-      where.push(`business_date >= $${params.length}::date`);
-    }
-    if (q.dateTo !== null) {
-      params.push(q.dateTo);
-      where.push(`business_date <= $${params.length}::date`);
-    }
-    if (q.type !== undefined && q.type !== null) {
-      params.push(q.type);
-      where.push(`type = $${params.length}`);
-    }
-    if (q.customerId !== undefined && q.customerId !== null) {
-      params.push(q.customerId);
-      where.push(`customer_id = $${params.length}::uuid`);
-    }
-    if (q.productId !== undefined && q.productId !== null) {
-      params.push(q.productId);
-      where.push(`$${params.length}::uuid = ANY(product_ids)`);
-    }
-    const union = `
-      SELECT h.id, h.report_no, h.status::text AS status, h.version, h.owner_id, h.created_at, 'WORK' AS type, r.work_date AS business_date, r.revision_no,
-             d.status::text AS document_status, r.customer_id, ARRAY[r.product_id] AS product_ids, r.quantity::bigint AS quantity,
-             NULL::int AS trip_count, NULL::bigint AS delivery_fee_yen
-        FROM app.work_reports h
-        JOIN LATERAL (SELECT id, work_date, revision_no, customer_id, product_id, quantity FROM app.work_report_revisions WHERE report_id = h.id ORDER BY revision_no DESC LIMIT 1) r ON true
-        LEFT JOIN LATERAL (SELECT status FROM app.document_jobs WHERE source_id = r.id ORDER BY created_at DESC, id DESC LIMIT 1) d ON true
-      UNION ALL
-      SELECT h.id, h.report_no, h.status::text, h.version, h.owner_id, h.created_at, 'DELIVERY', r.delivery_date, r.revision_no,
-             d.status::text, r.customer_id,
-             ARRAY(SELECT i.product_id FROM app.delivery_items i JOIN app.products p ON p.id = i.product_id WHERE i.delivery_revision_id = r.id ORDER BY p.code, p.id),
-             (SELECT COALESCE(sum(i.quantity), 0) FROM app.delivery_items i WHERE i.delivery_revision_id = r.id)::bigint,
-             r.trip_count, h.delivery_fee_yen
-        FROM app.delivery_reports h
-        JOIN LATERAL (SELECT id, delivery_date, revision_no, customer_id, trip_count FROM app.delivery_report_revisions WHERE report_id = h.id ORDER BY revision_no DESC LIMIT 1) r ON true
-        LEFT JOIN LATERAL (SELECT status FROM app.document_jobs WHERE source_id = r.id ORDER BY created_at DESC, id DESC LIMIT 1) d ON true`;
-    const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
-    const total = await this.pool.query<{ n: string }>(`SELECT count(*) AS n FROM (${union}) x ${whereSql}`, params);
-    params.push(q.pageSize, (q.page - 1) * q.pageSize);
-    const rows = await this.pool.query<{
-      id: string; report_no: string; status: string; version: number; type: FieldReportType; business_date: string; revision_no: number;
-      document_status: string | null; customer_id: string; product_ids: string[]; quantity: string; trip_count: number | null; delivery_fee_yen: string | null;
-    }>(
-      `SELECT * FROM (${union}) x ${whereSql} ORDER BY business_date DESC, created_at DESC, id ASC LIMIT $${params.length - 1} OFFSET $${params.length}`,
-      params,
-    );
+    rows.sort((a, b) => {
+      if (a.h.businessDate !== b.h.businessDate) return a.h.businessDate < b.h.businessDate ? 1 : -1;
+      const ca = a.h.createdAt.getTime();
+      const cb = b.h.createdAt.getTime();
+      if (ca !== cb) return cb - ca;
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    });
+    const start = (q.page - 1) * q.pageSize;
     return {
-      data: rows.rows.map((r) => ({
-        id: r.id,
-        reportNo: r.report_no,
-        status: r.status,
-        version: r.version,
-        documentStatus: r.document_status,
-        type: r.type,
-        businessDate: r.business_date,
-        revisionNo: r.revision_no,
-        customerId: r.customer_id,
-        productIds: r.product_ids,
-        quantity: Number(r.quantity),
-        tripCount: r.trip_count,
-        deliveryFeeYen: yenOrNull(r.delivery_fee_yen),
+      data: rows.slice(start, start + q.pageSize).map(({ type, id, h }) => ({
+        id,
+        reportNo: h.reportNo,
+        status: h.status,
+        version: h.version,
+        documentStatus: h.documentStatus,
+        type,
+        businessDate: h.businessDate,
+        revisionNo: h.latestRevisionNo,
+        customerId: h.customerId,
+        productIds: [...h.productIds],
+        quantity: h.quantity,
+        tripCount: type === 'DELIVERY' ? h.tripCount : null,
+        deliveryFeeYen: type === 'DELIVERY' ? h.deliveryFeeYen : null,
       })),
-      meta: { page: q.page, pageSize: q.pageSize, total: Number(total.rows[0]?.n ?? 0) },
+      meta: { page: q.page, pageSize: q.pageSize, total },
     };
   }
 
@@ -712,61 +824,49 @@ export class FieldReportService {
    * API-013 transitionRecord `revise`（CHG-004 D3: 確定後の事務所修正）。
    * 確定版は残し、親 revision 付きの新しい下書き revision（内容は複製）を作る。以後は PATCH（API-006/010）で直し、
    * confirm（API-007/011）で新しい版として確定 → 帳票も新しい版で作成される。理由必須・監査。
+   * 月次集計は新しい版が確定するまで前の確定版（current）で数える。
    */
   async revise(type: FieldReportType, id: string, cmd: { expectedVersion: number; reason: string }, ctx: FieldContext): Promise<RecordSummary> {
-    return withTransaction(this.pool, async (client) => {
-      const header = await lockHeader(client, type, id);
+    return this.store.runTransaction(async (tx) => {
+      const header = await readHeader(tx, type, id);
       if (header === null) throw notFound(type);
       if (header.version !== cmd.expectedVersion) {
         throw new FieldError(409, 'VERSION_CONFLICT', '他の利用者により更新されています。再読込してください。', [], { currentVersion: header.version, changedFields: ['/status'] });
       }
-      const latest = await latestRevision(client, type, id);
-      if (!(REVISABLE_STATUSES as readonly string[]).includes(header.status) || latest === null || latest.confirmed_at === null) {
+      const latest = await readLatest<WorkRevisionDoc | DeliveryRevisionDoc>(tx, type, header);
+      if (!(REVISABLE_STATUSES as readonly string[]).includes(header.status) || latest.confirmedAt === null) {
         throw stateConflict(header, '確定済みの報告だけを修正できます（下書き中の修正は、そのまま編集して確定してください）。');
       }
       const revisionId = randomUUID();
-      const revisionNo = latest.revision_no + 1;
-      const t = TABLES[type];
-      if (type === 'WORK') {
-        await client.query(
-          `INSERT INTO app.work_report_revisions
-             (id, report_id, parent_revision_id, revision_no, work_date, reporter_id, customer_id, product_id, work_type_id, lot_no,
-              start_at, end_at, break_minutes, regular_minutes, overtime_minutes, regular_person_minutes, overtime_person_minutes, quantity,
-              work_location_id, vehicle_id, remarks)
-           SELECT $1, report_id, id, $2, work_date, reporter_id, customer_id, product_id, work_type_id, lot_no,
-                  start_at, end_at, break_minutes, regular_minutes, overtime_minutes, regular_person_minutes, overtime_person_minutes, quantity,
-                  work_location_id, vehicle_id, remarks
-             FROM app.work_report_revisions WHERE id = $3`,
-          [revisionId, revisionNo, latest.id],
-        );
-        await client.query('INSERT INTO app.work_report_workers (revision_id, worker_id) SELECT $1, worker_id FROM app.work_report_workers WHERE revision_id = $2', [revisionId, latest.id]);
-        await client.query('INSERT INTO app.defect_results (revision_id, defect_type_id, quantity) SELECT $1, defect_type_id, quantity FROM app.defect_results WHERE revision_id = $2', [revisionId, latest.id]);
-      } else {
-        await client.query(
-          `INSERT INTO app.delivery_report_revisions (id, report_id, parent_revision_id, revision_no, delivery_date, driver_id, customer_id, vehicle_id, trip_count)
-           SELECT $1, report_id, id, $2, delivery_date, driver_id, customer_id, vehicle_id, trip_count FROM app.delivery_report_revisions WHERE id = $3`,
-          [revisionId, revisionNo, latest.id],
-        );
-        await client.query('INSERT INTO app.delivery_items (delivery_revision_id, product_id, quantity) SELECT $1, product_id, quantity FROM app.delivery_items WHERE delivery_revision_id = $2', [revisionId, latest.id]);
-      }
-      const r = await client.query<{ version: number }>(
-        `UPDATE app.${t.header} SET status = 'DRAFT', version = version + 1, updated_at = now() WHERE id = $1 RETURNING version`,
-        [id],
-      );
-      const version = r.rows[0]?.version as number;
-      await new PgAuditRepository(client).append({
-        actorId: ctx.actor.userId,
-        action: `${t.target}_REVISE`,
-        targetType: t.target,
-        targetId: id,
-        beforeData: { status: header.status, version: header.version, revisionId: latest.id, revisionNo: latest.revision_no },
-        afterData: { status: 'DRAFT', version, revisionId, revisionNo, parentRevisionId: latest.id },
-        reason: cmd.reason,
-        correlationId: ctx.correlationId,
-        occurredAt: ctx.now,
+      const revisionNo = latest.revisionNo + 1;
+      const copy = { ...latest, revisionNo, parentRevisionId: header.latestRevisionId, confirmedAt: null };
+      const version = header.version + 1;
+      tx.create(revisionPath(type, id, revisionId), copy);
+      tx.update(reportPath(type, id), {
+        status: 'DRAFT',
+        version,
+        updatedAt: ctx.now,
+        latestRevisionId: revisionId,
+        latestRevisionNo: revisionNo,
+        documentId: null,
+        documentStatus: null,
       });
-      const date = await client.query<{ d: string }>(`SELECT ${t.dateColumn}::text AS d FROM app.${t.revision} WHERE id = $1`, [revisionId]);
-      return { id, reportNo: header.report_no, status: 'DRAFT', version, documentStatus: null, type, businessDate: date.rows[0]?.d as string, revisionNo };
+      appendAudit(
+        tx,
+        {
+          actorId: ctx.actor.userId,
+          action: `${LABEL[type].target}_REVISE`,
+          targetType: LABEL[type].target,
+          targetId: id,
+          beforeData: { status: header.status, version: header.version, revisionId: header.latestRevisionId, revisionNo: latest.revisionNo },
+          afterData: { status: 'DRAFT', version, revisionId, revisionNo, parentRevisionId: header.latestRevisionId },
+          reason: cmd.reason,
+          correlationId: ctx.correlationId,
+          occurredAt: ctx.now,
+        },
+        ctx.now,
+      );
+      return { id, reportNo: header.reportNo, status: 'DRAFT', version, documentStatus: null, type, businessDate: header.businessDate, revisionNo };
     });
   }
 
@@ -775,67 +875,65 @@ export class FieldReportService {
    * 下書き中は PATCH（API-010）で扱う。請求確定済み（BILLING_LOCKED）は変更不可。
    */
   async setDeliveryFee(id: string, cmd: { expectedVersion: number; deliveryFeeYen: number | null; reason?: string | undefined }, ctx: FieldContext): Promise<RecordSummary> {
-    return withTransaction(this.pool, async (client) => {
-      const header = await lockHeader(client, 'DELIVERY', id);
+    return this.store.runTransaction(async (tx) => {
+      const header = await readHeader(tx, 'DELIVERY', id);
       if (header === null) throw notFound('DELIVERY');
-      const before = await client.query<{ delivery_fee_yen: string | null }>('SELECT delivery_fee_yen FROM app.delivery_reports WHERE id = $1', [id]);
       if (header.version !== cmd.expectedVersion) {
         throw new FieldError(409, 'VERSION_CONFLICT', '他の利用者により更新されています。再読込してください。', [], { currentVersion: header.version, changedFields: ['/deliveryFeeYen'] });
       }
       if (header.status === 'DRAFT' || header.status === 'BILLING_LOCKED') {
         throw stateConflict(header, header.status === 'DRAFT' ? '下書きの運搬費は入力画面で変更してください。' : '請求確定済みのため変更できません。');
       }
-      const r = await client.query<{ version: number }>(
-        'UPDATE app.delivery_reports SET delivery_fee_yen = $2, version = version + 1, updated_at = now() WHERE id = $1 RETURNING version',
-        [id, cmd.deliveryFeeYen],
+      const version = header.version + 1;
+      tx.update(reportPath('DELIVERY', id), { deliveryFeeYen: cmd.deliveryFeeYen, version, updatedAt: ctx.now });
+      appendAudit(
+        tx,
+        {
+          actorId: ctx.actor.userId,
+          action: 'DELIVERY_FEE_UPDATE',
+          targetType: LABEL.DELIVERY.target,
+          targetId: id,
+          beforeData: { deliveryFeeYen: header.deliveryFeeYen, version: header.version },
+          afterData: { deliveryFeeYen: cmd.deliveryFeeYen, version },
+          ...(cmd.reason !== undefined && cmd.reason.trim() !== '' ? { reason: cmd.reason.trim() } : {}),
+          correlationId: ctx.correlationId,
+          occurredAt: ctx.now,
+        },
+        ctx.now,
       );
-      const version = r.rows[0]?.version as number;
-      await new PgAuditRepository(client).append({
-        actorId: ctx.actor.userId,
-        action: 'DELIVERY_FEE_UPDATE',
-        targetType: TABLES.DELIVERY.target,
-        targetId: id,
-        beforeData: { deliveryFeeYen: yenOrNull(before.rows[0]?.delivery_fee_yen), version: header.version },
-        afterData: { deliveryFeeYen: cmd.deliveryFeeYen, version },
-        ...(cmd.reason !== undefined && cmd.reason.trim() !== '' ? { reason: cmd.reason.trim() } : {}),
-        correlationId: ctx.correlationId,
-        occurredAt: ctx.now,
-      });
-      const rev = await latestRevision(client, 'DELIVERY', id);
-      const date = await client.query<{ d: string }>('SELECT delivery_date::text AS d FROM app.delivery_report_revisions WHERE id = $1', [rev?.id]);
-      return { id, reportNo: header.report_no, status: header.status, version, documentStatus: null, type: 'DELIVERY', businessDate: date.rows[0]?.d as string, revisionNo: rev?.revision_no as number };
+      return { id, reportNo: header.reportNo, status: header.status, version, documentStatus: header.documentStatus, type: 'DELIVERY', businessDate: header.businessDate, revisionNo: header.latestRevisionNo };
     });
   }
 }
 
-function detailToWorkInput(d: Record<string, unknown>): WorkDraftInput {
+function revisionToWorkInput(r: WorkRevisionDoc): WorkDraftInput {
   return {
-    workDate: d['workDate'] as string,
-    reporterId: d['reporterId'] as string,
-    customerId: d['customerId'] as string,
-    productId: d['productId'] as string,
-    workTypeId: d['workTypeId'] as string,
-    lotNo: (d['lotNo'] as string | null) ?? null,
-    workerIds: d['workerIds'] as string[],
-    startAt: d['startAt'] as string,
-    endAt: d['endAt'] as string,
-    quantity: d['quantity'] as number,
-    defects: d['defects'] as Array<{ defectTypeId: string; quantity: number }>,
-    workLocationId: (d['workLocationId'] as string | null) ?? null,
-    vehicleId: (d['vehicleId'] as string | null) ?? null,
-    remarks: (d['remarks'] as string | null) ?? null,
+    workDate: r.workDate,
+    reporterId: r.reporterId,
+    customerId: r.customerId,
+    productId: r.productId,
+    workTypeId: r.workTypeId,
+    lotNo: r.lotNo,
+    workerIds: [...r.workerIds],
+    startAt: r.startAt.toISOString(),
+    endAt: r.endAt.toISOString(),
+    quantity: r.quantity,
+    defects: r.defects.map((d) => ({ defectTypeId: d.defectTypeId, quantity: d.quantity })),
+    workLocationId: r.workLocationId,
+    vehicleId: r.vehicleId,
+    remarks: r.remarks,
   };
 }
 
-function detailToDeliveryInput(d: Record<string, unknown>): DeliveryDraftInput {
+function revisionToDeliveryInput(r: DeliveryRevisionDoc, deliveryFeeYen: number | null): DeliveryDraftInput {
   return {
-    deliveryDate: d['deliveryDate'] as string,
-    driverId: d['driverId'] as string,
-    customerId: d['customerId'] as string,
-    items: (d['items'] as Array<{ productId: string; quantity: number }>).map((i) => ({ productId: i.productId, quantity: i.quantity })),
-    vehicleId: (d['vehicleId'] as string | null) ?? null,
-    tripCount: d['tripCount'] as number,
-    deliveryFeeYen: (d['deliveryFeeYen'] as number | null) ?? null,
+    deliveryDate: r.deliveryDate,
+    driverId: r.driverId,
+    customerId: r.customerId,
+    items: r.items.map((i) => ({ productId: i.productId, quantity: i.quantity })),
+    vehicleId: r.vehicleId,
+    tripCount: r.tripCount,
+    deliveryFeeYen,
   };
 }
 

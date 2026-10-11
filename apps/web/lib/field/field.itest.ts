@@ -1,6 +1,6 @@
 /**
  * G3 統合試験（T-DLV-001 / T-WRK-001 / T-OFF-001 の server 側 / REQ-REV-001 / CHG-002）。
- * 実PostgreSQL 16 の fresh DB（schema.sql＋migration）に対し、HTTP handler（入口ガード込み）→ FieldReportService → DB を通しで検証する。
+ * CHG-006: Firestore（エミュレータ、無ければ MemoryDocStore）に対し、HTTP handler（入口ガード込み）→ FieldReportService → DocStore を通しで検証する。
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -9,9 +9,12 @@ import Ajv2020 from 'ajv/dist/2020';
 import addFormats from 'ajv-formats';
 import type { RoleCode } from '@inspexor/domain';
 import { jstToInstant } from '@inspexor/domain';
-import { createFreshDatabase, insertUser, findSpecFile, type FreshDatabase } from '../testing/fresh-db';
-import '../db/pg';
-import { PgAuditRepository } from '../db/pg-audit-repository';
+import { auditEventsFor, C, createUser, DocIdempotencyRepository, StoreAuditRepository, type OutboxDoc, type ReportHeaderDoc, type WorkRevisionDoc } from '@inspexor/docstore';
+import { createTestStore, type TestStore } from '@inspexor/docstore/testing';
+import { findSpecFile } from '../testing/spec-files';
+import { MasterService } from '../masters/master-service';
+import { MASTER_DEFS, type MasterType } from '../masters/definitions';
+import { writeSchema } from '../masters/schemas';
 import { issueSessionToken } from '../auth/session-token';
 import { SESSION_COOKIE_NAME } from '../auth/session-cookie';
 import { issueCsrfToken } from '../security/csrf';
@@ -20,7 +23,7 @@ import { deliveryFeeHandlers, fieldCollectionHandlers, fieldConfirmHandlers, fie
 
 const SECRET = 'f'.repeat(32);
 const NOW = new Date('2026-10-08T03:00:00.000Z'); // JST 2026-10-08 12:00
-let db: FreshDatabase;
+let t: TestStore;
 let deps: FieldRouteDeps;
 const users: Record<string, string> = {};
 const m: Record<string, string> = {};
@@ -35,43 +38,54 @@ const schema = (name: string) => {
   return fn;
 };
 
-async function one<T = { id: string }>(sql: string, params: unknown[] = []): Promise<T> {
-  return (await db.pool.query(sql, params)).rows[0] as T;
+async function master(type: MasterType, input: Record<string, unknown>): Promise<string> {
+  const parsed = writeSchema(MASTER_DEFS[type]).parse(input) as Record<string, unknown>;
+  return (await new MasterService(t.store).create(type, parsed, { actorId: 'itest', correlationId: '11111111-1111-4111-8111-111111111111', now: NOW })).id;
+}
+
+async function deactivate(type: MasterType, id: string): Promise<void> {
+  await new MasterService(t.store).deactivate(type, id, { expectedVersion: 1 }, { actorId: 'itest', correlationId: '11111111-1111-4111-8111-111111111111', now: NOW }, false);
+}
+
+async function outboxCount(type: string, aggregateId: string): Promise<number> {
+  return (await t.store.query<OutboxDoc>(C.outbox, { where: [{ field: 'aggregateId', op: '==', value: aggregateId }] })).filter((o) => o.data.type === type).length;
+}
+
+async function auditCount(targetType: string, id: string, action: string): Promise<number> {
+  return (await auditEventsFor(t.store, targetType, id)).filter((a) => a.action === action).length;
 }
 
 beforeAll(async () => {
-  db = await createFreshDatabase('field');
+  t = createTestStore('field');
   for (const [login, role] of [['field-a', 'FIELD'], ['field-b', 'FIELD'], ['office', 'OFFICE'], ['admin', 'ADMIN'], ['auditor', 'AUDITOR']] as const) {
-    users[login] = await insertUser(db.pool, `itest-${login}`);
-    await db.pool.query('INSERT INTO app.user_roles (user_id, role) VALUES ($1, $2)', [users[login], role]);
+    users[login] = (await createUser(t.store, { loginId: `itest-${login}`, passwordHash: 'x', displayName: login, roles: [role] }, NOW)) as string;
   }
-  m['customer'] = (await one(`INSERT INTO app.customers(code,name,closing_day) VALUES ('C1','顧客1',31) RETURNING id`)).id;
-  m['customer2'] = (await one(`INSERT INTO app.customers(code,name,closing_day) VALUES ('C2','顧客2',31) RETURNING id`)).id;
-  m['pA'] = (await one(`INSERT INTO app.products(customer_id,code,name,settlement_type) VALUES ($1,'P-A','品A','QUANTITY') RETURNING id`, [m['customer']])).id;
-  m['pB'] = (await one(`INSERT INTO app.products(customer_id,code,name,settlement_type) VALUES ($1,'P-B','品B','TIME') RETURNING id`, [m['customer']])).id;
-  m['pLot'] = (await one(`INSERT INTO app.products(customer_id,code,name,settlement_type,lot_required) VALUES ($1,'P-L','ロット必須','QUANTITY',true) RETURNING id`, [m['customer']])).id;
-  m['pOther'] = (await one(`INSERT INTO app.products(customer_id,code,name,settlement_type) VALUES ($1,'P-X','他社品','QUANTITY') RETURNING id`, [m['customer2']])).id;
-  m['wtA'] = (await one(`INSERT INTO app.work_types(product_id,code,name) VALUES ($1,'INSP','検査') RETURNING id`, [m['pA']])).id;
-  m['wtB'] = (await one(`INSERT INTO app.work_types(product_id,code,name) VALUES ($1,'INSP','検査') RETURNING id`, [m['pB']])).id;
-  m['wtLot'] = (await one(`INSERT INTO app.work_types(product_id,code,name) VALUES ($1,'INSP','検査') RETURNING id`, [m['pLot']])).id;
-  m['dA1'] = (await one(`INSERT INTO app.defect_types(product_id,code,name,sort_order) VALUES ($1,'D1','バリ',1) RETURNING id`, [m['pA']])).id;
-  m['dA2'] = (await one(`INSERT INTO app.defect_types(product_id,code,name,sort_order) VALUES ($1,'D2','欠け',2) RETURNING id`, [m['pA']])).id;
-  m['dB1'] = (await one(`INSERT INTO app.defect_types(product_id,code,name,sort_order) VALUES ($1,'D1','バリ',1) RETURNING id`, [m['pB']])).id;
-  m['w1'] = (await one(`INSERT INTO app.workers(code,name) VALUES ('W1','作業者1') RETURNING id`)).id;
-  m['w2'] = (await one(`INSERT INTO app.workers(code,name) VALUES ('W2','作業者2') RETURNING id`)).id;
-  m['wOff'] = (await one(`INSERT INTO app.workers(code,name,active) VALUES ('W9','無効作業者',false) RETURNING id`)).id;
-  await db.pool.query(`INSERT INTO app.transport_rules(product_id,type,amount_yen,valid_from) VALUES ($1,'ALLOCATED',2500,'2026-01-01')`, [m['pA']]);
-  await db.pool.query(`INSERT INTO app.transport_rules(product_id,type,amount_yen,valid_from) VALUES ($1,'PER_TRIP',1000,'2026-01-01')`, [m['pB']]);
-  await db.pool.query(`INSERT INTO app.holidays(holiday_date,name) VALUES ('2026-11-03','文化の日')`);
+  m['customer'] = await master('customers', { code: 'C1', name: '顧客1', closingDay: 31 });
+  m['customer2'] = await master('customers', { code: 'C2', name: '顧客2', closingDay: 31 });
+  m['pA'] = await master('products', { customerId: m['customer'], code: 'P-A', name: '品A', settlementType: 'QUANTITY' });
+  m['pB'] = await master('products', { customerId: m['customer'], code: 'P-B', name: '品B', settlementType: 'TIME' });
+  m['pLot'] = await master('products', { customerId: m['customer'], code: 'P-L', name: 'ロット必須', settlementType: 'QUANTITY', lotRequired: true });
+  m['pOther'] = await master('products', { customerId: m['customer2'], code: 'P-X', name: '他社品', settlementType: 'QUANTITY' });
+  m['wtA'] = await master('work-types', { productId: m['pA'], code: 'INSP', name: '検査' });
+  m['wtB'] = await master('work-types', { productId: m['pB'], code: 'INSP', name: '検査' });
+  m['wtLot'] = await master('work-types', { productId: m['pLot'], code: 'INSP', name: '検査' });
+  m['dA1'] = await master('defects', { productId: m['pA'], code: 'D1', name: 'バリ', sortOrder: 1 });
+  m['dA2'] = await master('defects', { productId: m['pA'], code: 'D2', name: '欠け', sortOrder: 2 });
+  m['dB1'] = await master('defects', { productId: m['pB'], code: 'D1', name: 'バリ', sortOrder: 1 });
+  m['w1'] = await master('workers', { code: 'W1', name: '作業者1' });
+  m['w2'] = await master('workers', { code: 'W2', name: '作業者2' });
+  m['wOff'] = await master('workers', { code: 'W9', name: '無効作業者' });
+  await deactivate('workers', m['wOff']);
+  await master('holidays', { holidayDate: '2026-11-03', name: '文化の日' });
   deps = {
-    service: () => new FieldReportService(db.pool),
-    pool: () => db.pool,
-    api: () => ({ sessionSecret: SECRET, now: () => NOW, auditRepository: new PgAuditRepository(db.pool), logError: () => undefined }),
+    service: () => new FieldReportService(t.store),
+    idempotency: () => new DocIdempotencyRepository(t.store, () => NOW),
+    api: () => ({ sessionSecret: SECRET, now: () => NOW, auditRepository: new StoreAuditRepository(t.store, () => NOW), logError: () => undefined }),
   };
 }, 60_000);
 
 afterAll(async () => {
-  await db?.drop();
+  await t?.close();
 });
 
 type Who = 'field-a' | 'field-b' | 'office' | 'admin' | 'auditor';
@@ -149,8 +163,7 @@ describe('G3: 作業日報（API-004〜007）', () => {
     expect(schema('WorkReportDetail')(d), JSON.stringify(schema('WorkReportDetail').errors)).toBe(true);
     expect(d).toMatchObject({ lotNo: 'LOT-1', confirmedAt: null, regularMinutes: 240, overtimeMinutes: 60, regularPersonMinutes: 480, overtimePersonMinutes: 120, breakMinutes: 0 });
     expect(d['workerIds']).toEqual([m['w1'], m['w2']]);
-    const audit = await one<{ n: string }>(`SELECT count(*) n FROM app.audit_events WHERE action='WORK_REPORT_CREATE' AND target_id=$1`, [created.id]);
-    expect(Number(audit.n)).toBe(1);
+    expect(await auditCount('WORK_REPORT', created.id, 'WORK_REPORT_CREATE')).toBe(1);
     const second = await createWork();
     expect(second.reportNo).toBe('WR-202610-000002');
   });
@@ -225,7 +238,7 @@ describe('G3: 作業日報（API-004〜007）', () => {
     expect(byOffice.status).toBe(200);
   });
 
-  it('確定: 202 CONFIRMED、revision不変（DB trigger）、outbox WorkReportConfirmed、Idempotency（同key同payload=再生、異payload=409）', async () => {
+  it('確定: 202 CONFIRMED、revision 確定、outbox WorkReportConfirmed、Idempotency（同key同payload=再生、異payload=409）', async () => {
     const r = await createWork();
     const res = await W().confirm.POST(req('field-a', 'POST', `work-reports/${r.id}/confirm`, { expectedVersion: 1 }, KEY('w1')));
     const j = await json(res);
@@ -238,13 +251,14 @@ describe('G3: 作業日報（API-004〜007）', () => {
     const conflict = await W().confirm.POST(req('field-a', 'POST', `work-reports/${r.id}/confirm`, { expectedVersion: 2 }, KEY('w1')));
     expect(conflict.status).toBe(409);
     expect((await json(conflict)).error?.code).toBe('IDEMPOTENCY_CONFLICT');
-    const outbox = await one<{ n: string }>(`SELECT count(*) n FROM app.outbox_events WHERE event_type='WorkReportConfirmed' AND aggregate_id=$1`, [r.id]);
-    expect(Number(outbox.n)).toBe(1);
-    const header = await one<{ status: string; current_revision_id: string }>('SELECT status, current_revision_id FROM app.work_reports WHERE id=$1', [r.id]);
-    const rev = await one<{ id: string; confirmed_at: Date | null }>('SELECT id, confirmed_at FROM app.work_report_revisions WHERE report_id=$1', [r.id]);
-    expect(header).toMatchObject({ status: 'CONFIRMED', current_revision_id: rev.id });
-    expect(rev.confirmed_at).not.toBeNull();
-    await expect(db.pool.query('UPDATE app.work_report_revisions SET quantity = 1 WHERE id = $1', [rev.id])).rejects.toThrow(/immutable/);
+    expect(await outboxCount('WorkReportConfirmed', r.id)).toBe(1);
+    const header = (await t.store.get<ReportHeaderDoc>(`${C.workReports}/${r.id}`)) as ReportHeaderDoc;
+    const revs = await t.store.query<WorkRevisionDoc>(`${C.workReports}/${r.id}/revisions`);
+    expect(revs).toHaveLength(1);
+    expect(header).toMatchObject({ status: 'CONFIRMED', currentRevisionId: revs[0]?.id });
+    expect(revs[0]?.data.confirmedAt).not.toBeNull();
+    // CHG-006: 月次集計用の要約（確定済みの現在版）
+    expect(header.current).toMatchObject({ revisionId: revs[0]?.id, businessDate: '2026-10-08', quantity: 1600, defectQuantity: 12, actualMinutes: 300, personMinutes: 600 });
     // 確定後の更新・再確定は 409 STATE_CONFLICT
     const patch = await W().item.PATCH(req('field-a', 'PATCH', `work-reports/${r.id}`, { ...work(), expectedVersion: 2 }));
     expect((await json(patch)).error?.code).toBe('STATE_CONFLICT');
@@ -254,19 +268,19 @@ describe('G3: 作業日報（API-004〜007）', () => {
   });
 
   it('確定時に master を再検証（下書き後に作業者が無効化されたら 422、記録は DRAFT のまま）、Idempotency-Key 欠落は 422', async () => {
-    const tmp = (await one(`INSERT INTO app.workers(code,name) VALUES ('W-TMP','一時') RETURNING id`)).id;
+    const tmp = await master('workers', { code: 'W-TMP', name: '一時' });
     const r = await createWork('field-a', { workerIds: [tmp] });
-    await db.pool.query('UPDATE app.workers SET active=false WHERE id=$1', [tmp]);
+    await deactivate('workers', tmp);
     const res = await W().confirm.POST(req('field-a', 'POST', `work-reports/${r.id}/confirm`, { expectedVersion: 1 }, KEY('w3')));
     expect(res.status).toBe(422);
     expect((await json(res)).error?.fields?.[0]).toMatchObject({ path: '/workerIds/0', code: 'inactive' });
-    expect((await one<{ status: string }>('SELECT status FROM app.work_reports WHERE id=$1', [r.id])).status).toBe('DRAFT');
+    expect((await t.store.get<ReportHeaderDoc>(`${C.workReports}/${r.id}`))?.status).toBe('DRAFT');
     expect((await W().confirm.POST(req('field-a', 'POST', `work-reports/${r.id}/confirm`, { expectedVersion: 1 }))).status).toBe(422);
   });
 });
 
 describe('G3: 運搬（API-008〜011）', () => {
-  it('作成→参照→確定: DR番号、allocation_eligible（ALLOCATEDのみ true）、outbox DeliveryReportConfirmed', async () => {
+  it('作成→参照→確定: DR番号、allocationEligible（CHG-006 F1: 請求 Blind のため false）、明細は品番コード順、outbox DeliveryReportConfirmed', async () => {
     const res = await D().col.POST(req('field-a', 'POST', 'delivery-reports', delivery()));
     const j = await json(res);
     expect(res.status, JSON.stringify(j)).toBe(201);
@@ -278,11 +292,12 @@ describe('G3: 運搬（API-008〜011）', () => {
     expect(schema('DeliveryReportDetail')(d), JSON.stringify(schema('DeliveryReportDetail').errors)).toBe(true);
     expect(d['status']).toBe('CONFIRMED');
     expect(d['items']).toEqual([
-      { productId: m['pA'], quantity: 1200, allocationEligible: true },
+      { productId: m['pA'], quantity: 1200, allocationEligible: false },
       { productId: m['pB'], quantity: 800, allocationEligible: false },
     ]);
-    const outbox = await one<{ n: string }>(`SELECT count(*) n FROM app.outbox_events WHERE event_type='DeliveryReportConfirmed' AND aggregate_id=$1`, [id]);
-    expect(Number(outbox.n)).toBe(1);
+    expect(await outboxCount('DeliveryReportConfirmed', id)).toBe(1);
+    const header = (await t.store.get<ReportHeaderDoc>(`${C.deliveryReports}/${id}`)) as ReportHeaderDoc;
+    expect(header.current).toMatchObject({ businessDate: '2026-10-08', tripCount: 1, items: [{ productId: m['pA'], quantity: 1200 }, { productId: m['pB'], quantity: 800 }] });
   });
 
   it('422: 重複品番・他社品番・数量0（schema）・数量上限・無効運転者', async () => {
@@ -324,9 +339,12 @@ describe('G3: listRecords（API-012、CHG-002）', () => {
     expect(rows.map((r) => r.businessDate)).toEqual([...rows.map((r) => r.businessDate)].sort().reverse());
     expect(rows.some((r) => r.type === 'DELIVERY')).toBe(true);
     // CHG-004 D5: 同じ業務日は新しい登録（作成日時）が先
-    const created = await db.pool.query<{ id: string }>(`SELECT id FROM (SELECT id, created_at FROM app.work_reports UNION ALL SELECT id, created_at FROM app.delivery_reports) x ORDER BY created_at DESC, id ASC`);
+    const heads = [
+      ...(await t.store.query<ReportHeaderDoc>(C.workReports)),
+      ...(await t.store.query<ReportHeaderDoc>(C.deliveryReports)),
+    ].sort((a, b) => b.data.createdAt.getTime() - a.data.createdAt.getTime() || (a.id < b.id ? -1 : 1));
     const sameDay = (all as unknown as { data: Array<{ id: string; businessDate: string }> }).data.filter((r) => r.businessDate === '2026-10-08').map((r) => r.id);
-    expect(sameDay).toEqual(created.rows.map((r) => r.id).filter((id) => sameDay.includes(id)));
+    expect(sameDay).toEqual(heads.map((r) => r.id).filter((id) => sameDay.includes(id)));
     const confirmed = await json(await list.GET(req('office', 'GET', 'records?status=CONFIRMED&dateFrom=2026-10-08&dateTo=2026-10-08')));
     expect((confirmed as unknown as { data: Array<{ status: string }> }).data.every((r) => r.status === 'CONFIRMED')).toBe(true);
     expect((await list.GET(req('office', 'GET', 'records?sort=x'))).status).toBe(400);
@@ -336,9 +354,10 @@ describe('G3: listRecords（API-012、CHG-002）', () => {
 
 describe('CHG-004: 提案書の入力項目（作業場所・使用車・備考／使用車両・運搬回数・運搬費）', () => {
   it('作業: 作業場所・使用車・備考を保存して Detail で返す（未指定は null）。無効な車両は 422', async () => {
-    m['loc'] = (await one(`INSERT INTO app.work_locations(code,name) VALUES ('L1','三成興業 作業場') RETURNING id`)).id;
-    m['car'] = (await one(`INSERT INTO app.vehicles(code,name) VALUES ('V1','キャラバン') RETURNING id`)).id;
-    m['carOff'] = (await one(`INSERT INTO app.vehicles(code,name,active) VALUES ('V9','廃車',false) RETURNING id`)).id;
+    m['loc'] = await master('work-locations', { code: 'L1', name: '三成興業 作業場' });
+    m['car'] = await master('vehicles', { code: 'V1', name: 'キャラバン' });
+    m['carOff'] = await master('vehicles', { code: 'V9', name: '廃車' });
+    await deactivate('vehicles', m['carOff']);
     const plain = await createWork('field-a');
     const plainDetail = (await json(await W().item.GET(req('field-a', 'GET', `work-reports/${plain.id}`)))).data as Record<string, unknown>;
     expect(plainDetail).toMatchObject({ workLocationId: null, vehicleId: null, remarks: null });
@@ -356,8 +375,9 @@ describe('CHG-004: 提案書の入力項目（作業場所・使用車・備考�
     expect(long.status).toBe(422);
 
     // 確定後の監査に備考の本文は残さない（有無のみ）
-    const audit = await one<{ after_data: Record<string, unknown> }>(`SELECT after_data FROM app.audit_events WHERE target_id = $1 AND action = 'WORK_REPORT_CREATE'`, [created.id]);
-    expect(JSON.stringify(audit.after_data)).not.toContain('特記事項なし');
+    const audit = (await auditEventsFor(t.store, 'WORK_REPORT', created.id)).find((a) => a.action === 'WORK_REPORT_CREATE');
+    expect(audit).toBeDefined();
+    expect(JSON.stringify(audit?.afterData)).not.toContain('特記事項なし');
   });
 
   it('運搬: 使用車両・運搬回数・運搬費（空欄可）を保存、PATCH で運搬費を後から入れられる、範囲外は 422', async () => {
@@ -411,33 +431,33 @@ describe('CHG-004 batch16: 事務所の一覧絞込・確定後修正（新し�
 
   it('revise: 確定済みを新しい下書き版にし（旧版は不変・親参照）、修正→確定で版2。理由必須、下書き・FIELD・承認系は不可', async () => {
     const created = await createWork('field-a');
-    const t = recordTransitionHandlers(deps);
-    const draftRevise = await t.POST(req('office', 'POST', `records/WORK/${created.id}/revise`, { expectedVersion: 1, reason: '数量訂正' }, KEY('rv0')));
+    const tr = recordTransitionHandlers(deps);
+    const draftRevise = await tr.POST(req('office', 'POST', `records/WORK/${created.id}/revise`, { expectedVersion: 1, reason: '数量訂正' }, KEY('rv0')));
     expect(draftRevise.status).toBe(409);
     expect((await W().confirm.POST(req('field-a', 'POST', `work-reports/${created.id}/confirm`, { expectedVersion: 1 }, KEY('rv-c1')))).status).toBe(202);
 
-    expect((await t.POST(req('office', 'POST', `records/WORK/${created.id}/revise`, { expectedVersion: 2 }, KEY('rv1')))).status).toBe(422);
-    expect((await t.POST(req('field-a', 'POST', `records/WORK/${created.id}/revise`, { expectedVersion: 2, reason: 'x' }, KEY('rv2')))).status).toBe(403);
-    expect((await t.POST(req('office', 'POST', `records/WORK/${created.id}/approve`, { expectedVersion: 2, reason: 'x' }, KEY('rv3')))).status).toBe(404);
-    expect((await t.POST(req('office', 'POST', `records/WORK/${created.id}/revise`, { expectedVersion: 1, reason: 'x' }, KEY('rv4')))).status).toBe(409);
+    expect((await tr.POST(req('office', 'POST', `records/WORK/${created.id}/revise`, { expectedVersion: 2 }, KEY('rv1')))).status).toBe(422);
+    expect((await tr.POST(req('field-a', 'POST', `records/WORK/${created.id}/revise`, { expectedVersion: 2, reason: 'x' }, KEY('rv2')))).status).toBe(403);
+    expect((await tr.POST(req('office', 'POST', `records/WORK/${created.id}/approve`, { expectedVersion: 2, reason: 'x' }, KEY('rv3')))).status).toBe(404);
+    expect((await tr.POST(req('office', 'POST', `records/WORK/${created.id}/revise`, { expectedVersion: 1, reason: 'x' }, KEY('rv4')))).status).toBe(409);
 
-    const ok = await t.POST(req('office', 'POST', `records/WORK/${created.id}/revise`, { expectedVersion: 2, reason: '数量訂正' }, KEY('rv5')));
+    const ok = await tr.POST(req('office', 'POST', `records/WORK/${created.id}/revise`, { expectedVersion: 2, reason: '数量訂正' }, KEY('rv5')));
     expect(ok.status).toBe(200);
     const rec = (await json(ok)).data as Record<string, unknown>;
     expect(rec).toMatchObject({ status: 'DRAFT', version: 3, revisionNo: 2 });
     // 同じ key は再生（副作用1回）
-    const replay = await t.POST(req('office', 'POST', `records/WORK/${created.id}/revise`, { expectedVersion: 2, reason: '数量訂正' }, KEY('rv5')));
+    const replay = await tr.POST(req('office', 'POST', `records/WORK/${created.id}/revise`, { expectedVersion: 2, reason: '数量訂正' }, KEY('rv5')));
     expect(replay.headers.get('idempotent-replayed')).toBe('true');
-    const revs = await db.pool.query<{ revision_no: number; parent_revision_id: string | null; confirmed_at: Date | null; quantity: number }>(
-      'SELECT revision_no, parent_revision_id, confirmed_at, quantity FROM app.work_report_revisions WHERE report_id = $1 ORDER BY revision_no',
-      [created.id],
-    );
-    expect(revs.rows).toHaveLength(2);
-    expect(revs.rows[0]?.confirmed_at).not.toBeNull();
-    expect(revs.rows[1]?.confirmed_at).toBeNull();
-    expect(revs.rows[1]?.quantity).toBe(1600);
-    const audit = await one<{ reason: string }>(`SELECT reason FROM app.audit_events WHERE target_id = $1 AND action = 'WORK_REPORT_REVISE'`, [created.id]);
-    expect(audit.reason).toBe('数量訂正');
+    const revs = (await t.store.query<WorkRevisionDoc>(`${C.workReports}/${created.id}/revisions`)).sort((a, b) => a.data.revisionNo - b.data.revisionNo);
+    expect(revs).toHaveLength(2);
+    expect(revs[0]?.data.confirmedAt).not.toBeNull();
+    expect(revs[1]?.data.confirmedAt).toBeNull();
+    expect(revs[1]?.data.parentRevisionId).toBe(revs[0]?.id);
+    expect(revs[1]?.data.quantity).toBe(1600);
+    const audit = (await auditEventsFor(t.store, 'WORK_REPORT', created.id)).find((a) => a.action === 'WORK_REPORT_REVISE');
+    expect(audit?.reason).toBe('数量訂正');
+    // 修正中（版2が下書き）も、月次集計は版1（確定済み）のまま
+    expect((await t.store.get<ReportHeaderDoc>(`${C.workReports}/${created.id}`))?.current).toMatchObject({ revisionNo: 1, quantity: 1600 });
 
     // 事務所が修正して確定 → 版2が確定（版1は不変）、outbox が1件増える
     const detail = (await json(await W().item.GET(req('office', 'GET', `work-reports/${created.id}`)))).data as Record<string, unknown>;
@@ -447,9 +467,10 @@ describe('CHG-004 batch16: 事務所の一覧絞込・確定後修正（新し�
     expect((await W().confirm.POST(req('office', 'POST', `work-reports/${created.id}/confirm`, { expectedVersion: 4 }, KEY('rv-c2')))).status).toBe(202);
     const after = (await json(await W().item.GET(req('office', 'GET', `work-reports/${created.id}`)))).data as Record<string, unknown>;
     expect(after).toMatchObject({ status: 'CONFIRMED', revisionNo: 2, quantity: 1500 });
-    expect((await one<{ quantity: number }>('SELECT quantity FROM app.work_report_revisions WHERE report_id = $1 AND revision_no = 1', [created.id])).quantity).toBe(1600);
-    const events = await one<{ n: string }>(`SELECT count(*) n FROM app.outbox_events WHERE aggregate_id = $1 AND event_type = 'WorkReportConfirmed'`, [created.id]);
-    expect(Number(events.n)).toBe(2);
+    const revs2 = (await t.store.query<WorkRevisionDoc>(`${C.workReports}/${created.id}/revisions`)).sort((a, b) => a.data.revisionNo - b.data.revisionNo);
+    expect(revs2[0]?.data.quantity).toBe(1600);
+    expect(await outboxCount('WorkReportConfirmed', created.id)).toBe(2);
+    expect((await t.store.get<ReportHeaderDoc>(`${C.workReports}/${created.id}`))?.current).toMatchObject({ revisionNo: 2, quantity: 1500 });
   });
 
   it('運搬 revise は明細・運搬回数・使用車両を複製する', async () => {
@@ -479,11 +500,10 @@ describe('CHG-004 batch16: 事務所の一覧絞込・確定後修正（新し�
     expect((await fee.POST(req('office', 'POST', `delivery-reports/${id}/fee`, { expectedVersion: 3, deliveryFeeYen: null, reason: '金額確認中' }))).status).toBe(200);
     const detail = (await json(await D().item.GET(req('office', 'GET', `delivery-reports/${id}`)))).data as Record<string, unknown>;
     expect(detail).toMatchObject({ deliveryFeeYen: null, version: 4, revisionNo: 1, status: 'CONFIRMED' });
-    const audits = await db.pool.query<{ after_data: { deliveryFeeYen: number | null }; reason: string | null }>(
-      `SELECT after_data, reason FROM app.audit_events WHERE target_id = $1 AND action = 'DELIVERY_FEE_UPDATE' ORDER BY (before_data->>'version')::int`,
-      [id],
-    );
-    expect(audits.rows.map((a) => a.after_data.deliveryFeeYen)).toEqual([625, null]);
-    expect(audits.rows[1]?.reason).toBe('金額確認中');
+    const audits = (await auditEventsFor(t.store, 'DELIVERY_REPORT', id))
+      .filter((a) => a.action === 'DELIVERY_FEE_UPDATE')
+      .sort((a, b) => (a.beforeData as { version: number }).version - (b.beforeData as { version: number }).version);
+    expect(audits.map((a) => (a.afterData as { deliveryFeeYen: number | null }).deliveryFeeYen)).toEqual([625, null]);
+    expect(audits[1]?.reason).toBe('金額確認中');
   });
 });

@@ -45,6 +45,11 @@ export interface DocReader {
   query<T = Doc>(collection: string, spec?: QuerySpec): Promise<Array<Snapshot<T>>>;
 }
 
+/** 件数（Firestore の count 集計。limit は無視し、検索と同じ索引を使う） */
+export interface DocCounter {
+  count(collection: string, spec?: QuerySpec): Promise<number>;
+}
+
 /**
  * transaction（Firestore と同じ規則: すべての読込は最初の書込より前。違反は例外）。
  * 書込は commit 時にまとめて反映し、途中で例外なら何も反映しない。
@@ -58,7 +63,7 @@ export interface DocTransaction extends DocReader {
   delete(path: string): void;
 }
 
-export interface DocStore extends DocReader {
+export interface DocStore extends DocReader, DocCounter {
   runTransaction<T>(work: (tx: DocTransaction) => Promise<T>): Promise<T>;
   close(): Promise<void>;
 }

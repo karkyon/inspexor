@@ -3,7 +3,7 @@
  * 入口ガード（認証→認可）は createApiHandler。query は既知のものだけ受け付ける（未知は 400）。
  */
 import { isMonth } from '@inspexor/domain';
-import type { Pool } from 'pg';
+import type { DocStore } from '@inspexor/docstore';
 import { createApiHandler, type ApiContext, type ApiHandlerDeps } from '../http/api-handler';
 import { dataResponse, errorResponse } from '../http/api-response';
 import { EXPORT_SHEETS, MonthlyService, type ExportSheet, type MonthlyQuery } from './monthly-service';
@@ -11,7 +11,7 @@ import { EXPORT_SHEETS, MonthlyService, type ExportSheet, type MonthlyQuery } fr
 const UUID_RE = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 
 export interface MonthlyRouteDeps {
-  readonly pool: () => Pool;
+  readonly store: () => DocStore;
   readonly api: () => ApiHandlerDeps;
 }
 
@@ -55,7 +55,7 @@ export function monthlyHandlers(deps: MonthlyRouteDeps) {
       (ctx) =>
         guard(ctx, async () => {
           const { q } = parse(ctx.request, []);
-          return dataResponse(200, await new MonthlyService(deps.pool()).summary(q), ctx.correlationId);
+          return dataResponse(200, await new MonthlyService(deps.store()).summary(q), ctx.correlationId);
         }),
       deps.api,
     ),
@@ -73,7 +73,7 @@ export function monthlyExportHandlers(deps: MonthlyRouteDeps) {
           if (format !== 'xlsx' && format !== 'csv') throw new QueryError('/query/format', 'format は xlsx / csv のいずれかです。');
           const sheet = params.get('sheet') ?? 'detail';
           if (!(EXPORT_SHEETS as readonly string[]).includes(sheet)) throw new QueryError('/query/sheet', `sheet は ${EXPORT_SHEETS.join(' / ')} のいずれかです。`);
-          const file = await new MonthlyService(deps.pool()).export(q, format, sheet as ExportSheet);
+          const file = await new MonthlyService(deps.store()).export(q, format, sheet as ExportSheet);
           const ascii = file.fileName.replace(/[^\x20-\x7e]/g, '_');
           return new Response(new Uint8Array(file.body), {
             status: 200,

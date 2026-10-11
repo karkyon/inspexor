@@ -1,24 +1,27 @@
 /**
- * CHG-004 D4 統合試験: 月次集計（API-027）と Excel/CSV 出力（API-028）。fresh DB（schema.sql＋migration）。
+ * CHG-004 D4 統合試験: 月次集計（API-027）と Excel/CSV 出力（API-028）。CHG-006: Firestore（エミュレータ、無ければ MemoryDocStore）。
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { jstToInstant, type RoleCode } from '@inspexor/domain';
-import { createFreshDatabase, insertUser, type FreshDatabase } from '../testing/fresh-db';
-import '../db/pg';
-import { PgAuditRepository } from '../db/pg-audit-repository';
+import { createUser, StoreAuditRepository } from '@inspexor/docstore';
+import { createTestStore, type TestStore } from '@inspexor/docstore/testing';
+import { MasterService } from '../masters/master-service';
+import { MASTER_DEFS, type MasterType } from '../masters/definitions';
+import { writeSchema } from '../masters/schemas';
 import { issueSessionToken } from '../auth/session-token';
 import { SESSION_COOKIE_NAME } from '../auth/session-cookie';
 import { FieldReportService } from '../field/field-report-service';
 import { monthlyExportHandlers, monthlyHandlers, type MonthlyRouteDeps } from './monthly-handlers';
 
 const SECRET = 'm'.repeat(32);
-let db: FreshDatabase;
+let t: TestStore;
 let deps: MonthlyRouteDeps;
 const users: Record<string, string> = {};
 const m: Record<string, string> = {};
 
-async function one<T = { id: string }>(sql: string, params: unknown[] = []): Promise<T> {
-  return (await db.pool.query(sql, params)).rows[0] as T;
+async function master(type: MasterType, input: Record<string, unknown>): Promise<string> {
+  const parsed = writeSchema(MASTER_DEFS[type]).parse(input) as Record<string, unknown>;
+  return (await new MasterService(t.store).create(type, parsed, { actorId: 'itest', correlationId: '11111111-1111-4111-8111-111111111111', now: new Date('2026-08-01T00:00:00Z') })).id;
 }
 
 function req(who: 'field' | 'office' | 'auditor', path: string): Request {
@@ -30,21 +33,20 @@ function req(who: 'field' | 'office' | 'auditor', path: string): Request {
 const ctx = (who: string, roles: string[]) => ({ actor: { userId: users[who] as string, roles }, correlationId: '00000000-0000-4000-8000-0000000000aa', now: new Date('2026-10-08T03:00:00Z') });
 
 beforeAll(async () => {
-  db = await createFreshDatabase('monthly');
+  t = createTestStore('monthly');
   for (const [k, role] of [['field', 'FIELD'], ['office', 'OFFICE'], ['auditor', 'AUDITOR']] as const) {
-    users[k] = await insertUser(db.pool, `mon-${k}`);
-    await db.pool.query('INSERT INTO app.user_roles VALUES ($1, $2)', [users[k], role]);
+    users[k] = (await createUser(t.store, { loginId: `mon-${k}`, passwordHash: 'x', displayName: k, roles: [role] }, new Date('2026-08-01T00:00:00Z'))) as string;
   }
-  m['c'] = (await one(`INSERT INTO app.customers(code,name,closing_day) VALUES ('C1','丸五（合成）',31) RETURNING id`)).id;
-  m['c2'] = (await one(`INSERT INTO app.customers(code,name,closing_day) VALUES ('C2','他社',31) RETURNING id`)).id;
-  m['pA'] = (await one(`INSERT INTO app.products(customer_id,code,name,settlement_type) VALUES ($1,'295C5','品A','QUANTITY') RETURNING id`, [m['c']])).id;
-  m['pB'] = (await one(`INSERT INTO app.products(customer_id,code,name,settlement_type) VALUES ($1,'MR529673','品B','TIME') RETURNING id`, [m['c']])).id;
-  m['tA'] = (await one(`INSERT INTO app.work_types(product_id,code,name) VALUES ($1,'INSP','目視検査') RETURNING id`, [m['pA']])).id;
-  m['tB'] = (await one(`INSERT INTO app.work_types(product_id,code,name) VALUES ($1,'BARI','バリ取り') RETURNING id`, [m['pB']])).id;
-  m['dA'] = (await one(`INSERT INTO app.defect_types(product_id,code,name) VALUES ($1,'D1','バリ') RETURNING id`, [m['pA']])).id;
-  m['w1'] = (await one(`INSERT INTO app.workers(code,name) VALUES ('W1','作業者1') RETURNING id`)).id;
-  m['w2'] = (await one(`INSERT INTO app.workers(code,name) VALUES ('W2','作業者2') RETURNING id`)).id;
-  const svc = new FieldReportService(db.pool);
+  m['c'] = await master('customers', { code: 'C1', name: '丸五（合成）', closingDay: 31 });
+  m['c2'] = await master('customers', { code: 'C2', name: '他社', closingDay: 31 });
+  m['pA'] = await master('products', { customerId: m['c'], code: '295C5', name: '品A', settlementType: 'QUANTITY' });
+  m['pB'] = await master('products', { customerId: m['c'], code: 'MR529673', name: '品B', settlementType: 'TIME' });
+  m['tA'] = await master('work-types', { productId: m['pA'], code: 'INSP', name: '目視検査' });
+  m['tB'] = await master('work-types', { productId: m['pB'], code: 'BARI', name: 'バリ取り' });
+  m['dA'] = await master('defects', { productId: m['pA'], code: 'D1', name: 'バリ', sortOrder: 0 });
+  m['w1'] = await master('workers', { code: 'W1', name: '作業者1' });
+  m['w2'] = await master('workers', { code: 'W2', name: '作業者2' });
+  const svc = new FieldReportService(t.store);
   const f = ctx('field', ['FIELD']);
   const work = async (date: string, productId: string, workTypeId: string, start: string, end: string, qty: number, defects: Array<{ defectTypeId: string; quantity: number }>, workers: string[]) => {
     const r = await svc.createWork(
@@ -75,11 +77,11 @@ beforeAll(async () => {
   await svc.confirm('DELIVERY', dl2.id, 1, f);
   // 修正中（版2が下書き）の報告は前の確定版で数える
   await svc.revise('WORK', m['wr1'] as string, { expectedVersion: 2, reason: '確認' }, ctx('office', ['OFFICE']));
-  deps = { pool: () => db.pool, api: () => ({ sessionSecret: SECRET, now: () => new Date('2026-10-08T03:00:00Z'), auditRepository: new PgAuditRepository(db.pool), logError: () => undefined }) };
+  deps = { store: () => t.store, api: () => ({ sessionSecret: SECRET, now: () => new Date('2026-10-08T03:00:00Z'), auditRepository: new StoreAuditRepository(t.store), logError: () => undefined }) };
 }, 120_000);
 
 afterAll(async () => {
-  await db?.drop();
+  await t?.close();
 });
 
 type Summary = { totals: Record<string, number>; daily: Array<Record<string, unknown>>; byProduct: Array<Record<string, unknown>>; byWorkType: Array<Record<string, unknown>>; rows: Array<Record<string, unknown>>; names: { products: Record<string, { code: string }> } };

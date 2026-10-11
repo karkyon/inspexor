@@ -85,6 +85,16 @@ export function docStoreContract(name: string, make: () => { store: DocStore; ki
       expect(ids(await store.query('q', { where: [{ field: 'n', op: '>', value: '0' }] }))).toEqual([]);
     });
 
+    it('count: 検索と同じ条件の件数（limit は無視）', async () => {
+      const { store } = make();
+      await store.runTransaction(async (tx) => {
+        for (let i = 1; i <= 5; i += 1) tx.create(`cnt/${i}`, { d: `2026-10-0${i}`, k: i % 2 === 0 ? 'even' : 'odd' });
+      });
+      expect(await store.count('cnt')).toBe(5);
+      expect(await store.count('cnt', { where: [{ field: 'k', op: '==', value: 'odd' }] })).toBe(3);
+      expect(await store.count('cnt', { where: [{ field: 'd', op: '>=', value: '2026-10-03' }], orderBy: [{ field: 'd', dir: 'desc' }], limit: 1 })).toBe(3);
+    });
+
     it('一意キー・採番', async () => {
       const { store } = make();
       await store.runTransaction(async (tx) => {

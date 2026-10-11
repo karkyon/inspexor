@@ -1,15 +1,15 @@
-import { getPool } from '../db/pg';
-import { PgAuditRepository } from '../db/pg-audit-repository';
+import { DocIdempotencyRepository, StoreAuditRepository } from '@inspexor/docstore';
+import { getDocStore } from '../db/docstore';
 import { getSessionSecret } from '../auth/session-secret';
 import { FieldReportService } from './field-report-service';
 import type { FieldRouteDeps } from './field-handlers';
 
 export const fieldRouteDeps: FieldRouteDeps = {
-  service: () => new FieldReportService(getPool()),
-  pool: () => getPool(),
+  service: () => new FieldReportService(getDocStore()),
+  idempotency: () => new DocIdempotencyRepository(getDocStore()),
   api: () => ({
     sessionSecret: getSessionSecret(),
     now: () => new Date(),
-    auditRepository: new PgAuditRepository(getPool()),
+    auditRepository: new StoreAuditRepository(getDocStore()),
   }),
 };

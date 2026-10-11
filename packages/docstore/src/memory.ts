@@ -65,6 +65,11 @@ export class MemoryDocStore implements DocStore {
     return runQuery<Doc>(candidates, filters, orders, spec.limit).map((d) => ({ id: d.id, path: `${prefix}${d.id}`, data: cloneDoc<T>(d.data) }));
   }
 
+  async count(collection: string, spec: QuerySpec = {}): Promise<number> {
+    const { limit: _ignored, ...rest } = spec;
+    return (await this.query(collection, rest)).length;
+  }
+
   async runTransaction<T>(work: (tx: DocTransaction) => Promise<T>): Promise<T> {
     const run = this.chain.then(() => this.execute(work));
     this.chain = run.catch(() => undefined);
