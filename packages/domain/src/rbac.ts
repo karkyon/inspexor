@@ -81,6 +81,11 @@ export const OPERATION_POLICIES = {
   exportMonthlySummary: { apiId: 'API-028', method: 'GET', path: '/reports/monthly/export', access: roles(['OFFICE', 'ADMIN', 'AUDITOR']), idempotent: false },
   // CHG-007: 管理ダッシュボード（SCR-10、FR-017）。APPROVAL_ENABLED のときだけ提供
   getDashboard: { apiId: 'API-029', method: 'GET', path: '/dashboard', access: roles(['OFFICE', 'ADMIN', 'AUDITOR']), idempotent: false },
+  // CHG-008: 利用者管理（業務要件 §2 RBAC「master/user: ADMIN=CRUD、OFFICE/AUDITOR=R」）
+  listUsers: { apiId: 'API-030', method: 'GET', path: '/users', access: roles(['OFFICE', 'ADMIN', 'AUDITOR']), idempotent: false },
+  createUser: { apiId: 'API-031', method: 'POST', path: '/users', access: roles(['ADMIN']), idempotent: false },
+  updateUser: { apiId: 'API-032', method: 'PATCH', path: '/users/{id}', access: roles(['ADMIN']), idempotent: false },
+  userAction: { apiId: 'API-033', method: 'POST', path: '/users/{id}/{action}', access: roles(['ADMIN']), idempotent: false },
 } as const satisfies Record<string, OperationPolicy>;
 
 export type OperationId = keyof typeof OPERATION_POLICIES;

@@ -59,6 +59,7 @@ const NAV: readonly NavItem[] = [
   { prefix: '/admin/records', href: '/admin/records', code: 'SCR-11', label: '報告一覧' },
   { prefix: '/admin/monthly', href: '/admin/monthly', code: '集計', label: '月次集計' },
   { prefix: '/admin/masters', href: '/admin/masters/products', code: 'SCR-13', label: 'マスター管理' },
+  { prefix: '/admin/users', href: '/admin/users', code: 'USER', label: '利用者管理' },
 ];
 
 function visibleNav(user: AdminUser | null): NavItem[] {

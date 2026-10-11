@@ -10,6 +10,8 @@ export interface MeHandlerDeps {
   readonly now: () => Date;
   /** CHG-007: 機能の有効化設定の参照元（試験用。既定は process.env） */
   readonly env?: Readonly<Record<string, string | undefined>>;
+  /** CHG-008: セッションの利用者が今も有効か */
+  readonly userGuard?: (session: import('./session-token').SessionPayload) => Promise<boolean>;
 }
 
 export async function handleMeRequest(request: Request, deps: MeHandlerDeps): Promise<Response> {
@@ -29,6 +31,10 @@ export async function handleMeRequest(request: Request, deps: MeHandlerDeps): Pr
   const now = deps.now();
   const issuedAt = new Date(payload.issuedAt);
   if (!checkSessionValidity({ issuedAt, lastActivityAt: new Date(payload.lastActivityAt) }, now).valid) {
+    return unauthenticated();
+  }
+
+  if (deps.userGuard !== undefined && !(await deps.userGuard(payload))) {
     return unauthenticated();
   }
 

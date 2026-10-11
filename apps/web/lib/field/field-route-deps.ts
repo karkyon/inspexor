@@ -3,6 +3,7 @@ import { getDocStore } from '../db/docstore';
 import { getSessionSecret } from '../auth/session-secret';
 import { FieldReportService } from './field-report-service';
 import type { FieldRouteDeps } from './field-handlers';
+import { appUserGuard } from '../auth/app-user-guard';
 
 export const fieldRouteDeps: FieldRouteDeps = {
   service: () => new FieldReportService(getDocStore()),
@@ -10,6 +11,6 @@ export const fieldRouteDeps: FieldRouteDeps = {
   api: () => ({
     sessionSecret: getSessionSecret(),
     now: () => new Date(),
-    auditRepository: new StoreAuditRepository(getDocStore()),
+    auditRepository: new StoreAuditRepository(getDocStore()), userGuard: appUserGuard,
   }),
 };

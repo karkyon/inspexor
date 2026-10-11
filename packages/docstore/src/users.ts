@@ -18,6 +18,11 @@ export interface UserDoc {
   readonly version: number;
   readonly createdAt: Date;
   readonly updatedAt: Date;
+  /**
+   * CHG-008: 無効化・ロール変更・パスワード再設定の日時。これより前に発行されたセッションは使えない（再ログインが必要）。
+   * 旧データには無い（null と同じ）
+   */
+  readonly authChangedAt?: Date | null;
 }
 
 export class DocUserRepository implements UserRepository {

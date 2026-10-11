@@ -55,6 +55,8 @@ export interface ApiHandlerDeps {
   readonly now: () => Date;
   readonly auditRepository: AuditRepository;
   readonly logError?: (message: string, detail: unknown) => void;
+  /** CHG-008: セッションの利用者が今も有効か（無効化・ロール変更・パスワード再設定後は false）。未指定なら確認しない（試験） */
+  readonly userGuard?: (session: SessionPayload) => Promise<boolean>;
 }
 
 export type ApiHandler = (ctx: ApiContext) => Promise<Response>;
@@ -98,6 +100,11 @@ export function createApiHandler(
           now,
         ).valid;
       if (!valid || payload === null) {
+        return errorResponse(401, 'AUTH_REQUIRED', '認証が必要です。', correlationId, {
+          setCookie: clearSessionCookieHeader(),
+        });
+      }
+      if (deps.userGuard !== undefined && !(await deps.userGuard(payload))) {
         return errorResponse(401, 'AUTH_REQUIRED', '認証が必要です。', correlationId, {
           setCookie: clearSessionCookieHeader(),
         });
