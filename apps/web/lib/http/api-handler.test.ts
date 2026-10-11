@@ -129,8 +129,9 @@ describe('G1: 認可負試験（T-SEC-001〜004）', () => {
     ['createMaster', ['FIELD']],
     ['createMaster', ['OFFICE']],
     ['createMaster', ['AUDITOR']],
-    ['transitionRecord', ['FIELD']],
-    ['transitionRecord', ['AUDITOR']],
+    // CHG-007: transitionRecord は owner 型（差戻しされた自分の報告の revise）になったため、入口では拒否しない（handler/service で判定）
+    ['getDashboard', ['FIELD']],
+    ['setDeliveryFee', ['AUDITOR']],
     ['createBillingRun', ['AUDITOR']],
     ['getInvoice', ['FIELD']],
     ['createWorkReport', ['ADMIN']],

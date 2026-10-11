@@ -76,6 +76,20 @@ export interface ReportHeaderDoc {
   readonly documentStatus: string | null;
   // ---- 月次集計用
   readonly current: WorkCurrent | DeliveryCurrent | null;
+  // ---- CHG-007 承認（APPROVAL_ENABLED）。旧データには無い
+  /** 帳票作成で SUBMITTED になった日時（承認待ちの経過時間） */
+  readonly submittedAt?: Date | null;
+  /** 直近の承認・差戻し・取消（修正で新しい版を作っても残す。次の判断で上書き。履歴は監査） */
+  readonly decision?: RecordDecision | null;
+}
+
+export interface RecordDecision {
+  readonly action: 'approve' | 'reject' | 'revoke';
+  readonly reason: string | null;
+  readonly at: Date;
+  readonly actorId: string;
+  /** 判断した時点の版 */
+  readonly revisionNo: number;
 }
 
 export interface WorkRevisionDoc {

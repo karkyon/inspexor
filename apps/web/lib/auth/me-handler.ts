@@ -1,4 +1,4 @@
-import { checkSessionValidity, sessionCookieAttributes, sessionExpiresAt } from '@inspexor/domain';
+import { checkSessionValidity, featureFlags, sessionCookieAttributes, sessionExpiresAt } from '@inspexor/domain';
 import { resolveCorrelationId } from '../http/correlation-id';
 import { issueCsrfToken } from '../security/csrf';
 import { errorResponse, dataResponse } from '../http/api-response';
@@ -8,6 +8,8 @@ import { readSessionCookie, sessionCookieHeader, clearSessionCookieHeader } from
 export interface MeHandlerDeps {
   readonly sessionSecret: string;
   readonly now: () => Date;
+  /** CHG-007: 機能の有効化設定の参照元（試験用。既定は process.env） */
+  readonly env?: Readonly<Record<string, string | undefined>>;
 }
 
 export async function handleMeRequest(request: Request, deps: MeHandlerDeps): Promise<Response> {
@@ -41,6 +43,8 @@ export async function handleMeRequest(request: Request, deps: MeHandlerDeps): Pr
       roles: payload.roles,
       expiresAt,
       csrfToken: issueCsrfToken(payload.sessionId, deps.sessionSecret),
+      // CHG-007: 画面の出し分け用（提案書の対象外機能は既定で無効）
+      features: featureFlags(deps.env ?? process.env),
     },
     correlationId,
     sessionCookieHeader(issueSessionToken(refreshed, deps.sessionSecret), sessionCookieAttributes().maxAge),

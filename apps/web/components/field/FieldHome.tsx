@@ -3,12 +3,13 @@
 /**
  * SCR-02 現場ホーム: 登録メニュー、端末下書きの再開、最近の登録（API-012 listRecords。FIELD は自分の分のみ: CHG-002）。
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { toJstParts } from '@inspexor/domain';
 import { apiRequest } from '../../lib/api/client';
-import { loadDraft } from '../../lib/field/draft-store';
+import { loadDraft, saveDraft } from '../../lib/field/draft-store';
+import { deliveryDetailToForm, workDetailToForm } from '../../lib/field/wizard';
 import { canCreateReports, useFieldUser } from './FieldShell';
-import { StateBar } from './FieldParts';
+import { newIdempotencyKey, StateBar } from './FieldParts';
 import { PdfLinks } from './PdfLinks';
 import { useOnline } from './useOnline';
 import { statusLabel } from './WizardCommon';
@@ -17,9 +18,82 @@ interface RecordRow {
   readonly id: string;
   readonly reportNo: string;
   readonly status: string;
+  readonly version: number;
   readonly type: 'WORK' | 'DELIVERY';
   readonly businessDate: string;
   readonly documentStatus: string | null;
+  /** CHG-007: 直近の承認・差戻し・取消 */
+  readonly decision?: { readonly action: string; readonly reason: string | null } | null;
+}
+
+/**
+ * CHG-007: 差戻し・取消された自分の報告を直す（API-013 revise で新しい版の下書きを作り、入力画面に読み込む）。
+ * 確定済みの版と判断の記録は残る。直して確定すると新しい版の帳票が作られ、再び承認待ちになる。
+ */
+function RejectedFix({ r, userId }: { r: RecordRow; userId: string }) {
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState('');
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const draftType = r.type === 'WORK' ? 'work' : 'delivery';
+
+  async function start(e: FormEvent): Promise<void> {
+    e.preventDefault();
+    if (reason.trim() === '') {
+      setMsg('修正内容を入力してください。');
+      return;
+    }
+    const existing = loadDraft(userId, draftType);
+    if (existing !== null && existing.serverId !== r.id) {
+      setMsg(`この端末に作成中の${r.type === 'WORK' ? '作業日報' : '運搬実績'}の下書きがあります。先に確定するか破棄してください。`);
+      return;
+    }
+    setBusy(true);
+    const rv = await apiRequest('POST', `/records/${r.type}/${r.id}/revise`, { expectedVersion: r.version, reason: reason.trim() }, { 'Idempotency-Key': newIdempotencyKey() });
+    if (!rv.ok) {
+      setBusy(false);
+      setMsg(rv.error.code === 'VERSION_CONFLICT' ? '他の利用者が更新しました。画面を再読込してください。' : rv.error.message);
+      return;
+    }
+    const res = await apiRequest<Record<string, unknown>>('GET', `/${r.type === 'WORK' ? 'work-reports' : 'delivery-reports'}/${r.id}`);
+    setBusy(false);
+    if (!res.ok) {
+      setMsg(res.error.message);
+      return;
+    }
+    const form = r.type === 'WORK' ? workDetailToForm(res.data, (iso) => toJstParts(new Date(iso))) : deliveryDetailToForm(res.data);
+    if (!saveDraft(userId, draftType, { step: 1, data: form, serverId: r.id, serverVersion: Number(res.data['version']), reportNo: r.reportNo })) {
+      setMsg('この端末に下書きを保存できません（ブラウザの設定を確認してください）。');
+      return;
+    }
+    window.location.assign(r.type === 'WORK' ? '/field/work-reports/new?step=1' : '/field/deliveries/new?step=1');
+  }
+
+  return (
+    <div className="fx-rejected">
+      <p>
+        <b>{r.status === 'REJECTED' ? '差戻し理由' : '取消理由'}:</b> {r.decision?.reason ?? '—'}
+      </p>
+      {open ? (
+        <form onSubmit={(e) => void start(e)} className="fx-rejected-form">
+          <label htmlFor={`fix-${r.id}`}>修正内容</label>
+          <input id={`fix-${r.id}`} value={reason} maxLength={1000} onChange={(e) => setReason(e.target.value)} placeholder="例: 不良数を訂正" />
+          <button type="submit" className="fx-btn primary" disabled={busy}>
+            入力画面で直す
+          </button>
+        </form>
+      ) : (
+        <button type="button" className="fx-btn" onClick={() => setOpen(true)}>
+          修正する
+        </button>
+      )}
+      {msg !== null ? (
+        <p role="alert" className="fx-error">
+          {msg}
+        </p>
+      ) : null}
+    </div>
+  );
 }
 
 const WEEK = ['日', '月', '火', '水', '木', '金', '土'];
@@ -158,6 +232,7 @@ export function FieldHome() {
                     <PdfLinks type={r.type} id={r.id} />
                   </div>
                 ) : null}
+                {(r.status === 'REJECTED' || r.status === 'REVOKED') && creatable ? <RejectedFix r={r} userId={user.userId} /> : null}
               </li>
             ))}
           </ul>

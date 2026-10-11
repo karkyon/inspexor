@@ -173,7 +173,7 @@ export async function processOneDocumentJob(deps: DocumentDeps): Promise<'none' 
       const file: FileDoc = { storageKey, mimeType: 'application/pdf', sizeBytes: pdf.byteLength, sha256, classification: 'CONFIDENTIAL', createdAt: now };
       tx.create(filePath(fileId), file);
       tx.update(documentPath(job.id), { status: 'GENERATED', fileId, errorCode: null, updatedAt: now });
-      h.apply('GENERATED', submitVersion !== null ? { status: 'SUBMITTED', version: submitVersion, updatedAt: now } : {});
+      h.apply('GENERATED', submitVersion !== null ? { status: 'SUBMITTED', version: submitVersion, updatedAt: now, submittedAt: now } : {});
       appendAudit(tx, {
         action: 'DOCUMENT_GENERATED',
         targetType: 'DOCUMENT_JOB',

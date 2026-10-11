@@ -59,7 +59,9 @@ export const OPERATION_POLICIES = {
   confirmDeliveryReport: { apiId: 'API-011', method: 'POST', path: '/delivery-reports/{id}/confirm', access: roles(['OFFICE'], true), idempotent: true },
   // CHG-002: FIELD を追加（業務要件 §2「自分の履歴 FIELD=R」）。FIELD は repository で owner=本人に限定する
   listRecords: { apiId: 'API-012', method: 'GET', path: '/records', access: roles(['FIELD', 'OFFICE', 'ADMIN', 'AUDITOR']), idempotent: false },
-  transitionRecord: { apiId: 'API-013', method: 'POST', path: '/records/{type}/{id}/{action}', access: roles(['OFFICE', 'ADMIN']), idempotent: true },
+  // CHG-007: owner は差戻し（REJECTED）・取消（REVOKED）された自分の報告の revise のみ可（システム基本設計書 §状態遷移 REJECTED/REVOKED→revise owner）。
+  // owner 判定と操作の制限は handler / service で行う
+  transitionRecord: { apiId: 'API-013', method: 'POST', path: '/records/{type}/{id}/{action}', access: roles(['OFFICE', 'ADMIN'], true), idempotent: true },
   listMasters: { apiId: 'API-014', method: 'GET', path: '/masters/{type}', access: AUTHENTICATED, idempotent: false },
   createMaster: { apiId: 'API-015', method: 'POST', path: '/masters/{type}', access: roles(['ADMIN']), idempotent: false },
   getMaster: { apiId: 'API-016', method: 'GET', path: '/masters/{type}/{id}', access: AUTHENTICATED, idempotent: false },
@@ -77,6 +79,8 @@ export const OPERATION_POLICIES = {
   // CHG-004 D4: 月次集計と Excel/CSV 出力（AUDITOR は download を含む参照可: 業務要件 §2）
   getMonthlySummary: { apiId: 'API-027', method: 'GET', path: '/reports/monthly', access: roles(['OFFICE', 'ADMIN', 'AUDITOR']), idempotent: false },
   exportMonthlySummary: { apiId: 'API-028', method: 'GET', path: '/reports/monthly/export', access: roles(['OFFICE', 'ADMIN', 'AUDITOR']), idempotent: false },
+  // CHG-007: 管理ダッシュボード（SCR-10、FR-017）。APPROVAL_ENABLED のときだけ提供
+  getDashboard: { apiId: 'API-029', method: 'GET', path: '/dashboard', access: roles(['OFFICE', 'ADMIN', 'AUDITOR']), idempotent: false },
 } as const satisfies Record<string, OperationPolicy>;
 
 export type OperationId = keyof typeof OPERATION_POLICIES;

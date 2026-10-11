@@ -4,14 +4,14 @@
  * → FieldReportService（version → state → 業務制約）の順（ADR-0001）。
  * confirm（API-007/011）は Idempotency-Key で 24h 冪等（同key同payload=同応答、異payload=409）。
  */
-import type { OperationId } from '@inspexor/domain';
+import { featureFlags, type OperationId } from '@inspexor/domain';
 import type { ZodTypeAny } from 'zod';
 import { createApiHandler, type ApiContext, type ApiHandlerDeps } from '../http/api-handler';
 import { errorResponse, dataResponse } from '../http/api-response';
 import { zodIssueMessageJa, type ZodIssueLike } from '../http/zod-messages';
 import { beginIdempotentRequest, computeRequestHash } from '../idempotency/idempotency-service';
 import type { IdempotencyRepository } from '@inspexor/application';
-import { FieldError, type FieldContext, type FieldReportService, type FieldReportType } from './field-report-service';
+import { FieldError, type DecisionAction, type FieldContext, type FieldReportService, type FieldReportType } from './field-report-service';
 import { deliveryDraftSchema, deliveryFeeSchema, deliveryUpdateSchema, fieldCommandSchema, workDraftSchema, workUpdateSchema } from './schemas';
 
 const UUID_RE = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
@@ -25,6 +25,8 @@ export interface FieldRouteDeps {
   /** CHG-006: 冪等性の保存先（Firestore） */
   readonly idempotency: () => IdempotencyRepository;
   readonly api: () => ApiHandlerDeps;
+  /** CHG-007: 機能の有効化設定の参照元（試験用。既定は process.env） */
+  readonly env?: () => Readonly<Record<string, string | undefined>>;
 }
 
 class RequestError extends Error {
@@ -236,8 +238,9 @@ export function recordListHandlers(deps: FieldRouteDeps) {
 }
 
 /**
- * API-013 transitionRecord（/records/{type}/{id}/{action}）。CHG-004: 承認（approve/reject/revoke）は対象外のため
- * 未定義の操作（404）とし、revise（確定後の事務所修正 D3、理由必須）だけを扱う。Idempotency-Key で冪等（GAP-011）。
+ * API-013 transitionRecord（/records/{type}/{id}/{action}）。Idempotency-Key で冪等（GAP-011）。
+ *   revise : 確定後の修正（CHG-004 D3、理由必須）。事務所（OFFICE/ADMIN）は確定済みの報告、所有者は差戻し・取消された自分の報告（CHG-007）
+ *   approve / reject / revoke: 承認ワークフロー（CHG-007）。APPROVAL_ENABLED のときだけ。無効時は未定義の操作（404、CHG-004 Blind）
  */
 export function recordTransitionHandlers(deps: FieldRouteDeps) {
   return {
@@ -251,18 +254,25 @@ export function recordTransitionHandlers(deps: FieldRouteDeps) {
       if ((typeRaw !== 'WORK' && typeRaw !== 'DELIVERY') || !UUID_RE.test(id)) {
         throw new RequestError(404, 'VALIDATION_ERROR', '報告が見つかりません。', [{ path: '/id', code: 'not_found', message: '報告が見つかりません。' }]);
       }
-      if (action !== 'revise') {
-        throw new RequestError(404, 'VALIDATION_ERROR', '未定義の操作です。', [{ path: '/action', code: 'enum', message: 'revise のみ利用できます。' }]);
+      const approval = featureFlags(deps.env?.() ?? process.env).approval;
+      const allowed = approval ? ['revise', 'approve', 'reject', 'revoke'] : ['revise'];
+      if (!allowed.includes(action)) {
+        throw new RequestError(404, 'VALIDATION_ERROR', '未定義の操作です。', [{ path: '/action', code: 'enum', message: `${allowed.join(' / ')} のみ利用できます。` }]);
+      }
+      if (ctx.ownerCheckRequired && action !== 'revise') {
+        // 所有者（現場）が使えるのは差戻し・取消された自分の報告の revise だけ
+        return errorResponse(403, 'FORBIDDEN', 'この操作を行う権限がありません。', ctx.correlationId);
       }
       const type = typeRaw as FieldReportType;
       const raw = await readJson(ctx.request);
       const cmd = parseBody(fieldCommandSchema, raw);
       const reason = cmd.reason?.trim() ?? '';
-      if (reason === '') {
-        throw new RequestError(422, 'VALIDATION_ERROR', '修正理由を入力してください。', [{ path: '/reason', code: 'required', message: '確定済みの報告の修正は理由が必須です。' }]);
+      if (reason === '' && action !== 'approve') {
+        const message = action === 'revise' ? '修正理由を入力してください。' : action === 'reject' ? '差戻し理由を入力してください。' : '取消理由を入力してください。';
+        throw new RequestError(422, 'VALIDATION_ERROR', message, [{ path: '/reason', code: 'required', message }]);
       }
       const field = ctxOf(ctx);
-      const route = `POST /records/${type}/${id.toLowerCase()}/revise`;
+      const route = `POST /records/${type}/${id.toLowerCase()}/${action}`;
       const repo = deps.idempotency();
       const begin = await beginIdempotentRequest(repo, { actorId: field.actor.userId, route, key: ctx.idempotencyKey as string }, computeRequestHash('POST', route, raw), ctx.now);
       if (begin.kind === 'REPLAY') {
@@ -272,7 +282,10 @@ export function recordTransitionHandlers(deps: FieldRouteDeps) {
         return errorResponse(409, 'IDEMPOTENCY_CONFLICT', begin.kind === 'IN_PROGRESS' ? '同じ操作を実行中です。' : '同じ Idempotency-Key で異なる内容が送信されました。', ctx.correlationId, { retryable: begin.kind === 'IN_PROGRESS' });
       }
       try {
-        const record = await deps.service().revise(type, id.toLowerCase(), { expectedVersion: cmd.expectedVersion, reason }, field);
+        const record =
+          action === 'revise'
+            ? await deps.service().revise(type, id.toLowerCase(), { expectedVersion: cmd.expectedVersion, reason }, field)
+            : await deps.service().decide(type, id.toLowerCase(), action as DecisionAction, { expectedVersion: cmd.expectedVersion, reason: reason === '' ? null : reason }, field);
         await repo.complete(begin.recordId, 200, { data: record, meta: null });
         return dataResponse(200, record, ctx.correlationId);
       } catch (error) {

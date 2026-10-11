@@ -124,3 +124,11 @@ body:has(.fx-shell){margin:0}
   .fx-actions .fx-btn{flex:1;min-width:0}
   .fx-user span{display:none}
 }
+/* CHG-007: 差戻し・取消された報告の修正 */
+.fx-rejected{grid-column:1/-1;background:#fde7e7;border:1px solid #efb8b8;border-radius:10px;padding:10px 14px}
+.fx-rejected p{margin:0 0 8px}
+.fx-rejected .fx-btn{min-height:44px;padding:8px 14px}
+.fx-rejected-form{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.fx-rejected-form label{font-weight:700}
+.fx-rejected-form input{flex:1 1 220px;min-height:44px;border:1px solid #aebfcb;border-radius:9px;padding:8px 12px;background:#fff}
+.fx-error{color:var(--fx-red);margin:6px 0 0}

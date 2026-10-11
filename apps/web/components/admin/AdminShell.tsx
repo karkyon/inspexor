@@ -9,11 +9,23 @@ import { useRouter, usePathname } from 'next/navigation';
 import { apiRequest, storeCsrfToken } from '../../lib/api/client';
 import { clearAllDrafts } from '../../lib/field/draft-store';
 
+export interface AdminFeatures {
+  readonly approval: boolean;
+  readonly billing: boolean;
+  readonly dailyMail: boolean;
+}
+
 export interface AdminUser {
   readonly userId: string;
   readonly displayName: string;
   readonly roles: readonly string[];
   readonly csrfToken?: string;
+  /** CHG-007: 有効な機能（提案書の対象外機能は既定で無効） */
+  readonly features?: AdminFeatures;
+}
+
+export function hasFeature(user: AdminUser | null, feature: keyof AdminFeatures): boolean {
+  return user?.features?.[feature] === true;
 }
 
 const AdminUserContext = createContext<AdminUser | null>(null);
@@ -31,11 +43,27 @@ export function canEditMasters(user: AdminUser): boolean {
 const ADMIN_AREA_ROLES = ['OFFICE', 'ADMIN', 'AUDITOR'];
 
 /** CHG-004: 提案書 P.6 の事務所 Web 管理画面（報告一覧・月次集計・マスタ管理） */
-const NAV = [
+interface NavItem {
+  readonly prefix: string;
+  readonly href: string;
+  readonly code: string;
+  readonly label: string;
+  /** CHG-007: この機能が有効なときだけ出す */
+  readonly feature?: keyof AdminFeatures;
+  /** このロールのどれかを持つときだけ出す */
+  readonly roles?: readonly string[];
+}
+
+const NAV: readonly NavItem[] = [
+  { prefix: '/admin/dashboard', href: '/admin/dashboard', code: 'SCR-10', label: 'ダッシュボード', feature: 'approval' },
   { prefix: '/admin/records', href: '/admin/records', code: 'SCR-11', label: '報告一覧' },
   { prefix: '/admin/monthly', href: '/admin/monthly', code: '集計', label: '月次集計' },
   { prefix: '/admin/masters', href: '/admin/masters/products', code: 'SCR-13', label: 'マスター管理' },
-] as const;
+];
+
+function visibleNav(user: AdminUser | null): NavItem[] {
+  return NAV.filter((n) => (n.feature === undefined || hasFeature(user, n.feature)) && (n.roles === undefined || (user !== null && user.roles.some((r) => n.roles?.includes(r)))));
+}
 
 export function AdminShell({ children }: { readonly children: ReactNode }) {
   const router = useRouter();
@@ -79,7 +107,7 @@ export function AdminShell({ children }: { readonly children: ReactNode }) {
           </div>
         </div>
         <nav>
-          {NAV.map((n) => {
+          {visibleNav(user).map((n) => {
             const active = pathname.startsWith(n.prefix);
             return (
               <a key={n.prefix} className={`ix-navitem${active ? ' active' : ''}`} href={n.href} aria-current={active ? 'page' : undefined}>

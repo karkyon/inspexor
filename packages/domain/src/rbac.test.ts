@@ -5,11 +5,11 @@ const ALL = Object.keys(OPERATION_POLICIES) as OperationId[];
 const as = (...roles: RoleCode[]) => ({ roles });
 
 describe('rbac: API設計書 §6 認証/権限 準拠', () => {
-  it('28 operation（API-001〜025＋CHG-004 API-026〜028）を網羅し apiId が一意', () => {
-    expect(ALL).toHaveLength(28);
+  it('29 operation（API-001〜025＋CHG-004 API-026〜028＋CHG-007 API-029）を網羅し apiId が一意', () => {
+    expect(ALL).toHaveLength(29);
     const ids = ALL.map((op) => OPERATION_POLICIES[op].apiId);
-    expect(new Set(ids).size).toBe(28);
-    expect([...ids].sort()).toEqual(Array.from({ length: 28 }, (_, i) => `API-${String(i + 1).padStart(3, '0')}`));
+    expect(new Set(ids).size).toBe(29);
+    expect([...ids].sort()).toEqual(Array.from({ length: 29 }, (_, i) => `API-${String(i + 1).padStart(3, '0')}`));
   });
 
   it('CHG-004: setDeliveryFee は OFFICE/ADMIN のみ', () => {
@@ -47,15 +47,19 @@ describe('rbac: API設計書 §6 認証/権限 準拠', () => {
     for (const op of ['listRecords', 'getBillingRun', 'getInvoice'] as const) {
       expect(authorizeOperation(op, as('AUDITOR')).ok).toBe(true);
     }
-    for (const op of ['transitionRecord', 'createBillingRun', 'transitionBillingRun', 'transitionInvoice', 'documentAction', 'createWorkReport', 'createDeliveryReport'] as const) {
+    for (const op of ['createBillingRun', 'transitionBillingRun', 'transitionInvoice', 'documentAction', 'createWorkReport', 'createDeliveryReport'] as const) {
       expect(authorizeOperation(op, as('AUDITOR'))).toEqual({ ok: false, errorCode: 'FORBIDDEN' });
     }
+    // transitionRecord は owner 型（CHG-007）: ロール外は所有者確認が必要（AUDITOR は報告を持たないため対象で拒否される）
+    expect(authorizeOperation('transitionRecord', as('AUDITOR'))).toEqual({ ok: true, ownerCheckRequired: true });
   });
 
   it('FIELDは承認・請求・帳票操作を拒否', () => {
-    for (const op of ['transitionRecord', 'createBillingRun', 'getInvoice', 'documentAction'] as const) {
+    for (const op of ['createBillingRun', 'getInvoice', 'documentAction', 'getDashboard'] as const) {
       expect(authorizeOperation(op, as('FIELD'))).toEqual({ ok: false, errorCode: 'FORBIDDEN' });
     }
+    // 差戻しされた自分の報告の revise だけ（handler/service で owner・操作・状態を確認）
+    expect(authorizeOperation('transitionRecord', as('FIELD'))).toEqual({ ok: true, ownerCheckRequired: true });
   });
 
   it('CHG-002: FIELD は listRecords 可（自分の履歴。owner 絞込みは repository）', () => {

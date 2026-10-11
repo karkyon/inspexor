@@ -8,6 +8,7 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { apiRequest } from '../../lib/api/client';
 import { currentMonthRangeJst, documentStatusLabel, statusLabel, TYPE_LABEL, yenLabel } from '../../lib/records/labels';
+import { hasFeature, useAdminUser } from './AdminShell';
 import { label, useMasterNames } from './useMasterNames';
 
 interface Row {
@@ -48,6 +49,9 @@ export function RecordsScreen() {
   const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const names = useMasterNames(['customers', 'products']);
+  const user = useAdminUser();
+  // CHG-007: 承認が有効なときは承認済・差戻し・取消でも絞り込める
+  const approval = hasFeature(user, 'approval');
   const query = new URLSearchParams(Object.entries(applied).filter(([, v]) => v !== '')).toString();
 
   useEffect(() => {
@@ -139,7 +143,7 @@ export function RecordsScreen() {
           <label htmlFor="q-status">状態</label>
           <select id="q-status" value={form.status} onChange={(e) => setForm((f) => ({ ...f, status: e.target.value }))}>
             <option value="">すべて</option>
-            {['DRAFT', 'CONFIRMED', 'SUBMITTED'].map((s) => (
+            {(approval ? ['DRAFT', 'CONFIRMED', 'SUBMITTED', 'APPROVED', 'REJECTED', 'REVOKED', ...(hasFeature(user, 'billing') ? ['BILLING_LOCKED'] : [])] : ['DRAFT', 'CONFIRMED', 'SUBMITTED']).map((s) => (
               <option key={s} value={s}>
                 {statusLabel(s)}
               </option>

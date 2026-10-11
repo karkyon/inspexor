@@ -18,6 +18,8 @@ import { randomUUID } from 'node:crypto';
 import {
   computeBusinessTime,
   formatReportNo,
+  resolveRecordTransition,
+  type RecordRole,
   reportMonthOf,
   validateDeliveryItems,
   validateWorkQuantities,
@@ -41,6 +43,7 @@ import {
   type DocStore,
   type DocTransaction,
   type Filter,
+  type RecordDecision,
   type ReportHeaderDoc,
   type WorkCurrent,
   type WorkRevisionDoc,
@@ -90,6 +93,24 @@ export interface RecordListItem extends RecordSummary {
   readonly quantity: number;
   readonly tripCount: number | null;
   readonly deliveryFeeYen: number | null;
+  /** CHG-007: 直近の承認・差戻し・取消（無ければ null） */
+  readonly decision: DecisionOut | null;
+}
+
+/** CHG-007: 承認系の判断（API 応答） */
+export interface DecisionOut {
+  readonly action: RecordDecision['action'];
+  readonly reason: string | null;
+  readonly at: string;
+  readonly actorId: string;
+  readonly revisionNo: number;
+}
+
+export type DecisionAction = RecordDecision['action'];
+
+function decisionOut(h: { decision?: RecordDecision | null | undefined }): DecisionOut | null {
+  const d = h.decision ?? null;
+  return d === null ? null : { action: d.action, reason: d.reason, at: d.at.toISOString(), actorId: d.actorId, revisionNo: d.revisionNo };
 }
 
 export interface RecordListQuery {
@@ -105,6 +126,15 @@ export interface RecordListQuery {
 
 /** 確定後修正（D3）を始められる状態。承認（Blind）を使わないため CONFIRMED/SUBMITTED も対象 */
 export const REVISABLE_STATUSES = ['CONFIRMED', 'SUBMITTED', 'REJECTED', 'REVOKED'] as const;
+/** CHG-007: 所有者（現場）が自分で修正を始められる状態（システム基本設計書 §状態遷移 REJECTED/REVOKED→revise owner） */
+export const OWNER_REVISABLE_STATUSES = ['REJECTED', 'REVOKED'] as const;
+
+function canReviseAny(actor: FieldActor): boolean {
+  return actor.roles.includes('OFFICE') || actor.roles.includes('ADMIN');
+}
+
+const DECISION_COMMAND: Record<DecisionAction, 'approve' | 'reject' | 'revoke'> = { approve: 'approve', reject: 'reject', revoke: 'revoke' };
+const DECISION_AUDIT: Record<DecisionAction, string> = { approve: 'APPROVE', reject: 'REJECT', revoke: 'REVOKE' };
 
 /** 期間指定なしの一覧で、アプリ側の絞込が必要なときに読む最大件数（種別ごと）。期間指定ありは期間内を全件読む */
 export const LIST_SCAN_LIMIT = 500;
@@ -408,6 +438,7 @@ function workDetail(header: Header, revisionId: string, rev: WorkRevisionDoc): R
     workLocationId: rev.workLocationId,
     vehicleId: rev.vehicleId,
     remarks: rev.remarks,
+    decision: decisionOut(header),
   };
 }
 
@@ -431,6 +462,7 @@ function deliveryDetail(header: Header, revisionId: string, rev: DeliveryRevisio
     vehicleId: rev.vehicleId,
     tripCount: rev.tripCount,
     deliveryFeeYen: header.deliveryFeeYen,
+    decision: decisionOut(header),
   };
 }
 
@@ -815,6 +847,7 @@ export class FieldReportService {
         quantity: h.quantity,
         tripCount: type === 'DELIVERY' ? h.tripCount : null,
         deliveryFeeYen: type === 'DELIVERY' ? h.deliveryFeeYen : null,
+        decision: decisionOut(h),
       })),
       meta: { page: q.page, pageSize: q.pageSize, total },
     };
@@ -832,6 +865,13 @@ export class FieldReportService {
       if (header === null) throw notFound(type);
       if (header.version !== cmd.expectedVersion) {
         throw new FieldError(409, 'VERSION_CONFLICT', '他の利用者により更新されています。再読込してください。', [], { currentVersion: header.version, changedFields: ['/status'] });
+      }
+      if (!canReviseAny(ctx.actor)) {
+        // CHG-007: 事務所以外は、差戻し・取消された自分の報告だけ修正できる（owner revise）
+        if (header.ownerId !== ctx.actor.userId) throw notFound(type);
+        if (!(OWNER_REVISABLE_STATUSES as readonly string[]).includes(header.status)) {
+          throw new FieldError(403, 'FORBIDDEN', '差戻し・取消された報告だけを修正できます。');
+        }
       }
       const latest = await readLatest<WorkRevisionDoc | DeliveryRevisionDoc>(tx, type, header);
       if (!(REVISABLE_STATUSES as readonly string[]).includes(header.status) || latest.confirmedAt === null) {
@@ -867,6 +907,54 @@ export class FieldReportService {
         ctx.now,
       );
       return { id, reportNo: header.reportNo, status: 'DRAFT', version, documentStatus: null, type, businessDate: header.businessDate, revisionNo };
+    });
+  }
+
+  /**
+   * CHG-007 API-013 transitionRecord `approve` / `reject` / `revoke`（FR-007、REQ-APR-001。APPROVAL_ENABLED のときだけ handler が呼ぶ）。
+   *   approve: SUBMITTED（帳票作成済みの現在版）→ APPROVED。コメント任意
+   *   reject : SUBMITTED → REJECTED。理由 1〜1000字必須。所有者（現場）または事務所が revise で新しい版を作って直す
+   *   revoke : APPROVED（請求確定前）→ REVOKED。理由必須
+   * 状態・権限・理由は domain の RECORD_TRANSITIONS で判定し、version を照合して +1。判断は header.decision と監査に残す。
+   */
+  async decide(type: FieldReportType, id: string, action: DecisionAction, cmd: { expectedVersion: number; reason: string | null }, ctx: FieldContext): Promise<RecordSummary> {
+    return this.store.runTransaction(async (tx) => {
+      const header = await readHeader(tx, type, id);
+      if (header === null) throw notFound(type);
+      if (header.version !== cmd.expectedVersion) {
+        throw new FieldError(409, 'VERSION_CONFLICT', '他の利用者により更新されています。再読込してください。', [], { currentVersion: header.version, changedFields: ['/status'] });
+      }
+      if ((action === 'approve' || action === 'reject') && header.currentRevisionId !== header.latestRevisionId) {
+        throw stateConflict(header, '現在の確定版だけを承認・差戻しできます。');
+      }
+      const roles = ctx.actor.roles.filter((r): r is RecordRole => ['FIELD', 'OFFICE', 'ADMIN', 'AUDITOR'].includes(r));
+      const result = resolveRecordTransition(header.status as Parameters<typeof resolveRecordTransition>[0], DECISION_COMMAND[action], { roles, isOwner: false }, cmd.reason ?? undefined);
+      if (!result.ok) {
+        if (result.errorCode === 'STATE_CONFLICT') {
+          throw stateConflict(header, action === 'revoke' ? '承認済み（請求確定前）の報告だけを取り消せます。' : '提出済み（帳票作成済み）の報告だけを承認・差戻しできます。');
+        }
+        if (result.errorCode === 'FORBIDDEN') throw new FieldError(403, 'FORBIDDEN', 'この操作を行う権限がありません。');
+        throw invalid([{ path: '/reason', code: 'required', message: '理由を入力してください。' }]);
+      }
+      const version = header.version + 1;
+      const decision: RecordDecision = { action, reason: cmd.reason, at: ctx.now, actorId: ctx.actor.userId, revisionNo: header.latestRevisionNo };
+      tx.update(reportPath(type, id), { status: result.to, version, updatedAt: ctx.now, decision });
+      appendAudit(
+        tx,
+        {
+          actorId: ctx.actor.userId,
+          action: `${LABEL[type].target}_${DECISION_AUDIT[action]}`,
+          targetType: LABEL[type].target,
+          targetId: id,
+          beforeData: { status: header.status, version: header.version, revisionNo: header.latestRevisionNo },
+          afterData: { status: result.to, version, revisionNo: header.latestRevisionNo },
+          ...(cmd.reason !== null ? { reason: cmd.reason } : {}),
+          correlationId: ctx.correlationId,
+          occurredAt: ctx.now,
+        },
+        ctx.now,
+      );
+      return { id, reportNo: header.reportNo, status: result.to, version, documentStatus: header.documentStatus, type, businessDate: header.businessDate, revisionNo: header.latestRevisionNo };
     });
   }
 

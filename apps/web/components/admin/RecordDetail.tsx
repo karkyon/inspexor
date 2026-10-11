@@ -16,7 +16,7 @@ import { deliveryDetailToForm, workDetailToForm } from '../../lib/field/wizard';
 import { REVISABLE, documentStatusLabel, statusLabel, TYPE_LABEL, yenLabel } from '../../lib/records/labels';
 import { newIdempotencyKey } from '../field/FieldParts';
 import { fetchPdf, inlineUrl, pdfLabel } from '../field/PdfLinks';
-import { useAdminUser } from './AdminShell';
+import { hasFeature, useAdminUser } from './AdminShell';
 import { label, useMasterNames, type NameMaps } from './useMasterNames';
 
 type ReportType = 'WORK' | 'DELIVERY';
@@ -320,6 +320,92 @@ function EditPanel({ type, d, onChanged }: { type: ReportType; d: Detail; onChan
   );
 }
 
+type Decision = { action: 'approve' | 'reject' | 'revoke'; reason: string | null; at: string; revisionNo: number };
+const DECISION_LABEL: Record<Decision['action'], string> = { approve: '承認', reject: '差戻し', revoke: '承認の取消' };
+
+/** CHG-007: 直近の承認・差戻し・取消 */
+function DecisionNote({ d }: { d: Detail }) {
+  const dec = (d['decision'] as Decision | null | undefined) ?? null;
+  if (dec === null) return null;
+  const at = toJstParts(new Date(dec.at));
+  return (
+    <div className={`ix-decision ${dec.action}`} role={dec.action === 'reject' ? 'status' : undefined}>
+      <b>
+        {DECISION_LABEL[dec.action]}（版{dec.revisionNo}）
+      </b>{' '}
+      <span className="ix-small">
+        {at.date} {at.time}
+      </span>
+      {dec.reason !== null ? <p className="ix-prewrap">{dec.action === 'approve' ? 'コメント' : '理由'}: {dec.reason}</p> : null}
+    </div>
+  );
+}
+
+/**
+ * CHG-007 承認操作（SCR-12、FR-007）。APPROVAL_ENABLED かつ OFFICE/ADMIN のとき。
+ *   提出済（SUBMITTED）: 承認（コメント任意）/ 差戻し（理由必須）。承認済（APPROVED）: 取消（理由必須、請求確定前）
+ */
+function ApprovalPanel({ type, d, onChanged }: { type: ReportType; d: Detail; onChanged: () => void }) {
+  const [text, setText] = useState('');
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  if (d.status !== 'SUBMITTED' && d.status !== 'APPROVED') return null;
+
+  async function act(action: 'approve' | 'reject' | 'revoke'): Promise<void> {
+    if (action !== 'approve' && text.trim() === '') {
+      setMsg(action === 'reject' ? '差戻し理由を入力してください。' : '取消理由を入力してください。');
+      return;
+    }
+    setBusy(true);
+    setMsg(null);
+    const body = { expectedVersion: d.version, ...(text.trim() !== '' ? { reason: text.trim() } : {}) };
+    const res = await apiRequest('POST', `/records/${type}/${d.id}/${action}`, body, { 'Idempotency-Key': newIdempotencyKey() });
+    setBusy(false);
+    if (!res.ok) {
+      setMsg(res.error.code === 'VERSION_CONFLICT' || res.error.code === 'STATE_CONFLICT' ? '他の利用者が更新しました。再読込しました。' : res.error.message);
+      onChanged();
+      return;
+    }
+    setText('');
+    onChanged();
+  }
+
+  return (
+    <section className="ix-panel ix-approval" aria-labelledby="approval-title">
+      <h2 id="approval-title">{d.status === 'SUBMITTED' ? '承認' : '承認の取消'}</h2>
+      <p className="ix-muted ix-small">
+        {d.status === 'SUBMITTED' ? `内容と${pdfLabel(type)}を確認してください。差し戻すと、作成者または事務所が新しい版で修正します。` : '請求確定前の承認済み報告を取り消します。取り消した報告は事務所が修正できます。'}
+      </p>
+      <label htmlFor="approval-text" className="ix-small">
+        <b>{d.status === 'SUBMITTED' ? 'コメント（承認は任意・差戻しは必須）' : '取消理由（必須）'}</b>
+      </label>
+      <textarea id="approval-text" value={text} maxLength={1000} onChange={(e) => setText(e.target.value)} placeholder={d.status === 'SUBMITTED' ? '例: 不良数を確認してください' : '例: 数量の訂正のため'} />
+      <div className="ix-btnrow">
+        {d.status === 'SUBMITTED' ? (
+          <>
+            <button type="button" className="ix-btn approve" disabled={busy} onClick={() => void act('approve')}>
+              ✓ 承認する
+            </button>
+            <button type="button" className="ix-btn danger" disabled={busy} onClick={() => void act('reject')}>
+              ↩ 差し戻す
+            </button>
+          </>
+        ) : (
+          <button type="button" className="ix-btn danger" disabled={busy} onClick={() => void act('revoke')}>
+            承認を取り消す
+          </button>
+        )}
+      </div>
+      {msg !== null ? (
+        <p role="alert" className="ix-error">
+          {msg}
+        </p>
+      ) : null}
+      <p className="ix-muted ix-small">この操作は監査履歴に記録されます。</p>
+    </section>
+  );
+}
+
 export function RecordDetail({ type, id }: { type: ReportType; id: string }) {
   const user = useAdminUser();
   const [d, setD] = useState<Detail | null>(null);
@@ -327,6 +413,7 @@ export function RecordDetail({ type, id }: { type: ReportType; id: string }) {
   const names = useMasterNames(MASTER_TYPES);
   const canAct = user.roles.includes('OFFICE') || user.roles.includes('ADMIN');
   const canEdit = user.roles.includes('OFFICE');
+  const approval = hasFeature(user, 'approval');
 
   const load = useCallback(async () => {
     const res = await apiRequest<Detail>('GET', `/${type === 'WORK' ? 'work-reports' : 'delivery-reports'}/${id}`);
@@ -375,6 +462,8 @@ export function RecordDetail({ type, id }: { type: ReportType; id: string }) {
           {type === 'WORK' ? <WorkFields d={d} names={names} /> : <DeliveryFields d={d} names={names} />}
         </section>
         <div className="ix-sidecol">
+          <DecisionNote d={d} />
+          {approval && canAct ? <ApprovalPanel key={`${d.status}-${d.version}`} type={type} d={d} onChanged={() => void load()} /> : null}
           <PdfPanel type={type} d={d} canAct={canAct} onChanged={() => void load()} />
           {type === 'DELIVERY' && canAct && d.status !== 'DRAFT' && d.status !== 'BILLING_LOCKED' ? <FeePanel key={d.version} d={d} onChanged={() => void load()} /> : null}
           {canEdit ? <EditPanel type={type} d={d} onChanged={() => void load()} /> : null}
