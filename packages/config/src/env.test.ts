@@ -3,7 +3,7 @@ import { loadEnv, resetEnvCacheForTest } from './env';
 
 const BASE_ENV: NodeJS.ProcessEnv = {
   APP_ENV: 'dev',
-  DATABASE_URL: 'postgresql://user:pass@localhost:5432/db',
+  FIRESTORE_PROJECT_ID: 'inspexor-dev',
   AUTH_SECRET: 'x'.repeat(32),
   APP_ORIGIN: 'https://inspexor-web-example.run.app',
   STORAGE_BUCKET: 'inspexor-dev-bucket',

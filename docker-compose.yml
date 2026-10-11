@@ -1,20 +1,6 @@
-# ローカル開発・検証用（00契約 §1 固定技術: Docker Compose）。本番は Cloud SQL / Cloud Run。
-#   docker compose up -d db mailpit
+# ローカル開発・検証用（00契約 §1 固定技術: Docker Compose）。CHG-006: DB は Firestore（試験はエミュレータ: scripts/firestore/start-emulator.sh）。
+#   docker compose up -d mailpit
 services:
-  db:
-    image: postgres:16
-    environment:
-      POSTGRES_PASSWORD: test
-      POSTGRES_DB: inspexor_local
-    ports:
-      - "5434:5432"
-    volumes:
-      - ./docs/spec/schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
   # G4以降のメール送信検証用（EXT-03 Gmail OAuth 未提供時の代替、MVP開発計画 §外部入力）
   mailpit:
     image: axllent/mailpit:v1.20

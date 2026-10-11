@@ -1,7 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
 
 // G0-E2E: 起動中のdevサーバー（http://localhost:3000）に対して実行する。
-// 未起動なら `pnpm dev` を自動起動する（DB接続は cloud-sql-proxy 前提）。
+// 未起動なら `pnpm dev` を自動起動する（CHG-006: 開発用 Firestore。.env.local の FIRESTORE_PROJECT_ID）。
 export default defineConfig({
   testDir: './e2e',
   testMatch: '**/*.e2e.ts',

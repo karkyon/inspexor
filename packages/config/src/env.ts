@@ -8,7 +8,9 @@ import { z } from 'zod';
 
 const envSchema = z.object({
   APP_ENV: z.enum(['local', 'dev', 'stg', 'prod']),
-  DATABASE_URL: z.string().min(1),
+  // CHG-006: Firestore（DATABASE_URL は廃止）
+  FIRESTORE_PROJECT_ID: z.string().min(1),
+  FIRESTORE_DATABASE_ID: z.string().min(1).optional(),
   AUTH_SECRET: z.string().min(32),
   APP_ORIGIN: z.string().url(),
   STORAGE_BUCKET: z.string().min(1),

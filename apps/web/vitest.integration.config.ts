@@ -1,6 +1,6 @@
 import { defineConfig } from 'vitest/config';
 
-// 統合テスト（*.itest.ts）。実PostgreSQLが必要: ITEST_DATABASE_URL を設定して実行する。
+// 統合テスト（*.itest.ts）。CHG-006: FIRESTORE_EMULATOR_HOST があれば Firestore エミュレータ、無ければ MemoryDocStore で実行する。
 export default defineConfig({
   test: {
     include: ['**/*.itest.ts'],

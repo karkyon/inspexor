@@ -115,3 +115,7 @@ PostgreSQL が DB 側で保証していた次の制約は、**アプリの trans
 | 帳票 job・メール job の ID | 冪等 key から決めた UUID（同じ key の job は1件。PostgreSQL の UNIQUE(idempotency_key) の代わり） |
 | 帳票状態（一覧・詳細の documentStatus） | 報告ヘッダの documentId（最新の版の最新の帳票）と documentStatus を worker が更新する。修正（新しい版）で一旦 null に戻る |
 | worker の実行形態 | `WORKER_MODE=http`（本番）: `POST /run` で仕事が無くなるまで処理（上限4分）。`poll`（開発）: 5秒ごと |
+| PostgreSQL 関連の削除（g24） | `packages/db`（Prisma）、web・worker の pg 依存、`cloud-sql-proxy`、docker-compose の db、CI の PostgreSQL を削除。`docs/spec/schema.sql`・`migrations` は v5.1 時点の設計記録として残す（実行には使わない） |
+| 環境変数（g24） | `DATABASE_URL` を廃止し `FIRESTORE_PROJECT_ID`（必須）・`FIRESTORE_DATABASE_ID`（任意）・`STORAGE_BUCKET`（Cloud Storage）に置換 |
+| Next.js（g24） | gRPC・ネイティブ依存の SDK（Firestore・Cloud Storage・argon2）はバンドルしない設定。API route は常に実行時処理（`dynamic = 'force-dynamic'`）で、本番ビルドが通ることを確認 |
+

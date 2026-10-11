@@ -7,9 +7,8 @@ npm-debug.log*
 apps/web/.next/
 apps/web/out/
 
-# Prisma
-packages/db/generated/
-packages/db/prisma/dev.db
+# CHG-006: 旧 PostgreSQL 用の接続ツール（リポジトリには含めない）
+cloud-sql-proxy
 
 # Env / secrets
 .env

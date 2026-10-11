@@ -14,16 +14,12 @@
     "lint": "pnpm -r lint",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
-    "test:integration": "pnpm --filter @inspexor/db test:integration",
     "test:e2e": "playwright test --config tests/e2e/playwright.config.ts",
     "contract:check": "pnpm --filter @inspexor/contracts check",
-    "migration:check": "pnpm --filter @inspexor/db migration:check",
     "ports:audit": "bash scripts/audit-ports.sh",
-    "db:up": "docker compose -p inspexor-dev up -d db",
-    "db:down": "docker compose -p inspexor-dev down",
-    "db:migrate": "pnpm --filter @inspexor/db prisma:migrate",
-    "db:generate": "pnpm --filter @inspexor/db prisma:generate",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "test:integration": "pnpm --filter @inspexor/docstore test:integration && pnpm --filter @inspexor/web test:integration && pnpm --filter @inspexor/worker test:integration",
+    "firestore:emulator": "bash scripts/firestore/start-emulator.sh"
   },
   "devDependencies": {
     "@playwright/test": "^1.48.0",
