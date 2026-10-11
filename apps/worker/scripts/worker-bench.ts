@@ -47,7 +47,8 @@ try {
     keys.push(key);
     await storage.put(key, bytes, 'application/octet-stream');
   });
-  await timed('Storage 読み戻し', 3, (i) => storage.get(keys[i] as string));
+  await timed('Storage 読み戻し（get）', 3, (i) => storage.get(keys[i] as string));
+  await timed('Storage 照合（stat）', 3, (i) => storage.stat(keys[i] as string));
   const html = loadFixtureTemplate('DAILY_REPORT_V2').html;
   await timed('Chromium PDF 化（作業日報 V2）', 3, () => pdf.render(html));
 } finally {

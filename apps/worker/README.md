@@ -4,7 +4,7 @@
 outbox consumer・帳票（PDF）生成・メール送信（G4 / CHG-003）。
 
 - `src/dispatcher.ts` — outbox を SKIP LOCKED で取得し、帳票 job / メール job を登録（開発環境の enqueue。本番の Cloud Tasks は G9）
-- `src/document-jobs.ts` — revision snapshot → template（registry の sha256 照合）→ 未置換 placeholder 検査 → PDF → storage → 読み戻し hash 照合 → GENERATED・CONFIRMED→SUBMITTED
+- `src/document-jobs.ts` — revision snapshot → template（registry の sha256 照合）→ 未置換 placeholder 検査 → PDF → storage → 保存内容の照合（保存先が計算したサイズ・MD5。g25a） → GENERATED・CONFIRMED→SUBMITTED
 - `src/mail-jobs.ts` — 日報メール（宛先 snapshot、Message-ID による二重送信防止、retry 10s/30s/2m/10m/30m・最大5回）
 - `templates/` — fixture A4 HTML（DAILY_REPORT_V1 / DELIVERY_REPORT_V1）。実帳票（EXT-01）導入時も placeholder 名は変えない
 

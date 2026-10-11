@@ -11,6 +11,7 @@ import {
   C,
   documentPath,
   filePath,
+  md5Base64,
   reportPath,
   StorageError,
   type DocStore,
@@ -86,7 +87,7 @@ async function claim(store: DocStore, now: Date): Promise<JobRow | null> {
 
 /**
  * 処理時間の記録（工程ごと）。遅い工程を worker のログで特定できるようにする（CHG-006 g24b）。
- * 出力: [worker] job <id 先頭8桁> <template> <結果> claim=… snapshot=… template=… render=… put=… get=… commit=… total=…（ms）
+ * 出力: [worker] job <id 先頭8桁> <template> <結果> claim=… snapshot=… template=… render=… put=… verify=… commit=… total=…（ms）
  */
 class StepTimer {
   private readonly started = Date.now();
@@ -143,9 +144,14 @@ export async function processOneDocumentJob(deps: DocumentDeps): Promise<'none' 
     const storageKey = `documents/${job.documentType}/${snapshot.reportNo}/${job.id}/${fileName}`;
     await deps.storage.put(storageKey, pdf, 'application/pdf');
     timer.lap('put');
-    const readBack = await deps.storage.get(storageKey);
-    timer.lap('get');
-    if (createHash('sha256').update(readBack.bytes).digest('hex') !== sha256) throw new FinalFailure('HASH_MISMATCH', '保存した PDF の hash が一致しません');
+    // 保存内容の照合（g25a）: 本文を読み戻さず、保存先が計算したサイズと MD5 を照合する。MD5 が無い保存先だけ読み戻して sha256 を照合する
+    const stored = await deps.storage.stat(storageKey);
+    const same =
+      stored.md5Base64 !== null
+        ? stored.sizeBytes === pdf.byteLength && stored.md5Base64 === md5Base64(pdf)
+        : createHash('sha256').update((await deps.storage.get(storageKey)).bytes).digest('hex') === sha256;
+    timer.lap('verify');
+    if (!same) throw new FinalFailure('HASH_MISMATCH', '保存した PDF の hash が一致しません');
 
     const now = deps.now();
     const fileId = randomUUID();

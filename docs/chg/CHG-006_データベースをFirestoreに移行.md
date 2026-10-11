@@ -119,5 +119,6 @@ PostgreSQL が DB 側で保証していた次の制約は、**アプリの trans
 | 環境変数（g24） | `DATABASE_URL` を廃止し `FIRESTORE_PROJECT_ID`（必須）・`FIRESTORE_DATABASE_ID`（任意）・`STORAGE_BUCKET`（Cloud Storage）に置換 |
 | Next.js（g24） | gRPC・ネイティブ依存の SDK（Firestore・Cloud Storage・argon2）はバンドルしない設定。API route は常に実行時処理（`dynamic = 'force-dynamic'`）で、本番ビルドが通ることを確認 |
 
-| 帳票生成の処理時間（g24b） | worker は帳票 job ごとに工程別の所要時間（取得・snapshot・様式・PDF化・保存・読み戻し・確定）を `[worker] job …` としてログに出す（`WORKER_TIMING=0` で抑止）。PDF化が10秒以上のときは内訳（起動・読込・フォント・PDF化）も出す。様式の登録確認は process 内で1回だけ。`apps/worker/scripts/worker-bench.ts` で Firestore・Cloud Storage・Chromium の単体の所要時間を測れる |
+| 帳票生成の処理時間（g24b） | worker は帳票 job ごとに工程別の所要時間（取得・snapshot・様式・PDF化・保存・照合・確定）を `[worker] job …` としてログに出す（`WORKER_TIMING=0` で抑止）。PDF化が10秒以上のときは内訳（起動・読込・フォント・PDF化）も出す。様式の登録確認は process 内で1回だけ。`apps/worker/scripts/worker-bench.ts` で Firestore・Cloud Storage・Chromium の単体の所要時間を測れる |
+| Cloud Storage の読出し（g25a） | g24b の計測で、SDK の `download()` による読み戻しだけが 1.5〜97 秒かかった（保存は 0.2〜1 秒）。読出し（`get`・`stat`）は SDK を使わず、Node 標準の fetch で JSON API を直接呼ぶ（1回 15 秒で打ち切り、最大3回）。保存（`put`）は SDK のまま。worker の保存直後の照合は本文を読み戻さず、Cloud Storage が計算したサイズと MD5（`md5Hash`）を PDF と照合する（不一致は `HASH_MISMATCH`）。MD5 を持たない保存先だけ従来どおり読み戻して sha256 を照合する。保存先の部品は process 内で1つにして認証情報を使い回す。`apps/worker/scripts/storage-bench.ts` で旧方式と新方式を比較できる |
 | Cloud Storage の再試行（g24b） | 1回の要求は30秒で打ち切り、再試行は最大3回・合計60秒（SDK 既定は合計600秒で、障害時に job が長時間止まるため）。超えたら job の再試行（FAILED_RETRYABLE）に任せる |

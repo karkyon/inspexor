@@ -20,6 +20,7 @@ import {
   type MailJobDoc,
   type OutboxDoc,
   type ReportHeaderDoc,
+  type StorageAdapter,
 } from '@inspexor/docstore';
 import { createTestStore, type TestStore } from '@inspexor/docstore/testing';
 import { MasterService } from '../../web/lib/masters/master-service';
@@ -182,6 +183,23 @@ describe('G4: 帳票 job（T-DOC-001 placeholder 残存は先に検査）', () =
     await t.store.runTransaction(async (tx) => {
       for (const x of reg) tx.delete(x.path);
     });
+  });
+});
+
+describe('g25a: 保存内容の照合（保存先が計算したサイズ・MD5）', () => {
+  it('保存先の内容が PDF と違えば FAILED_FINAL（HASH_MISMATCH）、files は作らず実績は CONFIRMED のまま', async () => {
+    const r = await confirmWork();
+    const inner = new LocalFsStorage(storageDir);
+    // 保存時に内容が壊れる保存先（保存先が計算した MD5 が PDF と一致しない）
+    const broken: StorageAdapter = {
+      put: (key, bytes, mime) => inner.put(key, Buffer.concat([bytes, Buffer.from('x')]), mime),
+      get: (key) => inner.get(key),
+      stat: (key) => inner.stat(key),
+    };
+    await runOnce({ ...deps(new FakeRenderer(), new FakeSender()), storage: broken });
+    const job = await jobFor(r.id, 'work');
+    expect(job).toMatchObject({ status: 'FAILED_FINAL', error_code: 'HASH_MISMATCH', file_id: null });
+    expect((await header('work', r.id)).status).toBe('CONFIRMED');
   });
 });
 
