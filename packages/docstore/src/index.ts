@@ -6,3 +6,5 @@ export * from './firestore';
 export * from './repos';
 export * from './users';
 export * from './reports';
+export * from './documents';
+export * from './storage';

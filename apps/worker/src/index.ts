@@ -1,67 +1,109 @@
 /**
- * worker エントリポイント（開発環境: 常駐して outbox / 帳票 / メールを処理。本番は Cloud Tasks → Cloud Run で G9 接続）。
- *   DATABASE_URL        必須
- *   STORAGE_DIR         既定 ~/.inspexor-storage（開発用 LocalFsStorage。web の配信 route と同じ場所）
- *   MAILPIT_URL         既定 http://127.0.0.1:8025（開発用 Mailpit adapter。EXT-03 Gmail は G9）
- *   MAIL_FROM           既定 inspexor-dev@example.invalid
- *   WORKER_POLL_MS      既定 2000
- *   CHROMIUM_PATH       任意（未指定なら Playwright の既定ブラウザ）
- *   DAILY_MAIL_ENABLED  既定 false（CHG-004: 日報メール自動送信は提案書の対象外。true のときだけ送る）
+ * worker エントリポイント（CHG-006: Firestore）。
+ *   WORKER_MODE=poll（既定、開発）: 常駐して WORKER_POLL_MS ごとに outbox / 帳票 / メールを処理
+ *   WORKER_MODE=http（本番 Cloud Run）: POST /run で仕事が無くなるまで処理して応答する。Cloud Scheduler が1分ごとに起動する
+ *                                     （Cloud Run の IAM で認証。使わない時は 0 台）
+ *
+ *   FIRESTORE_PROJECT_ID 必須（FIRESTORE_DATABASE_ID 任意、FIRESTORE_EMULATOR_HOST で試験用エミュレータ）
+ *   STORAGE_BUCKET       本番は Cloud Storage。未設定なら STORAGE_DIR（既定 ~/.inspexor-storage、開発用）
+ *   MAILPIT_URL / MAIL_FROM  日報メール（CHG-004 で既定無効。DAILY_MAIL_ENABLED=true のときだけ。開発用 Mailpit adapter）
+ *   CHROMIUM_PATH        任意（未指定なら Playwright の既定ブラウザ）
+ *   PORT                 http モードの待受（Cloud Run は 8080）
  */
-import { homedir } from 'node:os';
-import { join } from 'node:path';
-import { ChromiumPdfRenderer } from './adapters/chromium-pdf';
-import { LocalFsStorage } from './adapters/local-fs-storage';
+import { createServer } from 'node:http';
+import { FirestoreDocStore, storageFromEnv } from '@inspexor/docstore';
 import { isDailyMailEnabled } from '@inspexor/domain';
+import { ChromiumPdfRenderer } from './adapters/chromium-pdf';
 import { MailpitMailSender } from './adapters/mailpit-mail';
-import { createPool } from './db';
-import { runOnce } from './worker';
+import { drain, runOnce, type WorkerDeps } from './worker';
 
-const databaseUrl = process.env['DATABASE_URL'];
-if (!databaseUrl) {
-  console.error('[worker] DATABASE_URL が未設定です');
+const projectId = process.env['FIRESTORE_PROJECT_ID'];
+if (!projectId) {
+  console.error('[worker] FIRESTORE_PROJECT_ID が未設定です');
   process.exit(1);
 }
-if (process.env['STORAGE_BUCKET']) {
-  // 本番 adapter（Cloud Storage）は未実装（G9: EXTERNAL-BLOCKED）。誤って開発 adapter で本番を動かさない
-  console.error('[worker] STORAGE_BUCKET が設定されています。Cloud Storage adapter は G9 で接続予定のため起動しません');
-  process.exit(1);
-}
-
-const pool = createPool(databaseUrl);
+const databaseId = process.env['FIRESTORE_DATABASE_ID'];
+const store = new FirestoreDocStore({ projectId, ...(databaseId ? { databaseId } : {}) });
 const pdf = new ChromiumPdfRenderer(process.env['CHROMIUM_PATH']);
-const deps = {
-  pool,
+const deps: WorkerDeps = {
+  store,
   pdf,
-  storage: new LocalFsStorage(process.env['STORAGE_DIR'] ?? join(homedir(), '.inspexor-storage')),
+  storage: storageFromEnv(),
   sender: new MailpitMailSender(process.env['MAILPIT_URL'] ?? 'http://127.0.0.1:8025', process.env['MAIL_FROM'] ?? 'inspexor-dev@example.invalid'),
   now: () => new Date(),
   dailyMailEnabled: isDailyMailEnabled(process.env['DAILY_MAIL_ENABLED']),
 };
-const interval = Number(process.env['WORKER_POLL_MS'] ?? '2000');
+const mode = process.env['WORKER_MODE'] ?? 'poll';
 let stopping = false;
 
-async function loop(): Promise<void> {
-  console.log(`[worker] started（poll ${interval}ms）`);
-  while (!stopping) {
-    try {
-      const r = await runOnce(deps);
-      if (r.dispatched + r.documents.length + r.mails.length > 0) {
-        console.log(`[worker] dispatched=${r.dispatched} documents=${r.documents.join(',') || '-'} mails=${r.mails.join(',') || '-'}`);
-      }
-    } catch (error) {
-      // 内部詳細は標準エラーのみ（secret は扱わない）
-      console.error('[worker] loop error', error instanceof Error ? error.message : String(error));
-    }
-    await new Promise((resolve) => setTimeout(resolve, interval));
-  }
+async function shutdown(): Promise<void> {
   await pdf.close();
-  await pool.end();
+  await store.close();
 }
 
-for (const sig of ['SIGINT', 'SIGTERM'] as const) {
-  process.on(sig, () => {
-    stopping = true;
+if (mode === 'http') {
+  // 1回の起動で処理する時間の上限（Cloud Run の timeout より短く）
+  const budgetMs = Number(process.env['WORKER_BUDGET_MS'] ?? '240000');
+  let running: Promise<unknown> | null = null;
+  const server = createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/healthz') {
+      res.writeHead(200, { 'content-type': 'text/plain' }).end('ok');
+      return;
+    }
+    if (req.method !== 'POST' || req.url !== '/run') {
+      res.writeHead(404).end();
+      return;
+    }
+    // 同じ instance での同時実行はしない（Firestore の transaction で二重処理は防げるが、Chromium を1つで使うため）
+    if (running !== null) {
+      res.writeHead(202, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'busy' }));
+      return;
+    }
+    const run = drain(deps, budgetMs);
+    running = run;
+    run
+      .then((r) => {
+        if (r.dispatched + r.documents + r.mails > 0) console.log(`[worker] rounds=${r.rounds} dispatched=${r.dispatched} documents=${r.documents} mails=${r.mails}`);
+        res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(r));
+      })
+      .catch((error: unknown) => {
+        console.error('[worker] run error', error instanceof Error ? error.message : String(error));
+        res.writeHead(500, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error' }));
+      })
+      .finally(() => {
+        running = null;
+      });
   });
+  const port = Number(process.env['PORT'] ?? '8080');
+  server.listen(port, () => console.log(`[worker] http mode（POST /run, port ${port}）`));
+  for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+    process.on(sig, () => {
+      server.close();
+      void shutdown().finally(() => process.exit(0));
+    });
+  }
+} else {
+  const interval = Number(process.env['WORKER_POLL_MS'] ?? '5000');
+  const loop = async (): Promise<void> => {
+    console.log(`[worker] started（poll ${interval}ms）`);
+    while (!stopping) {
+      try {
+        const r = await runOnce(deps);
+        if (r.dispatched + r.documents.length + r.mails.length > 0) {
+          console.log(`[worker] dispatched=${r.dispatched} documents=${r.documents.join(',') || '-'} mails=${r.mails.join(',') || '-'}`);
+        }
+      } catch (error) {
+        // 内部詳細は標準エラーのみ（secret は扱わない）
+        console.error('[worker] loop error', error instanceof Error ? error.message : String(error));
+      }
+      await new Promise((resolve) => setTimeout(resolve, interval));
+    }
+    await shutdown();
+  };
+  for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+    process.on(sig, () => {
+      stopping = true;
+    });
+  }
+  void loop();
 }
-void loop();

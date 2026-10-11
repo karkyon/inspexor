@@ -1,6 +1,6 @@
 import { defineConfig } from 'vitest/config';
 
-// worker 統合試験: 実 PostgreSQL（ITEST_DATABASE_URL）＋ 実 Chromium ＋ Mailpit（MAILPIT_URL）
+// worker 統合試験: Firestore（FIRESTORE_EMULATOR_HOST、無ければ MemoryDocStore）＋ 実 Chromium ＋ Mailpit（MAILPIT_URL）
 export default defineConfig({
   test: {
     include: ['src/**/*.itest.ts'],

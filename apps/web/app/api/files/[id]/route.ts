@@ -1,13 +1,15 @@
 /**
- * 開発用 storage adapter の配信口（API-024 が発行する10分の署名付き URL の宛先。/api/health と同じく契約外の基盤 route）。
- * 本番（STORAGE_BUCKET 設定時）は Cloud Storage の署名 URL を使うため、この route は 404 を返す（G9）。
+ * 帳票ファイルの配信口（API-024 が発行する10分の署名付き URL の宛先。/api/health と同じく契約外の基盤 route）。
+ * CHG-006: 保存先は Cloud Storage（STORAGE_BUCKET）または開発用ローカルディスク。どちらも署名の検証後に web が読み出して返す
+ * （バケットは非公開のまま。利用者に Cloud Storage の URL は渡さない）。
  * `disposition=inline` を付けるとブラウザ内で表示（提案書: 日報PDFのプレビュー）。署名の対象外（表示方法のみ）。
  */
-import { readFile } from 'node:fs/promises';
-import { join, resolve, sep } from 'node:path';
-import { getPool } from '../../../../lib/db/pg';
+import { filePath, storageFromEnv, StorageError, type FileDoc } from '@inspexor/docstore';
+import { getDocStore } from '../../../../lib/db/docstore';
 import { getSessionSecret } from '../../../../lib/auth/session-secret';
-import { storageDir, verifyFileSignature } from '../../../../lib/documents/signed-url';
+import { verifyFileSignature } from '../../../../lib/documents/signed-url';
+
+export const dynamic = 'force-dynamic';
 
 const UUID_RE = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 
@@ -16,28 +18,25 @@ function deny(status: number): Response {
 }
 
 export async function GET(request: Request, { params }: { params: { id: string } }): Promise<Response> {
-  if (process.env['STORAGE_BUCKET']) return deny(404);
   const url = new URL(request.url);
   if (!UUID_RE.test(params.id)) return deny(404);
   if (!verifyFileSignature(params.id, url.searchParams.get('exp'), url.searchParams.get('sig'), new Date(), getSessionSecret())) return deny(403);
-  const r = await getPool().query<{ storage_key: string; mime_type: string; sha256: string }>('SELECT storage_key, mime_type, sha256 FROM app.files WHERE id = $1', [params.id]);
-  const file = r.rows[0];
-  if (file === undefined) return deny(404);
-  const root = resolve(storageDir());
-  const path = resolve(join(root, file.storage_key));
-  if (!path.startsWith(root + sep)) return deny(404);
+  const file = await getDocStore().get<FileDoc>(filePath(params.id));
+  if (file === null) return deny(404);
   let bytes: Buffer;
   try {
-    bytes = await readFile(path);
-  } catch {
-    return deny(404);
+    bytes = (await storageFromEnv().get(file.storageKey)).bytes;
+  } catch (error) {
+    if (error instanceof StorageError && error.code === 'NOT_FOUND') return deny(404);
+    console.error('[files] storage', error instanceof Error ? error.message : String(error));
+    return deny(503);
   }
-  const name = file.storage_key.split('/').pop() ?? 'document.pdf';
+  const name = file.storageKey.split('/').pop() ?? 'document.pdf';
   const disposition = url.searchParams.get('disposition') === 'inline' ? 'inline' : 'attachment';
   return new Response(new Uint8Array(bytes), {
     status: 200,
     headers: {
-      'content-type': file.mime_type,
+      'content-type': file.mimeType,
       'content-disposition': `${disposition}; filename="document.pdf"; filename*=UTF-8''${encodeURIComponent(name)}`,
       'cache-control': 'private, no-store',
       'x-content-type-options': 'nosniff',

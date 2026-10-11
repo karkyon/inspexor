@@ -1,19 +1,34 @@
 /**
- * 帳票 job（FR-005 / REQ-DOC-001 / CHG-003）:
+ * 帳票 job（FR-005 / REQ-DOC-001 / CHG-003）。CHG-006: Firestore 版。
  *   revision snapshot → template（version 固定・registry の sha256 照合）→ placeholder 置換 → 未置換検査
  *   → PDF（Chromium）→ 20MB 検査 → storage → 読み戻し hash 照合 → files / GENERATED（＋CONFIRMED→SUBMITTED）
  *   → 日報は mail job（宛先 snapshot。CHG-004 により dailyMailEnabled=true のときだけ）。失敗は retry（network/5xx 相当）か FAILED_FINAL。record は失敗でも保持。
+ * 報告ヘッダの帳票状態（documentStatus）は、その job が最新の帳票（header.documentId）のときだけ更新する。
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { decideRetry, documentFileName, findUnresolvedPlaceholders, MAIL_MAX_TOTAL_BYTES, renderTemplate, type TemplateType } from '@inspexor/domain';
-import { appendAudit, enqueueEvent, withTransaction, type Pool, type PoolClient } from './db';
-import { CLAIMABLE_SQL } from './jobs-common';
-import { createDailyMailJob } from './mail-jobs';
-import { AdapterError, type PdfRenderer, type StorageAdapter } from './ports';
+import {
+  C,
+  documentPath,
+  filePath,
+  reportPath,
+  StorageError,
+  type DocStore,
+  type DocTransaction,
+  type DocumentJobDoc,
+  type FileDoc,
+  type JobStatus,
+  type ReportHeaderDoc,
+  type StorageAdapter,
+} from '@inspexor/docstore';
+import { appendAudit, enqueueEvent } from './db';
+import { CLAIM_STATUSES, isClaimable } from './jobs-common';
+import { prepareDailyMailJob } from './mail-jobs';
+import { AdapterError, type PdfRenderer } from './ports';
 import { deliverySnapshot, ensureRegistered, loadFixtureTemplate, workSnapshot, type DocumentSnapshot } from './templates';
 
 export interface DocumentDeps {
-  readonly pool: Pool;
+  readonly store: DocStore;
   readonly storage: StorageAdapter;
   readonly pdf: PdfRenderer;
   readonly now: () => Date;
@@ -22,15 +37,7 @@ export interface DocumentDeps {
   readonly dailyMailEnabled?: boolean;
 }
 
-interface JobRow {
-  id: string;
-  document_type: string;
-  source_type: string;
-  source_id: string;
-  template_version: TemplateType;
-  idempotency_key: string;
-  attempts: number;
-}
+type JobRow = DocumentJobDoc & { id: string };
 
 class FinalFailure extends Error {
   constructor(readonly code: string, message: string) {
@@ -38,148 +45,164 @@ class FinalFailure extends Error {
   }
 }
 
-async function claim(pool: Pool, now: Date): Promise<JobRow | null> {
-  return withTransaction(pool, async (client) => {
-    const r = await client.query<JobRow>(
-      `SELECT id, document_type, source_type, source_id, template_version, idempotency_key, attempts
-         FROM app.document_jobs WHERE ${CLAIMABLE_SQL} ORDER BY created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED`,
-      [now.toISOString(), 'PROCESSING'],
-    );
-    const job = r.rows[0];
-    if (job === undefined) return null;
-    const u = await client.query<{ attempts: number }>(
-      `UPDATE app.document_jobs SET status = 'PROCESSING', attempts = attempts + 1, updated_at = $2 WHERE id = $1 RETURNING attempts`,
-      [job.id, now.toISOString()],
-    );
-    return { ...job, attempts: u.rows[0]?.attempts ?? job.attempts + 1 };
-  });
-}
-
-const HEADER: Record<string, { table: string; aggregate: string; target: string }> = {
-  WORK_REVISION: { table: 'work_reports', aggregate: 'Work', target: 'WORK_REPORT' },
-  DELIVERY_REVISION: { table: 'delivery_reports', aggregate: 'Delivery', target: 'DELIVERY_REPORT' },
+const TARGET: Record<string, { aggregate: string; target: string }> = {
+  WORK_REVISION: { aggregate: 'Work', target: 'WORK_REPORT' },
+  DELIVERY_REVISION: { aggregate: 'Delivery', target: 'DELIVERY_REPORT' },
 };
 
-async function submitRecord(client: PoolClient, job: JobRow, snapshot: DocumentSnapshot, now: Date): Promise<boolean> {
-  const h = HEADER[job.source_type];
-  if (h === undefined) return false;
-  // RECORD_TRANSITIONS: CONFIRMED --documentGenerated(SYSTEM, PDF hash 有)--> SUBMITTED。current revision の帳票のみ
-  const r = await client.query<{ version: number }>(
-    `UPDATE app.${h.table} SET status = 'SUBMITTED', version = version + 1, updated_at = $3
-      WHERE id = $1 AND status = 'CONFIRMED' AND current_revision_id = $2 RETURNING version`,
-    [snapshot.reportId, job.source_id, now.toISOString()],
-  );
-  const version = r.rows[0]?.version;
-  if (version === undefined) return false;
-  await appendAudit(client, {
-    action: 'RECORD_SUBMIT',
-    targetType: h.target,
-    targetId: snapshot.reportId,
-    beforeData: { status: 'CONFIRMED' },
-    afterData: { status: 'SUBMITTED', version, documentJobId: job.id },
-    correlationId: job.id,
-    occurredAt: now,
-  });
-  await enqueueEvent(client, {
-    eventId: randomUUID(),
-    type: 'RecordSubmitted',
-    aggregateType: h.aggregate,
-    aggregateId: snapshot.reportId,
-    correlationId: job.id,
-    causationId: null,
-    occurredAt: now,
-    payload: { reportId: snapshot.reportId, revisionId: job.source_id, version, documentJobId: job.id },
-  });
-  return true;
+/** 読込段階: ヘッダ。書込段階で帳票状態を反映する関数を返す */
+async function headerStatusUpdater(tx: DocTransaction, job: JobRow): Promise<{ header: ReportHeaderDoc | null; apply: (status: JobStatus, extra?: Record<string, unknown>) => void }> {
+  const header = await tx.get<ReportHeaderDoc>(reportPath(job.reportType, job.reportId));
+  return {
+    header,
+    apply: (status, extra = {}) => {
+      if (header === null) return;
+      const own = header.documentId === job.id;
+      if (own || Object.keys(extra).length > 0) {
+        tx.update(reportPath(job.reportType, job.reportId), { ...(own ? { documentStatus: status } : {}), ...extra });
+      }
+    },
+  };
+}
+
+async function claim(store: DocStore, now: Date): Promise<JobRow | null> {
+  const candidates = (await store.query<DocumentJobDoc>(C.documents, { where: [{ field: 'status', op: 'in', value: CLAIM_STATUSES('PROCESSING') }] }))
+    .filter((r) => isClaimable(r.data, 'PROCESSING', now))
+    .sort((a, b) => a.data.createdAt.getTime() - b.data.createdAt.getTime() || (a.id < b.id ? -1 : 1));
+  for (const c of candidates) {
+    const claimed = await store.runTransaction(async (tx) => {
+      const job = await tx.get<DocumentJobDoc>(documentPath(c.id));
+      if (job === null || !isClaimable(job, 'PROCESSING', now)) return null;
+      const row: JobRow = { ...job, id: c.id, attempts: job.attempts + 1 };
+      const h = await headerStatusUpdater(tx, row);
+      tx.update(documentPath(c.id), { status: 'PROCESSING', attempts: row.attempts, updatedAt: now });
+      h.apply('PROCESSING');
+      return row;
+    });
+    if (claimed !== null) return claimed;
+  }
+  return null;
 }
 
 export async function processOneDocumentJob(deps: DocumentDeps): Promise<'none' | 'generated' | 'retry' | 'final'> {
-  const job = await claim(deps.pool, deps.now());
+  const job = await claim(deps.store, deps.now());
   if (job === null) return 'none';
+  const template = job.templateVersion as TemplateType;
   try {
-    const snapshot =
-      job.source_type === 'WORK_REVISION'
-        ? await workSnapshot(deps.pool, job.source_id, job.template_version === 'DAILY_REPORT_V1' ? 'DAILY_REPORT_V1' : 'DAILY_REPORT_V2')
-        : await deliverySnapshot(deps.pool, job.source_id);
-    if (snapshot === null || snapshot.type !== job.template_version) throw new FinalFailure('SOURCE_NOT_FOUND', '確定済み revision が見つかりません');
-    let template;
+    const src = { reportId: job.reportId, revisionId: job.revisionId };
+    const snapshot: DocumentSnapshot | null =
+      job.sourceType === 'WORK_REVISION'
+        ? await workSnapshot(deps.store, src, template === 'DAILY_REPORT_V1' ? 'DAILY_REPORT_V1' : 'DAILY_REPORT_V2')
+        : await deliverySnapshot(deps.store, src);
+    if (snapshot === null || snapshot.type !== template) throw new FinalFailure('SOURCE_NOT_FOUND', '確定済み revision が見つかりません');
+    let loaded;
     try {
-      template = loadFixtureTemplate(job.template_version, deps.templateDir);
+      loaded = loadFixtureTemplate(template, deps.templateDir);
     } catch (error) {
       throw new FinalFailure('TEMPLATE_INVALID', String(error));
     }
-    if ((await ensureRegistered(deps.pool, template, deps.now())) !== 'ok') throw new FinalFailure('TEMPLATE_INVALID', 'template の sha256 が registry と一致しません');
-    const html = renderTemplate(template.html, snapshot.values);
+    if ((await ensureRegistered(deps.store, loaded, deps.now())) !== 'ok') throw new FinalFailure('TEMPLATE_INVALID', 'template の sha256 が registry と一致しません');
+    const html = renderTemplate(loaded.html, snapshot.values);
     const unresolved = findUnresolvedPlaceholders(html);
     if (unresolved.length > 0) throw new FinalFailure('TEMPLATE_INVALID', `未置換 placeholder: ${unresolved.join(', ')}`);
     const pdf = await deps.pdf.render(html);
     if (pdf.byteLength > MAIL_MAX_TOTAL_BYTES) throw new FinalFailure('FILE_TOO_LARGE', `PDF が上限を超えています（${pdf.byteLength} bytes）`);
     const sha256 = createHash('sha256').update(pdf).digest('hex');
-    const fileName = documentFileName(job.template_version, snapshot.fileName);
-    const storageKey = `documents/${job.document_type}/${snapshot.reportNo}/${job.id}/${fileName}`;
+    const fileName = documentFileName(template, snapshot.fileName);
+    const storageKey = `documents/${job.documentType}/${snapshot.reportNo}/${job.id}/${fileName}`;
     await deps.storage.put(storageKey, pdf, 'application/pdf');
     const readBack = await deps.storage.get(storageKey);
     if (createHash('sha256').update(readBack.bytes).digest('hex') !== sha256) throw new FinalFailure('HASH_MISMATCH', '保存した PDF の hash が一致しません');
 
     const now = deps.now();
-    await withTransaction(deps.pool, async (client) => {
-      const f = await client.query<{ id: string }>(
-        `INSERT INTO app.files (storage_key, mime_type, size_bytes, sha256, classification) VALUES ($1, 'application/pdf', $2, $3, 'CONFIDENTIAL') RETURNING id`,
-        [storageKey, pdf.byteLength, sha256],
-      );
-      const fileId = f.rows[0]?.id as string;
-      await client.query(`UPDATE app.document_jobs SET status = 'GENERATED', file_id = $2, error_code = NULL, updated_at = $3 WHERE id = $1`, [job.id, fileId, now.toISOString()]);
-      await appendAudit(client, {
+    const fileId = randomUUID();
+    await deps.store.runTransaction(async (tx) => {
+      // ---- 読込
+      const current = await tx.get<DocumentJobDoc>(documentPath(job.id));
+      if (current === null || current.status !== 'PROCESSING' || current.attempts !== job.attempts) return; // 他の worker が取得し直した
+      const h = await headerStatusUpdater(tx, job);
+      const t = TARGET[job.sourceType];
+      // RECORD_TRANSITIONS: CONFIRMED --documentGenerated(SYSTEM, PDF hash 有)--> SUBMITTED。current revision の帳票のみ
+      const submit = t !== undefined && h.header !== null && h.header.status === 'CONFIRMED' && h.header.currentRevisionId === job.revisionId;
+      const submitVersion = submit && h.header !== null ? h.header.version + 1 : null;
+      // 日報メールは自動生成分のみ（手動再生成は送らない。送る場合は documentAction send）
+      const mail =
+        deps.dailyMailEnabled === true && snapshot.mail !== null && job.idempotencyKey.endsWith(':auto')
+          ? await prepareDailyMailJob(tx, { documentJobId: job.id, snapshot, fileName, sendRevision: 1, reason: null }, now)
+          : null;
+      // ---- 書込
+      const file: FileDoc = { storageKey, mimeType: 'application/pdf', sizeBytes: pdf.byteLength, sha256, classification: 'CONFIDENTIAL', createdAt: now };
+      tx.create(filePath(fileId), file);
+      tx.update(documentPath(job.id), { status: 'GENERATED', fileId, errorCode: null, updatedAt: now });
+      h.apply('GENERATED', submitVersion !== null ? { status: 'SUBMITTED', version: submitVersion, updatedAt: now } : {});
+      appendAudit(tx, {
         action: 'DOCUMENT_GENERATED',
         targetType: 'DOCUMENT_JOB',
         targetId: job.id,
-        afterData: { template: job.template_version, revisionId: job.source_id, fileId, sha256, sizeBytes: pdf.byteLength, attempts: job.attempts },
+        afterData: { template, revisionId: job.revisionId, fileId, sha256, sizeBytes: pdf.byteLength, attempts: job.attempts },
         correlationId: job.id,
         occurredAt: now,
       });
-      await enqueueEvent(client, {
-        eventId: randomUUID(),
+      enqueueEvent(tx, {
         type: 'DocumentGenerated',
         aggregateType: 'Document',
         aggregateId: job.id,
         correlationId: job.id,
         causationId: null,
         occurredAt: now,
-        payload: { documentJobId: job.id, fileId, sha256, reportId: snapshot.reportId, revisionId: job.source_id },
+        payload: { documentJobId: job.id, fileId, sha256, reportId: job.reportId, revisionId: job.revisionId },
       });
-      await submitRecord(client, job, snapshot, now);
-      // 日報メールは自動生成分のみ（手動再生成は送らない。送る場合は documentAction send）
-      if (deps.dailyMailEnabled === true && snapshot.mail !== null && job.idempotency_key.endsWith(':auto')) {
-        await createDailyMailJob(client, { documentJobId: job.id, snapshot, fileName, sendRevision: 1, reason: null }, now);
+      if (submitVersion !== null && t !== undefined) {
+        appendAudit(tx, {
+          action: 'RECORD_SUBMIT',
+          targetType: t.target,
+          targetId: job.reportId,
+          beforeData: { status: 'CONFIRMED' },
+          afterData: { status: 'SUBMITTED', version: submitVersion, documentJobId: job.id },
+          correlationId: job.id,
+          occurredAt: now,
+        });
+        enqueueEvent(tx, {
+          type: 'RecordSubmitted',
+          aggregateType: t.aggregate,
+          aggregateId: job.reportId,
+          correlationId: job.id,
+          causationId: null,
+          occurredAt: now,
+          payload: { reportId: job.reportId, revisionId: job.revisionId, version: submitVersion, documentJobId: job.id },
+        });
       }
+      if (mail !== null) mail();
     });
     return 'generated';
   } catch (error) {
     const final = error instanceof FinalFailure;
-    const retryable = error instanceof AdapterError && error.retryable;
-    const code = final ? error.code : error instanceof AdapterError ? error.code : 'DEPENDENCY_UNAVAILABLE';
-    const outcome = decideRetry(job.attempts, !final && (retryable || !(error instanceof AdapterError)));
+    const adapter = error instanceof AdapterError || error instanceof StorageError;
+    const retryable = adapter && (error as AdapterError | StorageError).retryable;
+    const code = final ? error.code : adapter ? (error as AdapterError | StorageError).code : 'DEPENDENCY_UNAVAILABLE';
+    const outcome = decideRetry(job.attempts, !final && (retryable || !adapter));
     const now = deps.now();
-    await withTransaction(deps.pool, async (client) => {
-      await client.query(`UPDATE app.document_jobs SET status = $2, error_code = $3, updated_at = $4 WHERE id = $1`, [job.id, outcome.status, code, now.toISOString()]);
+    await deps.store.runTransaction(async (tx) => {
+      const h = await headerStatusUpdater(tx, job);
+      tx.update(documentPath(job.id), { status: outcome.status, errorCode: code, updatedAt: now });
+      h.apply(outcome.status);
       if (outcome.status === 'FAILED_FINAL') {
-        await appendAudit(client, {
+        appendAudit(tx, {
           action: 'DOCUMENT_FAILED',
           targetType: 'DOCUMENT_JOB',
           targetId: job.id,
-          afterData: { template: job.template_version, revisionId: job.source_id, errorCode: code, attempts: job.attempts },
+          afterData: { template, revisionId: job.revisionId, errorCode: code, attempts: job.attempts },
           correlationId: job.id,
           occurredAt: now,
         });
-        await enqueueEvent(client, {
-          eventId: randomUUID(),
+        enqueueEvent(tx, {
           type: 'DocumentFailed',
           aggregateType: 'Document',
           aggregateId: job.id,
           correlationId: job.id,
           causationId: null,
           occurredAt: now,
-          payload: { documentJobId: job.id, errorCode: code, revisionId: job.source_id },
+          payload: { documentJobId: job.id, errorCode: code, revisionId: job.revisionId },
         });
       }
     });

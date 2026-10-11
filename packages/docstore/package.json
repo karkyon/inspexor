@@ -12,7 +12,8 @@
   "dependencies": {
     "@google-cloud/firestore": "8.7.1",
     "@inspexor/application": "workspace:*",
-    "@inspexor/domain": "workspace:*"
+    "@inspexor/domain": "workspace:*",
+    "@google-cloud/storage": "7.19.0"
   },
   "devDependencies": {
     "@types/node": "^22.7.5",

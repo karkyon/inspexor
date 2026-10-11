@@ -1,10 +1,10 @@
 /**
- * 日報メール（FR-006 / REQ-MAIL-001）:
- *  - 宛先は作成時に snapshot（品番の DAILY 担当かつ send_daily の有効な連絡先）。0件・不正は FAILED_FINAL（帳票は残す）
+ * 日報メール（FR-006 / REQ-MAIL-001。CHG-004 により既定で無効＝DAILY_MAIL_ENABLED=true のときだけ）。CHG-006: Firestore 版。
+ *  - 宛先は作成時に snapshot（品番の DAILY 担当かつ sendDaily の有効な連絡先）。0件・不正は FAILED_FINAL（帳票は残す）
  *  - 送信前に PDF を storage から読み戻して files.sha256 と照合、20MB 以下
  *  - Message-ID は冪等 key から決定し、送信前に provider を検索（timeout 後に実は送れていた場合の二重送信防止: T-MAIL-001）
  */
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import {
   dailyReportSubject,
   decideRetry,
@@ -13,18 +13,26 @@ import {
   MAIL_MAX_TOTAL_BYTES,
   normalizeRecipients,
 } from '@inspexor/domain';
-import { appendAudit, enqueueEvent, withTransaction, type Pool, type PoolClient, type Queryable } from './db';
-import { CLAIMABLE_SQL } from './jobs-common';
-import { AdapterError, type MailSender, type StorageAdapter } from './ports';
+import {
+  C,
+  documentPath,
+  mailJobPath,
+  StorageError,
+  uuidFromKey,
+  type DocStore,
+  type DocTransaction,
+  type DocumentJobDoc,
+  type FileDoc,
+  type MailJobDoc,
+  type MailSnapshotDoc,
+  type StorageAdapter,
+} from '@inspexor/docstore';
+import { appendAudit, enqueueEvent } from './db';
+import { CLAIM_STATUSES, isClaimable } from './jobs-common';
+import { AdapterError, type MailSender } from './ports';
 import type { DocumentSnapshot } from './templates';
 
-export interface MailSnapshot {
-  readonly to: string[];
-  readonly cc: string[];
-  readonly bcc: string[];
-  readonly text: string;
-  readonly attachmentName: string;
-}
+export type MailSnapshot = MailSnapshotDoc;
 
 export function mailJobKey(documentJobId: string, sendRevision: number): string {
   return `MAIL:DAILY_REPORT:${documentJobId}:${sendRevision}`;
@@ -52,62 +60,59 @@ function dailyBody(s: DocumentSnapshot, fileName: string): string {
   ].join('\r\n');
 }
 
-/** 帳票生成と同じ transaction で mail job を作る（宛先 snapshot）。宛先0件・不正は FAILED_FINAL で記録 */
-export async function createDailyMailJob(
-  client: Queryable,
+/**
+ * 帳票生成と同じ transaction で mail job を作る（宛先 snapshot）。読込段階で呼び、書込関数を返す（既にあれば null）。
+ * 宛先0件・不正は FAILED_FINAL で記録。
+ */
+export async function prepareDailyMailJob(
+  tx: DocTransaction,
   input: { documentJobId: string; snapshot: DocumentSnapshot; fileName: string; sendRevision: number; reason: string | null; idempotencyKey?: string },
   now: Date,
-): Promise<string> {
+): Promise<(() => void) | null> {
   const m = input.snapshot.mail;
   if (m === null) throw new Error('mail snapshot required');
-  const contacts = await client.query<{ email: string }>(
-    `SELECT DISTINCT c.email FROM app.customer_contacts c
-       JOIN app.product_contacts pc ON pc.contact_id = c.id AND pc.purpose = 'DAILY'
-      WHERE pc.product_id = $1 AND c.customer_id = $2 AND c.active AND c.send_daily
-      ORDER BY c.email`,
-    [m.productId, m.customerId],
-  );
-  const check = normalizeRecipients(contacts.rows.map((c) => c.email));
-  const subject = dailyReportSubject({ workDate: m.workDate, productCode: m.productCode, reportNo: input.snapshot.reportNo });
-  const snapshot: MailSnapshot = {
-    to: check.ok ? check.recipients : [],
-    cc: [],
-    bcc: [],
-    text: dailyBody(input.snapshot, input.fileName),
-    attachmentName: input.fileName,
-  };
   const key = input.idempotencyKey ?? mailJobKey(input.documentJobId, input.sendRevision);
+  const id = uuidFromKey(key);
+  if ((await tx.get(mailJobPath(id))) !== null) return null;
+  const contacts = await tx.query<{ email: string; customerId: string; active: boolean; sendDaily: boolean }>(C.customerContacts, {
+    where: [{ field: 'dailyProductIds', op: 'array-contains', value: m.productId }],
+  });
+  const emails = [...new Set(contacts.filter((c) => c.data.customerId === m.customerId && c.data.active && c.data.sendDaily).map((c) => c.data.email))].sort();
+  const check = normalizeRecipients(emails);
+  const subject = dailyReportSubject({ workDate: m.workDate, productCode: m.productCode, reportNo: input.snapshot.reportNo });
+  const snapshot: MailSnapshot = { to: check.ok ? check.recipients : [], cc: [], bcc: [], text: dailyBody(input.snapshot, input.fileName), attachmentName: input.fileName };
   const failure = !check.ok ? check.code : hasHeaderInjection(subject) ? 'RECIPIENT_INVALID' : null;
-  const r = await client.query<{ id: string }>(
-    `INSERT INTO app.mail_jobs (document_job_id, recipients, subject, status, send_revision, idempotency_key, error_code)
-     VALUES ($1, $2::jsonb, $3, $4, $5, $6, $7)
-     ON CONFLICT (idempotency_key) DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key RETURNING id`,
-    [input.documentJobId, JSON.stringify(snapshot), subject, failure === null ? 'QUEUED' : 'FAILED_FINAL', input.sendRevision, key, failure],
-  );
-  const id = r.rows[0]?.id as string;
-  if (failure !== null) {
-    // 宛先0件は帳票生成まで可、送信は FAILED_FINAL（業務要件 §5）
-    await appendAudit(client, { action: 'MAIL_FAILED', targetType: 'MAIL_JOB', targetId: id, afterData: { errorCode: failure, documentJobId: input.documentJobId }, correlationId: input.documentJobId, occurredAt: now });
-    await enqueueEvent(client, { eventId: randomUUID(), type: 'MailFailed', aggregateType: 'Mail', aggregateId: id, correlationId: input.documentJobId, causationId: null, occurredAt: now, payload: { mailJobId: id, errorCode: failure } });
-  }
-  return id;
+  return () => {
+    const doc: MailJobDoc = {
+      documentJobId: input.documentJobId,
+      recipients: snapshot,
+      subject,
+      status: failure === null ? 'QUEUED' : 'FAILED_FINAL',
+      sendRevision: input.sendRevision,
+      idempotencyKey: key,
+      providerMessageId: null,
+      attempts: 0,
+      errorCode: failure,
+      createdAt: now,
+      updatedAt: now,
+    };
+    tx.create(mailJobPath(id), doc);
+    if (failure !== null) {
+      // 宛先0件は帳票生成まで可、送信は FAILED_FINAL（業務要件 §5）
+      appendAudit(tx, { action: 'MAIL_FAILED', targetType: 'MAIL_JOB', targetId: id, afterData: { errorCode: failure, documentJobId: input.documentJobId }, correlationId: input.documentJobId, occurredAt: now });
+      enqueueEvent(tx, { type: 'MailFailed', aggregateType: 'Mail', aggregateId: id, correlationId: input.documentJobId, causationId: null, occurredAt: now, payload: { mailJobId: id, errorCode: failure } });
+    }
+  };
 }
 
 export interface MailDeps {
-  readonly pool: Pool;
+  readonly store: DocStore;
   readonly storage: StorageAdapter;
   readonly sender: MailSender;
   readonly now: () => Date;
 }
 
-interface MailRow {
-  id: string;
-  document_job_id: string;
-  recipients: MailSnapshot;
-  subject: string;
-  idempotency_key: string;
-  attempts: number;
-}
+type MailRow = MailJobDoc & { id: string };
 
 class FinalFailure extends Error {
   constructor(readonly code: string, message: string) {
@@ -115,62 +120,63 @@ class FinalFailure extends Error {
   }
 }
 
-async function claim(pool: Pool, now: Date): Promise<MailRow | null> {
-  return withTransaction(pool, async (client: PoolClient) => {
-    const r = await client.query<MailRow>(
-      `SELECT id, document_job_id, recipients, subject, idempotency_key, attempts FROM app.mail_jobs
-        WHERE ${CLAIMABLE_SQL} ORDER BY created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED`,
-      [now.toISOString(), 'SENDING'],
-    );
-    const job = r.rows[0];
-    if (job === undefined) return null;
-    const u = await client.query<{ attempts: number }>(`UPDATE app.mail_jobs SET status = 'SENDING', attempts = attempts + 1, updated_at = $2 WHERE id = $1 RETURNING attempts`, [job.id, now.toISOString()]);
-    return { ...job, attempts: u.rows[0]?.attempts ?? job.attempts + 1 };
-  });
+async function claim(store: DocStore, now: Date): Promise<MailRow | null> {
+  const candidates = (await store.query<MailJobDoc>(C.mailJobs, { where: [{ field: 'status', op: 'in', value: CLAIM_STATUSES('SENDING') }] }))
+    .filter((r) => isClaimable(r.data, 'SENDING', now))
+    .sort((a, b) => a.data.createdAt.getTime() - b.data.createdAt.getTime() || (a.id < b.id ? -1 : 1));
+  for (const c of candidates) {
+    const claimed = await store.runTransaction(async (tx) => {
+      const job = await tx.get<MailJobDoc>(mailJobPath(c.id));
+      if (job === null || !isClaimable(job, 'SENDING', now)) return null;
+      const attempts = job.attempts + 1;
+      tx.update(mailJobPath(c.id), { status: 'SENDING', attempts, updatedAt: now });
+      return { ...job, id: c.id, attempts };
+    });
+    if (claimed !== null) return claimed;
+  }
+  return null;
 }
 
 export async function processOneMailJob(deps: MailDeps): Promise<'none' | 'sent' | 'retry' | 'final'> {
-  const job = await claim(deps.pool, deps.now());
+  const job = await claim(deps.store, deps.now());
   if (job === null) return 'none';
   try {
-    const doc = await deps.pool.query<{ status: string; storage_key: string | null; sha256: string | null; size_bytes: string | null }>(
-      `SELECT d.status, f.storage_key, f.sha256, f.size_bytes FROM app.document_jobs d LEFT JOIN app.files f ON f.id = d.file_id WHERE d.id = $1`,
-      [job.document_job_id],
-    );
-    const d = doc.rows[0];
-    if (d === undefined || d.status !== 'GENERATED' || d.storage_key === null || d.sha256 === null) throw new FinalFailure('DOCUMENT_NOT_READY', '帳票が生成されていません');
-    const check = normalizeRecipients(job.recipients.to);
+    const d = await deps.store.get<DocumentJobDoc>(documentPath(job.documentJobId));
+    const f = d?.fileId ? await deps.store.get<FileDoc>(`${C.files}/${d.fileId}`) : null;
+    if (d === null || d.status !== 'GENERATED' || f === null) throw new FinalFailure('DOCUMENT_NOT_READY', '帳票が生成されていません');
+    const check = normalizeRecipients([...job.recipients.to]);
     if (!check.ok) throw new FinalFailure(check.code, check.detail);
     if (hasHeaderInjection(job.subject)) throw new FinalFailure('RECIPIENT_INVALID', 'subject header injection');
-    const stored = await deps.storage.get(d.storage_key);
-    if (createHash('sha256').update(stored.bytes).digest('hex') !== d.sha256.trim()) throw new FinalFailure('HASH_MISMATCH', 'PDF hash 不一致');
+    const stored = await deps.storage.get(f.storageKey);
+    if (createHash('sha256').update(stored.bytes).digest('hex') !== f.sha256) throw new FinalFailure('HASH_MISMATCH', 'PDF hash 不一致');
     const attachments = [{ filename: job.recipients.attachmentName, contentType: 'application/pdf', bytes: stored.bytes }];
     if (attachments.length > MAIL_MAX_ATTACHMENTS || attachments.reduce((s, a) => s + a.bytes.byteLength, 0) > MAIL_MAX_TOTAL_BYTES) {
       throw new FinalFailure('FILE_TOO_LARGE', '添付が 20MB を超えています');
     }
-    const messageId = messageIdOf(job.idempotency_key);
+    const messageId = messageIdOf(job.idempotencyKey);
     const providerId =
       (await deps.sender.findSent(messageId)) ??
-      (await deps.sender.send({ messageId, to: check.recipients, cc: job.recipients.cc, bcc: job.recipients.bcc, subject: job.subject, text: job.recipients.text, attachments }));
+      (await deps.sender.send({ messageId, to: check.recipients, cc: [...job.recipients.cc], bcc: [...job.recipients.bcc], subject: job.subject, text: job.recipients.text, attachments }));
     const now = deps.now();
-    await withTransaction(deps.pool, async (client) => {
-      await client.query(`UPDATE app.mail_jobs SET status = 'SENT', provider_message_id = $2, error_code = NULL, updated_at = $3 WHERE id = $1`, [job.id, providerId, now.toISOString()]);
+    await deps.store.runTransaction(async (tx) => {
+      tx.update(mailJobPath(job.id), { status: 'SENT', providerMessageId: providerId, errorCode: null, updatedAt: now });
       // audit に宛先・本文は残さない（SEC-017）。件数のみ
-      await appendAudit(client, { action: 'MAIL_SENT', targetType: 'MAIL_JOB', targetId: job.id, afterData: { documentJobId: job.document_job_id, recipientCount: check.recipients.length, providerMessageId: providerId, attempts: job.attempts }, correlationId: job.document_job_id, occurredAt: now });
-      await enqueueEvent(client, { eventId: randomUUID(), type: 'MailSent', aggregateType: 'Mail', aggregateId: job.id, correlationId: job.document_job_id, causationId: null, occurredAt: now, payload: { mailJobId: job.id, providerMessageId: providerId } });
+      appendAudit(tx, { action: 'MAIL_SENT', targetType: 'MAIL_JOB', targetId: job.id, afterData: { documentJobId: job.documentJobId, recipientCount: check.recipients.length, providerMessageId: providerId, attempts: job.attempts }, correlationId: job.documentJobId, occurredAt: now });
+      enqueueEvent(tx, { type: 'MailSent', aggregateType: 'Mail', aggregateId: job.id, correlationId: job.documentJobId, causationId: null, occurredAt: now, payload: { mailJobId: job.id, providerMessageId: providerId } });
     });
     return 'sent';
   } catch (error) {
     const final = error instanceof FinalFailure;
-    const code = final ? error.code : error instanceof AdapterError ? error.code : 'DEPENDENCY_UNAVAILABLE';
-    const retryable = !final && (!(error instanceof AdapterError) || error.retryable);
+    const adapter = error instanceof AdapterError || error instanceof StorageError;
+    const code = final ? error.code : adapter ? (error as AdapterError | StorageError).code : 'DEPENDENCY_UNAVAILABLE';
+    const retryable = !final && (!adapter || (error as AdapterError | StorageError).retryable);
     const outcome = decideRetry(job.attempts, retryable);
     const now = deps.now();
-    await withTransaction(deps.pool, async (client) => {
-      await client.query(`UPDATE app.mail_jobs SET status = $2, error_code = $3, updated_at = $4 WHERE id = $1`, [job.id, outcome.status, code, now.toISOString()]);
+    await deps.store.runTransaction(async (tx) => {
+      tx.update(mailJobPath(job.id), { status: outcome.status, errorCode: code, updatedAt: now });
       if (outcome.status === 'FAILED_FINAL') {
-        await appendAudit(client, { action: 'MAIL_FAILED', targetType: 'MAIL_JOB', targetId: job.id, afterData: { documentJobId: job.document_job_id, errorCode: code, attempts: job.attempts }, correlationId: job.document_job_id, occurredAt: now });
-        await enqueueEvent(client, { eventId: randomUUID(), type: 'MailFailed', aggregateType: 'Mail', aggregateId: job.id, correlationId: job.document_job_id, causationId: null, occurredAt: now, payload: { mailJobId: job.id, errorCode: code } });
+        appendAudit(tx, { action: 'MAIL_FAILED', targetType: 'MAIL_JOB', targetId: job.id, afterData: { documentJobId: job.documentJobId, errorCode: code, attempts: job.attempts }, correlationId: job.documentJobId, occurredAt: now });
+        enqueueEvent(tx, { type: 'MailFailed', aggregateType: 'Mail', aggregateId: job.id, correlationId: job.documentJobId, causationId: null, occurredAt: now, payload: { mailJobId: job.id, errorCode: code } });
       }
     });
     return outcome.status === 'FAILED_FINAL' ? 'final' : 'retry';

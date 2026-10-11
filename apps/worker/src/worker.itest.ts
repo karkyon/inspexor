@@ -1,6 +1,6 @@
 /**
  * G4 統合試験（T-DOC-001〜 / T-MAIL-001〜 / REQ-DOC-001 / REQ-MAIL-001 / CHG-003）。
- * 実 PostgreSQL 16 の fresh DB（schema.sql＋migration）に、web の FieldReportService で実績を確定し、
+ * CHG-006: Firestore（エミュレータ、無ければ MemoryDocStore）に、web の FieldReportService で実績を確定し、
  * worker の runOnce（dispatch → 帳票 → メール）を通しで検証する。PDF は実 Chromium と試験用 renderer の両方を使う。
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -10,10 +10,23 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { jstToInstant } from '@inspexor/domain';
-import { createFreshDatabase, insertUser, type FreshDatabase } from '../../web/lib/testing/fresh-db';
+import {
+  auditEventsFor,
+  C,
+  createUser,
+  LocalFsStorage,
+  type DocumentJobDoc,
+  type FileDoc,
+  type MailJobDoc,
+  type OutboxDoc,
+  type ReportHeaderDoc,
+} from '@inspexor/docstore';
+import { createTestStore, type TestStore } from '@inspexor/docstore/testing';
+import { MasterService } from '../../web/lib/masters/master-service';
+import { MASTER_DEFS, type MasterType } from '../../web/lib/masters/definitions';
+import { writeSchema } from '../../web/lib/masters/schemas';
 import { FieldReportService } from '../../web/lib/field/field-report-service';
 import { ChromiumPdfRenderer } from './adapters/chromium-pdf';
-import { LocalFsStorage } from './adapters/local-fs-storage';
 import { MailpitMailSender } from './adapters/mailpit-mail';
 import { dispatchOutbox } from './dispatcher';
 import { AdapterError, type MailMessage, type MailSender, type PdfRenderer } from './ports';
@@ -21,7 +34,7 @@ import { runOnce, type WorkerDeps } from './worker';
 
 const MAILPIT_URL = process.env['MAILPIT_URL'];
 const TEMPLATE_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'templates');
-let db: FreshDatabase;
+let t: TestStore;
 let storageDir: string;
 let fieldUser: string;
 const m: Record<string, string> = {};
@@ -61,18 +74,30 @@ class FakeSender implements MailSender {
   }
 }
 
-async function one<T = { id: string }>(sql: string, params: unknown[] = []): Promise<T> {
-  return (await db.pool.query(sql, params)).rows[0] as T;
+async function master(type: MasterType, input: Record<string, unknown>): Promise<string> {
+  const parsed = writeSchema(MASTER_DEFS[type]).parse(input) as Record<string, unknown>;
+  return (await new MasterService(t.store).create(type, parsed, { actorId: 'itest', correlationId: '11111111-1111-4111-8111-111111111111', now: clock })).id;
+}
+
+const header = async (type: 'work' | 'delivery', id: string): Promise<ReportHeaderDoc> =>
+  (await t.store.get<ReportHeaderDoc>(`${type === 'work' ? C.workReports : C.deliveryReports}/${id}`)) as ReportHeaderDoc;
+
+async function mailJobs(documentJobId: string): Promise<Array<MailJobDoc & { id: string }>> {
+  return (await t.store.query<MailJobDoc>(C.mailJobs, { where: [{ field: 'documentJobId', op: '==', value: documentJobId }] })).map((r) => ({ ...r.data, id: r.id }));
+}
+
+async function outboxCount(type: string, aggregateId?: string): Promise<number> {
+  return (await t.store.query<OutboxDoc>(C.outbox, { where: [{ field: 'type', op: '==', value: type }] })).filter((o) => aggregateId === undefined || o.data.aggregateId === aggregateId).length;
 }
 
 function deps(renderer: PdfRenderer, sender: MailSender, templateDir?: string): WorkerDeps {
-  return { pool: db.pool, storage: new LocalFsStorage(storageDir), pdf: renderer, sender, now: () => clock, dailyMailEnabled: true, ...(templateDir ? { templateDir } : {}) };
+  return { store: t.store, storage: new LocalFsStorage(storageDir), pdf: renderer, sender, now: () => clock, dailyMailEnabled: true, ...(templateDir ? { templateDir } : {}) };
 }
 
 const ctx = () => ({ actor: { userId: fieldUser, roles: ['FIELD'] }, correlationId: '00000000-0000-4000-8000-000000000001', now: clock });
 
 async function confirmWork(productKey = 'pA'): Promise<{ id: string; reportNo: string }> {
-  const svc = new FieldReportService(db.pool);
+  const svc = new FieldReportService(t.store);
   const r = await svc.createWork(
     {
       workDate: '2026-10-08',
@@ -86,6 +111,9 @@ async function confirmWork(productKey = 'pA'): Promise<{ id: string; reportNo: s
       endAt: jstToInstant('2026-10-08', '18:00'),
       quantity: 1600,
       defects: [{ defectTypeId: m[`d_${productKey}`] as string, quantity: 12 }],
+      workLocationId: null,
+      vehicleId: null,
+      remarks: null,
     },
     ctx(),
   );
@@ -94,42 +122,43 @@ async function confirmWork(productKey = 'pA'): Promise<{ id: string; reportNo: s
 }
 
 async function confirmDelivery(): Promise<{ id: string; reportNo: string }> {
-  const svc = new FieldReportService(db.pool);
+  const svc = new FieldReportService(t.store);
   const r = await svc.createDelivery(
-    { deliveryDate: '2026-10-08', driverId: m['w1'] as string, customerId: m['customer'] as string, items: [{ productId: m['pA'] as string, quantity: 1200 }, { productId: m['pNoMail'] as string, quantity: 8 }] },
+    { deliveryDate: '2026-10-08', driverId: m['w1'] as string, customerId: m['customer'] as string, items: [{ productId: m['pA'] as string, quantity: 1200 }, { productId: m['pNoMail'] as string, quantity: 8 }], vehicleId: null, tripCount: 1, deliveryFeeYen: null },
     ctx(),
   );
   await svc.confirm('DELIVERY', r.id, 1, ctx());
   return { id: r.id, reportNo: r.reportNo };
 }
 
-async function jobFor(reportId: string, table: 'work' | 'delivery') {
-  return one<{ id: string; status: string; error_code: string | null; attempts: number; file_id: string | null; idempotency_key: string }>(
-    `SELECT d.* FROM app.document_jobs d JOIN app.${table}_report_revisions r ON r.id = d.source_id WHERE r.report_id = $1 ORDER BY d.created_at DESC LIMIT 1`,
-    [reportId],
+/** 実績の最新の帳票 job（PostgreSQL 版の列名に合わせて返す） */
+async function jobFor(reportId: string, _type: 'work' | 'delivery') {
+  const rows = (await t.store.query<DocumentJobDoc>(C.documents, { where: [{ field: 'reportId', op: '==', value: reportId }] })).sort(
+    (a, b) => b.data.createdAt.getTime() - a.data.createdAt.getTime() || (a.id < b.id ? 1 : -1),
   );
+  const j = rows[0];
+  if (j === undefined) throw new Error(`job not found: ${reportId}`);
+  return { id: j.id, status: j.data.status, error_code: j.data.errorCode, attempts: j.data.attempts, file_id: j.data.fileId, idempotency_key: j.data.idempotencyKey, template_version: j.data.templateVersion };
 }
 
 beforeAll(async () => {
-  db = await createFreshDatabase('worker');
+  t = createTestStore('worker');
   storageDir = await mkdtemp(join(tmpdir(), 'inspexor-storage-'));
-  fieldUser = await insertUser(db.pool, 'itest-field');
-  await db.pool.query(`UPDATE app.users SET display_name = '現場 太郎' WHERE id = $1`, [fieldUser]);
-  m['customer'] = (await one(`INSERT INTO app.customers(code,name,closing_day) VALUES ('C1','合成顧客＆<A>',31) RETURNING id`)).id;
+  fieldUser = (await createUser(t.store, { loginId: 'itest-field', passwordHash: 'x', displayName: '現場 太郎', roles: ['FIELD'] }, clock)) as string;
+  m['customer'] = await master('customers', { code: 'C1', name: '合成顧客＆<A>', closingDay: 31 });
   for (const key of ['pA', 'pNoMail']) {
-    m[key] = (await one(`INSERT INTO app.products(customer_id,code,name,settlement_type) VALUES ($1,$2,$3,'QUANTITY') RETURNING id`, [m['customer'], key.toUpperCase(), `品${key}`])).id;
-    m[`wt_${key}`] = (await one(`INSERT INTO app.work_types(product_id,code,name) VALUES ($1,'INSP','外観検査') RETURNING id`, [m[key]])).id;
-    m[`d_${key}`] = (await one(`INSERT INTO app.defect_types(product_id,code,name,sort_order) VALUES ($1,'D1','バリ',1) RETURNING id`, [m[key]])).id;
+    m[key] = await master('products', { customerId: m['customer'], code: key.toUpperCase(), name: `品${key}`, settlementType: 'QUANTITY' });
+    m[`wt_${key}`] = await master('work-types', { productId: m[key], code: 'INSP', name: '外観検査' });
+    m[`d_${key}`] = await master('defects', { productId: m[key], code: 'D1', name: 'バリ', sortOrder: 1 });
   }
-  m['w1'] = (await one(`INSERT INTO app.workers(code,name) VALUES ('W1','作業者 一郎') RETURNING id`)).id;
-  m['w2'] = (await one(`INSERT INTO app.workers(code,name) VALUES ('W2','作業者 二郎') RETURNING id`)).id;
-  const contact = (await one(`INSERT INTO app.customer_contacts(customer_id,code,name,email,send_daily) VALUES ($1,'K1','担当','tanto@example.com',true) RETURNING id`, [m['customer']])).id;
-  await db.pool.query(`INSERT INTO app.product_contacts(product_id,contact_id,purpose) VALUES ($1,$2,'DAILY')`, [m['pA'], contact]);
+  m['w1'] = await master('workers', { code: 'W1', name: '作業者 一郎' });
+  m['w2'] = await master('workers', { code: 'W2', name: '作業者 二郎' });
+  await master('contacts', { customerId: m['customer'], code: 'K1', name: '担当', email: 'tanto@example.com', sendDaily: true, dailyProductIds: [m['pA']] });
   // pNoMail には DAILY 担当なし（宛先0件 → 帳票は作成、送信は FAILED_FINAL）
 }, 120_000);
 
 afterAll(async () => {
-  await db?.drop();
+  await t?.close();
 });
 
 describe('G4: 帳票 job（T-DOC-001 placeholder 残存は先に検査）', () => {
@@ -143,21 +172,25 @@ describe('G4: 帳票 job（T-DOC-001 placeholder 残存は先に検査）', () =
     const job = await jobFor(r.id, 'work');
     expect(job).toMatchObject({ status: 'FAILED_FINAL', error_code: 'TEMPLATE_INVALID', file_id: null });
     expect(renderer.calls).toBe(0);
-    expect(Number((await one<{ n: string }>('SELECT count(*) n FROM app.mail_jobs WHERE document_job_id = $1', [job.id])).n)).toBe(0);
-    expect((await one<{ status: string }>('SELECT status FROM app.work_reports WHERE id = $1', [r.id])).status).toBe('CONFIRMED');
-    expect(Number((await one<{ n: string }>(`SELECT count(*) n FROM app.audit_events WHERE action='DOCUMENT_FAILED' AND target_id=$1`, [job.id])).n)).toBe(1);
-    expect(Number((await one<{ n: string }>(`SELECT count(*) n FROM app.outbox_events WHERE event_type='DocumentFailed' AND aggregate_id=$1`, [job.id])).n)).toBe(1);
+    expect(await mailJobs(job.id)).toHaveLength(0);
+    expect((await header('work', r.id)).status).toBe('CONFIRMED');
+    expect((await header('work', r.id)).documentStatus).toBe('FAILED_FINAL');
+    expect((await auditEventsFor(t.store, 'DOCUMENT_JOB', job.id)).filter((a) => a.action === 'DOCUMENT_FAILED')).toHaveLength(1);
+    expect(await outboxCount('DocumentFailed', job.id)).toBe(1);
     // この試験で registry に登録された改変版を消す（以降は正規の template を使う）
-    await db.pool.query(`DELETE FROM app.template_versions`);
+    const reg = await t.store.query(C.templateVersions);
+    await t.store.runTransaction(async (tx) => {
+      for (const x of reg) tx.delete(x.path);
+    });
   });
 });
 
 describe('CHG-005: 作業結果報告書（DAILY_REPORT_V2）', () => {
   it('新しく確定した日報は V2 様式: 和暦・作業者ごとの時間・担当者・作業場所・使用車・内訳・総時間数・備考', async () => {
-    const loc = (await one(`INSERT INTO app.work_locations(code,name) VALUES ('L1','三成興業 作業場') RETURNING id`)).id;
-    const car = (await one(`INSERT INTO app.vehicles(code,name) VALUES ('V1','キャラバン') RETURNING id`)).id;
-    await one(`INSERT INTO app.defect_types(product_id,code,name,sort_order) VALUES ($1,'D2','注入口',2) RETURNING id`, [m['pA']]);
-    const svc = new FieldReportService(db.pool);
+    const loc = await master('work-locations', { code: 'L1', name: '三成興業 作業場' });
+    const car = await master('vehicles', { code: 'V1', name: 'キャラバン' });
+    await master('defects', { productId: m['pA'], code: 'D2', name: '注入口', sortOrder: 2 });
+    const svc = new FieldReportService(t.store);
     const r = await svc.createWork(
       {
         workDate: '2026-10-08', reporterId: fieldUser, customerId: m['customer'] as string, productId: m['pA'] as string, workTypeId: m['wt_pA'] as string,
@@ -171,7 +204,7 @@ describe('CHG-005: 作業結果報告書（DAILY_REPORT_V2）', () => {
     await runOnce(deps(renderer, new FakeSender()));
     const job = await jobFor(r.id, 'work');
     expect(job.status).toBe('GENERATED');
-    expect((await one<{ template_version: string }>('SELECT template_version FROM app.document_jobs WHERE id = $1', [job.id])).template_version).toBe('DAILY_REPORT_V2');
+    expect(job.template_version).toBe('DAILY_REPORT_V2');
     const html = renderer.lastHtml;
     expect(html).not.toMatch(/\{\{/);
     for (const text of ['作業結果報告書', '令和 8 年 10 月 8 日（木）', '担当 様', '三成興業 作業場', 'キャラバン', '［ 作業者 一郎 ］ 9時30分 〜 11時25分', '1.92', '昼休憩 0.00 H', '外観検査', 'バリ　2', '注入口　', '3.83', '特記事項なし', '合成顧客＆&lt;A&gt;']) {
@@ -192,8 +225,8 @@ describe('CHG-004: 日報メール自動送信は既定で無効', () => {
     expect(result.mails).toEqual([]);
     const job = await jobFor(r.id, 'work');
     expect(job.status).toBe('GENERATED');
-    expect((await one<{ status: string }>('SELECT status FROM app.work_reports WHERE id = $1', [r.id])).status).toBe('SUBMITTED');
-    expect(Number((await one<{ n: string }>('SELECT count(*) n FROM app.mail_jobs WHERE document_job_id = $1', [job.id])).n)).toBe(0);
+    expect((await header('work', r.id)).status).toBe('SUBMITTED');
+    expect(await mailJobs(job.id)).toHaveLength(0);
     expect(sender.sent.length).toBe(0);
   });
 });
@@ -207,15 +240,15 @@ describe('G4: 日報 生成 → 提出 → メール（正常系）', () => {
     expect(result.documents).toContain('generated');
     const job = await jobFor(r.id, 'work');
     expect(job.status).toBe('GENERATED');
-    const file = await one<{ storage_key: string; sha256: string; size_bytes: string; mime_type: string; classification: string }>('SELECT * FROM app.files WHERE id = $1', [job.file_id]);
-    expect(file.storage_key).toMatch(new RegExp(`^documents/DAILY_REPORT/${r.reportNo}/${job.id}/日報_2026-10-08_C1_${r.reportNo}_r1\\.pdf$`));
-    const bytes = await readFile(join(storageDir, file.storage_key));
-    expect(createHash('sha256').update(bytes).digest('hex')).toBe(file.sha256.trim());
-    expect(file).toMatchObject({ mime_type: 'application/pdf', classification: 'CONFIDENTIAL' });
-    const header = await one<{ status: string; version: number }>('SELECT status, version FROM app.work_reports WHERE id = $1', [r.id]);
-    expect(header).toEqual({ status: 'SUBMITTED', version: 3 });
-    for (const t of ['DocumentGenerated', 'RecordSubmitted', 'MailSent']) {
-      expect(Number((await one<{ n: string }>(`SELECT count(*) n FROM app.outbox_events WHERE event_type=$1`, [t])).n), t).toBeGreaterThanOrEqual(1);
+    const file = (await t.store.get<FileDoc>(`${C.files}/${job.file_id as string}`)) as FileDoc;
+    expect(file.storageKey).toMatch(new RegExp(`^documents/DAILY_REPORT/${r.reportNo}/${job.id}/日報_2026-10-08_C1_${r.reportNo}_r1\\.pdf$`));
+    const bytes = await readFile(join(storageDir, file.storageKey));
+    expect(createHash('sha256').update(bytes).digest('hex')).toBe(file.sha256);
+    expect(file).toMatchObject({ mimeType: 'application/pdf', classification: 'CONFIDENTIAL' });
+    const h = await header('work', r.id);
+    expect({ status: h.status, version: h.version, documentId: h.documentId, documentStatus: h.documentStatus }).toEqual({ status: 'SUBMITTED', version: 3, documentId: job.id, documentStatus: 'GENERATED' });
+    for (const type of ['DocumentGenerated', 'RecordSubmitted', 'MailSent']) {
+      expect(await outboxCount(type), type).toBeGreaterThanOrEqual(1);
     }
     expect(sender.sent).toHaveLength(1);
     const mail = sender.sent[0];
@@ -223,22 +256,25 @@ describe('G4: 日報 生成 → 提出 → メール（正常系）', () => {
     expect(mail?.to).toEqual(['tanto@example.com']);
     expect(mail?.attachments.map((a) => a.filename)).toEqual([`日報_2026-10-08_C1_${r.reportNo}_r1.pdf`]);
     expect(mail?.text).toContain('自動送信');
-    const mj = await one<{ status: string; provider_message_id: string; recipients: { to: string[] } }>('SELECT * FROM app.mail_jobs WHERE document_job_id = $1', [job.id]);
-    expect(mj).toMatchObject({ status: 'SENT', provider_message_id: 'fake-1' });
+    const mj = (await mailJobs(job.id))[0];
+    expect(mj).toMatchObject({ status: 'SENT', providerMessageId: 'fake-1' });
     // audit には宛先アドレス・本文を残さない（SEC-017）
-    const audit = await one<{ after_data: Record<string, unknown> }>(`SELECT after_data FROM app.audit_events WHERE action='MAIL_SENT' ORDER BY occurred_at DESC LIMIT 1`);
-    expect(JSON.stringify(audit.after_data)).not.toContain('example.com');
+    const audit = (await auditEventsFor(t.store, 'MAIL_JOB', mj?.id as string)).find((a) => a.action === 'MAIL_SENT');
+    expect(audit).toBeDefined();
+    expect(JSON.stringify(audit?.afterData)).not.toContain('example.com');
   });
 
   it('同じ event の再配送でも job は1件（冪等 key）、生成済み job は再処理しない', async () => {
     const r = await confirmWork();
     await runOnce(deps(new FakeRenderer(), new FakeSender()));
-    await db.pool.query(`UPDATE app.outbox_events SET status='PENDING' WHERE event_type='WorkReportConfirmed' AND aggregate_id=$1`, [r.id]);
+    const events = (await t.store.query<OutboxDoc>(C.outbox, { where: [{ field: 'aggregateId', op: '==', value: r.id }] })).filter((o) => o.data.type === 'WorkReportConfirmed');
+    await t.store.runTransaction(async (tx) => {
+      for (const e of events) tx.update(e.path, { status: 'PENDING' });
+    });
     const renderer = new FakeRenderer();
-    await dispatchOutbox(db.pool, clock);
+    await dispatchOutbox(t.store, clock);
     await runOnce(deps(renderer, new FakeSender()));
-    const n = await one<{ n: string }>(`SELECT count(*) n FROM app.document_jobs d JOIN app.work_report_revisions r ON r.id=d.source_id WHERE r.report_id=$1`, [r.id]);
-    expect(Number(n.n)).toBe(1);
+    expect(await t.store.count(C.documents, { where: [{ field: 'reportId', op: '==', value: r.id }] })).toBe(1);
     expect(renderer.calls).toBe(0);
   });
 
@@ -248,8 +284,9 @@ describe('G4: 日報 生成 → 提出 → メール（正常系）', () => {
     await runOnce(deps(new FakeRenderer(), sender));
     const job = await jobFor(r.id, 'work');
     expect(job.status).toBe('GENERATED');
-    expect((await one<{ status: string }>('SELECT status FROM app.work_reports WHERE id = $1', [r.id])).status).toBe('SUBMITTED');
-    expect(await one('SELECT status, error_code FROM app.mail_jobs WHERE document_job_id = $1', [job.id])).toEqual({ status: 'FAILED_FINAL', error_code: 'RECIPIENT_EMPTY' });
+    expect((await header('work', r.id)).status).toBe('SUBMITTED');
+    const mj = (await mailJobs(job.id))[0];
+    expect({ status: mj?.status, error_code: mj?.errorCode }).toEqual({ status: 'FAILED_FINAL', error_code: 'RECIPIENT_EMPTY' });
     expect(sender.sent).toHaveLength(0);
   });
 });
@@ -278,7 +315,7 @@ describe('G4: 再試行（network/5xx のみ、10s/30s/…、最大5回）', () 
       clock = new Date(clock.getTime() + 1_900_000);
     }
     expect(await jobFor(r.id, 'work')).toMatchObject({ status: 'FAILED_FINAL', attempts: 6 });
-    expect((await one<{ status: string }>('SELECT status FROM app.work_reports WHERE id = $1', [r.id])).status).toBe('CONFIRMED');
+    expect((await header('work', r.id)).status).toBe('CONFIRMED');
   });
 
   it('T-MAIL-001: 送信後に timeout → 再試行時は provider を検索して重複送信 0', async () => {
@@ -287,18 +324,20 @@ describe('G4: 再試行（network/5xx のみ、10s/30s/…、最大5回）', () 
     sender.timeoutAfterSend = true;
     await runOnce(deps(new FakeRenderer(), sender));
     const job = await jobFor(r.id, 'work');
-    expect(await one('SELECT status, attempts FROM app.mail_jobs WHERE document_job_id = $1', [job.id])).toEqual({ status: 'FAILED_RETRYABLE', attempts: 1 });
+    const m1 = (await mailJobs(job.id))[0];
+    expect({ status: m1?.status, attempts: m1?.attempts }).toEqual({ status: 'FAILED_RETRYABLE', attempts: 1 });
     clock = new Date(clock.getTime() + 11_000);
     await runOnce(deps(new FakeRenderer(), sender));
-    expect(await one('SELECT status, attempts, provider_message_id FROM app.mail_jobs WHERE document_job_id = $1', [job.id])).toEqual({ status: 'SENT', attempts: 2, provider_message_id: 'fake-1' });
+    const m2 = (await mailJobs(job.id))[0];
+    expect({ status: m2?.status, attempts: m2?.attempts, provider_message_id: m2?.providerMessageId }).toEqual({ status: 'SENT', attempts: 2, provider_message_id: 'fake-1' });
     expect(sender.sent).toHaveLength(1);
   });
 
   it('lease 切れの PROCESSING は再取得、lease 内は取得しない', async () => {
     const r = await confirmWork();
-    await dispatchOutbox(db.pool, clock);
+    await dispatchOutbox(t.store, clock);
     const job = await jobFor(r.id, 'work');
-    await db.pool.query(`UPDATE app.document_jobs SET status='PROCESSING', updated_at=$2 WHERE id=$1`, [job.id, new Date(clock.getTime() - 60_000).toISOString()]);
+    await t.store.runTransaction(async (tx) => tx.update(`${C.documents}/${job.id}`, { status: 'PROCESSING', updatedAt: new Date(clock.getTime() - 60_000) }));
     await runOnce(deps(new FakeRenderer(), new FakeSender()));
     expect((await jobFor(r.id, 'work')).status).toBe('PROCESSING');
     clock = new Date(clock.getTime() + 300_000);
@@ -319,24 +358,24 @@ describe('G4: 運搬帳票（CHG-003）・実 Chromium・Mailpit adapter', () =>
     }
     const job = await jobFor(r.id, 'delivery');
     expect(job.status, JSON.stringify(job)).toBe('GENERATED');
-    const file = await one<{ storage_key: string }>('SELECT storage_key FROM app.files WHERE id=$1', [job.file_id]);
-    expect(file.storage_key).toContain(`運搬_2026-10-08_C1_${r.reportNo}_r1.pdf`);
-    const pdf = await readFile(join(storageDir, file.storage_key));
+    const file = (await t.store.get<FileDoc>(`${C.files}/${job.file_id as string}`)) as FileDoc;
+    expect(file.storageKey).toContain(`運搬_2026-10-08_C1_${r.reportNo}_r1.pdf`);
+    const pdf = await readFile(join(storageDir, file.storageKey));
     expect(pdf.subarray(0, 5).toString()).toBe('%PDF-');
     expect(pdf.toString('latin1')).toMatch(/NotoSansJP/);
-    expect((await one<{ status: string }>('SELECT status FROM app.delivery_reports WHERE id = $1', [r.id])).status).toBe('SUBMITTED');
-    expect(Number((await one<{ n: string }>('SELECT count(*) n FROM app.mail_jobs WHERE document_job_id = $1', [job.id])).n)).toBe(0);
+    expect((await header('delivery', r.id)).status).toBe('SUBMITTED');
+    expect(await mailJobs(job.id)).toHaveLength(0);
     expect(sender.sent).toHaveLength(0);
     // 目視確認用に保存（batch で開ける場所）
     const out = process.env['G4_SAMPLE_DIR'];
     if (out) {
       await mkdir(out, { recursive: true });
-      await copyFile(join(storageDir, file.storage_key), join(out, 'sample-delivery-report.pdf'));
+      await copyFile(join(storageDir, file.storageKey), join(out, 'sample-delivery-report.pdf'));
     }
   });
 
-  it('Mailpit adapter: 送信 → 同じ Message-ID は findSent で検出、未知は null', async () => {
-    if (MAILPIT_URL === undefined) throw new Error('MAILPIT_URL が未設定です（docker compose up -d mailpit）');
+  // Mailpit（開発用メール受信）が無い環境（サンドボックス）では省略。Cloud Shell のバッチは MAILPIT_URL を設定する
+  it.skipIf(MAILPIT_URL === undefined)('Mailpit adapter: 送信 → 同じ Message-ID は findSent で検出、未知は null', async () => {
     const sender = new MailpitMailSender(MAILPIT_URL, 'inspexor-itest@example.invalid');
     const messageId = `<itest-${Date.now()}@mail.inspexor>`;
     expect(await sender.findSent(messageId)).toBeNull();

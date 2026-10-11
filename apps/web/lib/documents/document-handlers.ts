@@ -2,12 +2,11 @@
  * API-024 GET /documents/{id}、API-025 POST /documents/{id}/{action}（Idempotency-Key 必須）。
  * 入口ガード（認証→CSRF→認可）は createApiHandler、ここでは path → Zod → DocumentService。
  */
-import type { Pool } from 'pg';
+import type { IdempotencyRepository } from '@inspexor/application';
 import { createApiHandler, type ApiContext, type ApiHandlerDeps } from '../http/api-handler';
 import { dataResponse, errorResponse } from '../http/api-response';
 import { zodIssueMessageJa, type ZodIssueLike } from '../http/zod-messages';
 import { beginIdempotentRequest, computeRequestHash } from '../idempotency/idempotency-service';
-import { PgIdempotencyRepository } from '../db/pg-idempotency-repository';
 import { fieldCommandSchema } from '../field/schemas';
 import { DOCUMENT_ACTIONS, DocumentError, type DocumentAction, type DocumentService } from './document-service';
 
@@ -15,7 +14,8 @@ const UUID_RE = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 
 export interface DocumentRouteDeps {
   readonly service: () => DocumentService;
-  readonly pool: () => Pool;
+  /** CHG-006: 冪等性の保存先（Firestore） */
+  readonly idempotency: () => IdempotencyRepository;
   readonly api: () => ApiHandlerDeps;
 }
 
@@ -89,7 +89,7 @@ export function documentActionHandlers(deps: DocumentRouteDeps) {
       }
       const actor = actorOf(ctx);
       const route = `POST /documents/${id}/${action}`;
-      const repo = new PgIdempotencyRepository(deps.pool());
+      const repo = deps.idempotency();
       const begin = await beginIdempotentRequest(repo, { actorId: actor.userId, route, key: ctx.idempotencyKey as string }, computeRequestHash('POST', route, raw), ctx.now);
       if (begin.kind === 'REPLAY') {
         return Response.json(begin.responseBody, { status: begin.responseStatus, headers: { 'x-correlation-id': ctx.correlationId, 'idempotent-replayed': 'true' } });

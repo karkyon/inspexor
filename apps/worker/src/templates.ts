@@ -7,7 +7,18 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { escapeHtml, formatMinutes, hoursLabel, jaClock, missingPlaceholders, toJstParts, toWareki, type TemplateType, type TemplateValue } from '@inspexor/domain';
-import type { Queryable } from './db';
+import {
+  C,
+  reportPath,
+  revisionPath,
+  templateVersionPath,
+  type DeliveryRevisionDoc,
+  type DocReader,
+  type DocStore,
+  type ReportHeaderDoc,
+  type TemplateVersionDoc,
+  type WorkRevisionDoc,
+} from '@inspexor/docstore';
 
 const TEMPLATE_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'templates');
 
@@ -34,14 +45,16 @@ export function loadFixtureTemplate(type: TemplateType, dir = TEMPLATE_DIR): Loa
 /**
  * registry に登録（無ければ追加）。登録済みの sha256 と原本が違う場合は使わない（version 固定の破れ＝TEMPLATE_INVALID）。
  */
-export async function ensureRegistered(db: Queryable, t: LoadedTemplate, now: Date): Promise<'ok' | 'hash_mismatch'> {
-  await db.query(
-    `INSERT INTO app.template_versions (template_type, version, provider_template_id, sha256, active_from)
-     VALUES ($1, $2, $3, $4, $5) ON CONFLICT (template_type, version) DO NOTHING`,
-    [t.type, 'V1', t.providerTemplateId, t.sha256, now.toISOString()],
-  );
-  const r = await db.query<{ sha256: string }>('SELECT sha256 FROM app.template_versions WHERE template_type = $1 AND version = $2', [t.type, 'V1']);
-  return r.rows[0]?.sha256.trim() === t.sha256 ? 'ok' : 'hash_mismatch';
+export async function ensureRegistered(store: DocStore, t: LoadedTemplate, now: Date): Promise<'ok' | 'hash_mismatch'> {
+  const path = templateVersionPath(t.type, 'V1');
+  const current = await store.runTransaction(async (tx) => {
+    const found = await tx.get<TemplateVersionDoc>(path);
+    if (found !== null) return found;
+    const doc: TemplateVersionDoc = { templateType: t.type, version: 'V1', providerTemplateId: t.providerTemplateId, sha256: t.sha256, activeFrom: now };
+    tx.create(path, doc);
+    return doc;
+  });
+  return current.sha256 === t.sha256 ? 'ok' : 'hash_mismatch';
 }
 
 const n = (v: number) => v.toLocaleString('ja-JP');
@@ -66,32 +79,69 @@ export const WORKER_ROWS_MIN = 10;
  * 作業 revision（確定済み）→ 日報の値。確定版だけを対象にする（未確定なら null）。
  * type: DAILY_REPORT_V1（G4 の仮様式）/ DAILY_REPORT_V2（CHG-005: 現行「作業結果報告書」様式）。帳票 job の版に合わせる
  */
-export async function workSnapshot(db: Queryable, revisionId: string, type: 'DAILY_REPORT_V1' | 'DAILY_REPORT_V2' = 'DAILY_REPORT_V2'): Promise<DocumentSnapshot | null> {
-  const r = await db.query(
-    `SELECT r.*, h.report_no, h.id AS header_id, c.code AS customer_code, c.name AS customer_name, p.code AS product_code, p.name AS product_name,
-            wt.name AS work_type_name, u.display_name AS reporter_name, loc.name AS work_location_name, v.name AS vehicle_name
-       FROM app.work_report_revisions r
-       JOIN app.work_reports h ON h.id = r.report_id
-       JOIN app.customers c ON c.id = r.customer_id
-       JOIN app.products p ON p.id = r.product_id
-       JOIN app.work_types wt ON wt.id = r.work_type_id
-       JOIN app.users u ON u.id = r.reporter_id
-       LEFT JOIN app.work_locations loc ON loc.id = r.work_location_id
-       LEFT JOIN app.vehicles v ON v.id = r.vehicle_id
-      WHERE r.id = $1 AND r.confirmed_at IS NOT NULL`,
-    [revisionId],
-  );
-  const row = r.rows[0] as Record<string, unknown> | undefined;
-  if (row === undefined) return null;
-  const workers = await db.query<{ name: string }>(
-    `SELECT w.name FROM app.work_report_workers x JOIN app.workers w ON w.id = x.worker_id WHERE x.revision_id = $1 ORDER BY w.code, w.id`,
-    [revisionId],
-  );
-  const defects = await db.query<{ name: string; quantity: number }>(
-    `SELECT t.name, d.quantity FROM app.defect_results d JOIN app.defect_types t ON t.id = d.defect_type_id
-      WHERE d.revision_id = $1 ORDER BY t.sort_order, t.code`,
-    [revisionId],
-  );
+/** 帳票の元（確定済みの版）。document job が持つ */
+export interface SnapshotSource {
+  readonly reportId: string;
+  readonly revisionId: string;
+}
+
+interface Named {
+  code: string;
+  name: string;
+  active: boolean;
+}
+
+async function named(db: DocReader, collection: string, id: string | null): Promise<Named | null> {
+  if (id === null) return null;
+  return db.get<Named>(`${collection}/${id}`);
+}
+
+export async function workSnapshot(db: DocReader, src: SnapshotSource, type: 'DAILY_REPORT_V1' | 'DAILY_REPORT_V2' = 'DAILY_REPORT_V2'): Promise<DocumentSnapshot | null> {
+  const rev = await db.get<WorkRevisionDoc>(revisionPath('WORK', src.reportId, src.revisionId));
+  const header = await db.get<ReportHeaderDoc>(reportPath('WORK', src.reportId));
+  if (rev === null || header === null || rev.confirmedAt === null) return null;
+  const [customer, product, workType, location, vehicle] = await Promise.all([
+    named(db, C.customers, rev.customerId),
+    named(db, C.products, rev.productId),
+    named(db, C.workTypes, rev.workTypeId),
+    named(db, C.workLocations, rev.workLocationId),
+    named(db, C.vehicles, rev.vehicleId),
+  ]);
+  const reporter = await db.get<{ displayName: string }>(`${C.users}/${rev.reporterId}`);
+  if (customer === null || product === null || workType === null) return null;
+  const workerDocs = await db.getMany<Named>(rev.workerIds.map((id) => `${C.workers}/${id}`));
+  // 作業者は版に作業者コード順で保存済み
+  const workers = { rows: workerDocs.filter((w): w is Named => w !== null).map((w) => ({ name: w.name })) };
+  // 不良は版に不良種の並び順（sortOrder, code）で保存済み
+  const defectDocs = await db.getMany<Named>(rev.defects.map((d) => `${C.defectTypes}/${d.defectTypeId}`));
+  const defects = { rows: rev.defects.map((d, i) => ({ name: defectDocs[i]?.name ?? '', quantity: d.quantity })) };
+  const row: Record<string, unknown> = {
+    report_no: header.reportNo,
+    header_id: src.reportId,
+    revision_no: rev.revisionNo,
+    confirmed_at: rev.confirmedAt,
+    work_date: rev.workDate,
+    start_at: rev.startAt,
+    end_at: rev.endAt,
+    customer_code: customer.code,
+    customer_name: customer.name,
+    customer_id: rev.customerId,
+    product_code: product.code,
+    product_name: product.name,
+    product_id: rev.productId,
+    work_type_name: workType.name,
+    reporter_name: reporter?.displayName ?? '',
+    work_location_name: location?.name ?? null,
+    vehicle_name: vehicle?.name ?? null,
+    lot_no: rev.lotNo,
+    quantity: rev.quantity,
+    break_minutes: rev.breakMinutes,
+    regular_minutes: rev.regularMinutes,
+    overtime_minutes: rev.overtimeMinutes,
+    regular_person_minutes: rev.regularPersonMinutes,
+    overtime_person_minutes: rev.overtimePersonMinutes,
+    remarks: rev.remarks,
+  };
   const total = defects.rows.reduce((s, d) => s + d.quantity, 0);
   const rows = defects.rows.filter((d) => d.quantity > 0);
   const start = toJstParts(row['start_at'] as Date);
@@ -109,18 +159,22 @@ export async function workSnapshot(db: Queryable, revisionId: string, type: 'DAI
   };
   if (type === 'DAILY_REPORT_V2') {
     // 担当者: 品番の日報担当（お客様担当者マスタ）。未登録なら空欄
-    const contact = await db.query<{ name: string }>(
-      `SELECT c.name FROM app.product_contacts pc JOIN app.customer_contacts c ON c.id = pc.contact_id
-        WHERE pc.product_id = $1 AND pc.purpose = 'DAILY' AND c.active ORDER BY c.code, c.id LIMIT 1`,
-      [row['product_id']],
-    );
+    const contacts = await db.query<{ name: string; code: string; customerId: string; active: boolean }>(C.customerContacts, {
+      where: [{ field: 'dailyProductIds', op: 'array-contains', value: rev.productId }],
+    });
+    const contactRow = contacts
+      .filter((c) => c.data.active)
+      .sort((x, y) => (x.data.code < y.data.code ? -1 : x.data.code > y.data.code ? 1 : x.id < y.id ? -1 : 1))[0];
+    const contact = { rows: contactRow === undefined ? [] : [{ name: contactRow.data.name }] };
     // 内訳: 品番の不良種別すべて（有効）＋実績。0 は空欄（現行帳票と同じ）
-    const types = await db.query<{ id: string; name: string; quantity: number | null }>(
-      `SELECT t.id, t.name, d.quantity FROM app.defect_types t
-         LEFT JOIN app.defect_results d ON d.defect_type_id = t.id AND d.revision_id = $2
-        WHERE t.product_id = $1 AND (t.active OR d.quantity IS NOT NULL) ORDER BY t.sort_order, t.code`,
-      [row['product_id'], revisionId],
-    );
+    const qty = new Map(rev.defects.map((d) => [d.defectTypeId, d.quantity]));
+    const allTypes = await db.query<{ name: string; code: string; sortOrder: number; active: boolean }>(C.defectTypes, { where: [{ field: 'productId', op: '==', value: rev.productId }] });
+    const types = {
+      rows: allTypes
+        .filter((t) => t.data.active || qty.has(t.id))
+        .sort((x, y) => x.data.sortOrder - y.data.sortOrder || (x.data.code < y.data.code ? -1 : x.data.code > y.data.code ? 1 : 0))
+        .map((t) => ({ id: t.id, name: t.data.name, quantity: qty.get(t.id) ?? null })),
+    };
     const actual = (row['regular_minutes'] as number) + (row['overtime_minutes'] as number);
     const span = `${jaClock(start.time)} 〜 ${jaClock(endTime)}`;
     const rowCount = Math.max(WORKER_ROWS_MIN, workers.rows.length);
@@ -208,23 +262,26 @@ export async function workSnapshot(db: Queryable, revisionId: string, type: 'DAI
 }
 
 /** 運搬 revision（確定済み）→ DELIVERY_REPORT_V1 の値（CHG-003） */
-export async function deliverySnapshot(db: Queryable, revisionId: string): Promise<DocumentSnapshot | null> {
-  const r = await db.query(
-    `SELECT r.*, h.report_no, h.id AS header_id, c.code AS customer_code, c.name AS customer_name, w.name AS driver_name
-       FROM app.delivery_report_revisions r
-       JOIN app.delivery_reports h ON h.id = r.report_id
-       JOIN app.customers c ON c.id = r.customer_id
-       JOIN app.workers w ON w.id = r.driver_id
-      WHERE r.id = $1 AND r.confirmed_at IS NOT NULL`,
-    [revisionId],
-  );
-  const row = r.rows[0] as Record<string, unknown> | undefined;
-  if (row === undefined) return null;
-  const items = await db.query<{ code: string; name: string; quantity: number }>(
-    `SELECT p.code, p.name, i.quantity FROM app.delivery_items i JOIN app.products p ON p.id = i.product_id
-      WHERE i.delivery_revision_id = $1 ORDER BY p.code, p.id`,
-    [revisionId],
-  );
+export async function deliverySnapshot(db: DocReader, src: SnapshotSource): Promise<DocumentSnapshot | null> {
+  const rev = await db.get<DeliveryRevisionDoc>(revisionPath('DELIVERY', src.reportId, src.revisionId));
+  const header = await db.get<ReportHeaderDoc>(reportPath('DELIVERY', src.reportId));
+  if (rev === null || header === null || rev.confirmedAt === null) return null;
+  const customer = await named(db, C.customers, rev.customerId);
+  const driver = await named(db, C.workers, rev.driverId);
+  if (customer === null || driver === null) return null;
+  // 明細は版に品番コード順で保存済み
+  const productDocs = await db.getMany<Named>(rev.items.map((i) => `${C.products}/${i.productId}`));
+  const items = { rows: rev.items.map((i, k) => ({ code: productDocs[k]?.code ?? '', name: productDocs[k]?.name ?? '', quantity: i.quantity })) };
+  const row: Record<string, unknown> = {
+    report_no: header.reportNo,
+    header_id: src.reportId,
+    revision_no: rev.revisionNo,
+    delivery_date: rev.deliveryDate,
+    driver_name: driver.name,
+    customer_code: customer.code,
+    customer_name: customer.name,
+    confirmed_at: rev.confirmedAt,
+  };
   const date = row['delivery_date'] as string;
   return {
     type: 'DELIVERY_REPORT_V1',

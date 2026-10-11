@@ -54,8 +54,8 @@ PostgreSQL が DB 側で保証していた次の制約は、**アプリの trans
 
 | 項目 | 現行（開発） | 変更後 |
 |---|---|---|
-| 帳票作成（worker） | 2秒ごとに outbox を見に行く常駐プロセス | **Cloud Run（使わない時は0台）**。web が確定を保存した直後に worker を呼び出す。呼び出し失敗に備えて Cloud Scheduler が10分ごとにも起動する |
-| PDF の保存先 | Cloud Shell のディスク | **Cloud Storage**（公開禁止バケット、東京リージョン）。web は署名付き URL の検証後に Cloud Storage から読んで返す |
+| 帳票作成（worker） | 2秒ごとに outbox を見に行く常駐プロセス | **Cloud Run（使わない時は0台）**。Cloud Scheduler が1分ごとに worker（`POST /run`）を起動し、仕事が無くなるまで処理する（REQ-DOC-001「60秒内に受付・5分内に生成」を満たす）。開発環境（Cloud Shell）は従来どおり常駐（5秒ごと） |
+| PDF の保存先 | Cloud Shell のディスク | **Cloud Storage**（公開禁止・均一アクセスのバケット、東京リージョン）。web は署名付き URL（10分）の検証後に Cloud Storage から読んで返す（利用者に Cloud Storage の URL は渡さない） |
 | 日次バックアップ | Cloud SQL 自動バックアップ（未設定） | **Cloud Scheduler が毎日 Firestore を Cloud Storage へ書き出す**（提案書 P.12 のとおり）。保存 30 日 |
 | 一覧の絞込 | SQL の JOIN | ヘッダの要約項目で検索（品番は配列の包含検索）。種別をまたぐ並べ替えはアプリで行う |
 | 月次集計 | SQL で集計 | 対象月の確定済み報告（月 約500件）を読み、既存の domain 集計関数で集計 |
@@ -69,7 +69,7 @@ PostgreSQL が DB 側で保証していた次の制約は、**アプリの trans
 | Firestore 保存容量・バックアップ書き出し | 数十〜100円 |
 | Cloud Run（web・worker、0台から起動） | 無料枠内〜少額 |
 | Cloud Storage（PDF・バックアップ、東京） | 数十〜数百円 |
-| Cloud Scheduler（2ジョブ） | 無料枠内（3ジョブまで無料） |
+| Cloud Scheduler（2ジョブ: worker 起動1分ごと・日次バックアップ） | 無料枠内（3ジョブまで無料）。worker の起動は月 約4.3万回で Cloud Run の無料枠内、空振り時の Firestore 読込は1日 約4,300回 |
 | 合計 | 月 ¥数百〜1,500（提案書どおり）。予算アラートを ¥2,000 で設定 |
 
 注: 0台から起動するため、朝一番や久しぶりの操作では最初の画面表示に数秒かかる（提案書の構成と同じ性質）。
@@ -102,7 +102,7 @@ PostgreSQL が DB 側で保証していた次の制約は、**アプリの trans
 - そのため、サンドボックスでは Firestore の動きを模した試験用の代替実装で単体試験を行い、**正式な結合試験はあなたの Cloud Shell で Firestore エミュレータを起動して実行**する（各バッチに組み込む）。E2E は開発用の実 Firestore で実行する。
 - バッチの完了は、Cloud Shell での結合試験と E2E の合格をもって判断する。
 
-## 9. 実装で確定した扱い（g20〜g22）
+## 9. 実装で確定した扱い（g20〜g23）
 
 | 項目 | 扱い |
 |---|---|
@@ -112,3 +112,6 @@ PostgreSQL が DB 側で保証していた次の制約は、**アプリの trans
 | 運搬明細の按分対象 | F1 により常に false（運搬ルールを移行しないため） |
 | 確定済みの版の不変 | DB trigger の代わりに、確定済みの版を書き換える処理を持たない（修正は新しい版）＋ Security Rules でクライアントからの書込を全面禁止 |
 | 複合索引 | `infra/firestore/firestore.indexes.json`（報告一覧用 10 件）。試験用 MemoryDocStore が同じ定義で検査し、実 Firestore では `scripts/firestore-index-check.ts` で全検索の実行を確認する |
+| 帳票 job・メール job の ID | 冪等 key から決めた UUID（同じ key の job は1件。PostgreSQL の UNIQUE(idempotency_key) の代わり） |
+| 帳票状態（一覧・詳細の documentStatus） | 報告ヘッダの documentId（最新の版の最新の帳票）と documentStatus を worker が更新する。修正（新しい版）で一旦 null に戻る |
+| worker の実行形態 | `WORKER_MODE=http`（本番）: `POST /run` で仕事が無くなるまで処理（上限4分）。`poll`（開発）: 5秒ごと |

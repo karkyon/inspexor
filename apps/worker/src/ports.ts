@@ -1,6 +1,6 @@
 /**
  * worker の外部依存 port（開発スタック定義書 §6: provider は port/adapter 化し fixture adapter も同じ契約で試験）。
- * 本番 adapter（Cloud Storage / Gmail）は G9 で接続（EXT-03・バケット未提供のため EXTERNAL-BLOCKED）。
+ * Gmail adapter は G9（日報メールは CHG-004 で既定無効）。
  */
 export class AdapterError extends Error {
   constructor(
@@ -13,14 +13,8 @@ export class AdapterError extends Error {
   }
 }
 
-export interface StoredObject {
-  readonly bytes: Buffer;
-}
-
-export interface StorageAdapter {
-  put(key: string, bytes: Buffer, mimeType: string): Promise<void>;
-  get(key: string): Promise<StoredObject>;
-}
+/** 保存先は @inspexor/docstore の StorageAdapter（Cloud Storage / ローカル）を使う（CHG-006） */
+export type { StorageAdapter, StoredObject } from '@inspexor/docstore';
 
 export interface PdfRenderer {
   /** 完成済み HTML（placeholder 置換済み）→ PDF bytes */

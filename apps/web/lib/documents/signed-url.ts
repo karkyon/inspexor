@@ -1,10 +1,8 @@
 /**
- * 帳票の署名付き URL（SEC-013: 10分、scoped authorization 後に発行）。開発用 storage adapter 向け:
- * `/api/files/{fileId}?exp={unix秒}&sig={HMAC-SHA256}`。本番は Cloud Storage の V4 署名 URL（G9）。
+ * 帳票の署名付き URL（SEC-013: 10分、scoped authorization 後に発行）:
+ * `/api/files/{fileId}?exp={unix秒}&sig={HMAC-SHA256}`。CHG-006: 本番（Cloud Storage）も同じ配信口から返す。
  */
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 
 export const SIGNED_URL_TTL_SECONDS = 600;
 
@@ -24,9 +22,4 @@ export function verifyFileSignature(fileId: string, expRaw: string | null, sig: 
   const expected = Buffer.from(signature(fileId, exp, secret));
   const actual = Buffer.from(sig);
   return expected.length === actual.length && timingSafeEqual(expected, actual);
-}
-
-/** worker の LocalFsStorage と同じ場所（開発用） */
-export function storageDir(): string {
-  return process.env['STORAGE_DIR'] ?? join(homedir(), '.inspexor-storage');
 }

@@ -1,6 +1,7 @@
 /**
  * G4 統合試験（web 側。worker の runOnce と組合わせるため worker パッケージに置く）（API-024 getDocument / API-025 documentAction / 署名付き URL / FR-018・SEC-013）。
- * web の handler（入口ガード込み）と worker の runOnce（試験用 renderer・sender）を同じ fresh DB で通す。
+ * web の handler（入口ガード込み）と worker の runOnce（試験用 renderer・sender）を同じ DocStore で通す。
+ * CHG-006: Firestore（エミュレータ、無ければ MemoryDocStore）。
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtemp } from 'node:fs/promises';
@@ -9,8 +10,23 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import type { RoleCode } from '@inspexor/domain';
 import { jstToInstant } from '@inspexor/domain';
-import { createFreshDatabase, insertUser, type FreshDatabase } from '../../web/lib/testing/fresh-db';
-import { PgAuditRepository } from '../../web/lib/db/pg-audit-repository';
+import {
+  auditEventsFor,
+  C,
+  createUser,
+  DocIdempotencyRepository,
+  LocalFsStorage,
+  StoreAuditRepository,
+  type DocumentJobDoc,
+  type MailJobDoc,
+  type OutboxDoc,
+  type ReportHeaderDoc,
+} from '@inspexor/docstore';
+import { createTestStore, type TestStore } from '@inspexor/docstore/testing';
+import { setDocStoreForTest } from '../../web/lib/db/docstore';
+import { MasterService } from '../../web/lib/masters/master-service';
+import { MASTER_DEFS, type MasterType } from '../../web/lib/masters/definitions';
+import { writeSchema } from '../../web/lib/masters/schemas';
 import { issueSessionToken } from '../../web/lib/auth/session-token';
 import { SESSION_COOKIE_NAME } from '../../web/lib/auth/session-cookie';
 import { issueCsrfToken } from '../../web/lib/security/csrf';
@@ -19,12 +35,11 @@ import { fieldItemHandlers, recordListHandlers, type FieldRouteDeps } from '../.
 import { DocumentService } from '../../web/lib/documents/document-service';
 import { documentActionHandlers, documentItemHandlers, type DocumentRouteDeps } from '../../web/lib/documents/document-handlers';
 import { runOnce } from './worker';
-import { LocalFsStorage } from './adapters/local-fs-storage';
 import type { MailMessage, MailSender, PdfRenderer } from './ports';
 
 const SECRET = 'd'.repeat(32);
 const NOW = new Date('2026-10-08T03:00:00.000Z');
-let db: FreshDatabase;
+let t: TestStore;
 let storage: string;
 const users: Record<string, string> = {};
 const m: Record<string, string> = {};
@@ -46,8 +61,22 @@ const sender: MailSender = {
   },
 };
 
-async function one<T = { id: string }>(sql: string, params: unknown[] = []): Promise<T> {
-  return (await db.pool.query(sql, params)).rows[0] as T;
+async function master(type: MasterType, input: Record<string, unknown>): Promise<string> {
+  const parsed = writeSchema(MASTER_DEFS[type]).parse(input) as Record<string, unknown>;
+  return (await new MasterService(t.store).create(type, parsed, { actorId: 'itest', correlationId: '11111111-1111-4111-8111-111111111111', now: NOW })).id;
+}
+
+async function mailJobs(documentJobId: string): Promise<Array<MailJobDoc & { id: string }>> {
+  return (await t.store.query<MailJobDoc>(C.mailJobs, { where: [{ field: 'documentJobId', op: '==', value: documentJobId }] }))
+    .map((r) => ({ ...r.data, id: r.id }))
+    .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.sendRevision - b.sendRevision);
+}
+
+async function setSendDaily(value: boolean): Promise<void> {
+  const rows = await t.store.query(C.customerContacts);
+  await t.store.runTransaction(async (tx) => {
+    for (const r of rows) tx.update(r.path, { sendDaily: value });
+  });
 }
 
 type Who = 'field' | 'field2' | 'office' | 'auditor';
@@ -62,10 +91,11 @@ function req(who: Who, method: string, path: string, body?: unknown, headers: Re
   });
 }
 
-const api = () => ({ sessionSecret: SECRET, now: () => NOW, auditRepository: new PgAuditRepository(db.pool), logError: () => undefined });
-const docDeps = (): DocumentRouteDeps => ({ service: () => new DocumentService(db.pool, SECRET, true), pool: () => db.pool, api });
-const fieldDeps = (): FieldRouteDeps => ({ service: () => new FieldReportService(db.pool), pool: () => db.pool, api });
-const worker = () => runOnce({ pool: db.pool, storage: new LocalFsStorage(storage), pdf: renderer, sender, now: () => new Date(), dailyMailEnabled: true });
+const api = () => ({ sessionSecret: SECRET, now: () => NOW, auditRepository: new StoreAuditRepository(t.store), logError: () => undefined });
+const idem = () => new DocIdempotencyRepository(t.store, () => NOW);
+const docDeps = (): DocumentRouteDeps => ({ service: () => new DocumentService(t.store, SECRET, true), idempotency: idem, api });
+const fieldDeps = (): FieldRouteDeps => ({ service: () => new FieldReportService(t.store), idempotency: idem, api });
+const worker = () => runOnce({ store: t.store, storage: new LocalFsStorage(storage), pdf: renderer, sender, now: () => new Date(), dailyMailEnabled: true });
 type Json = { data?: Record<string, unknown>; error?: { code: string; fields?: Array<{ path: string }> } };
 const json = async (r: Response) => (await r.json()) as Json;
 const ctx = () => ({ actor: { userId: users['field'] as string, roles: ['FIELD'] }, correlationId: '00000000-0000-4000-8000-000000000002', now: NOW });
@@ -76,40 +106,36 @@ let delivery: { id: string };
 let workDocId: string;
 
 beforeAll(async () => {
-  db = await createFreshDatabase('documents');
+  t = createTestStore('documents');
   storage = await mkdtemp(join(tmpdir(), 'inspexor-doc-'));
   process.env['STORAGE_DIR'] = storage;
+  delete process.env['STORAGE_BUCKET'];
   process.env['AUTH_SECRET'] = SECRET;
-  const url = new URL(process.env['ITEST_DATABASE_URL'] as string);
-  url.pathname = `/${db.name}`;
-  process.env['DATABASE_URL'] = url.toString();
+  // 配信 route（app/api/files）が使う共有 DocStore を試験用に差し替える
+  setDocStoreForTest(t.store);
   for (const [k, role] of [['field', 'FIELD'], ['field2', 'FIELD'], ['office', 'OFFICE'], ['auditor', 'AUDITOR']] as const) {
-    users[k] = await insertUser(db.pool, `doc-${k}`);
-    await db.pool.query('INSERT INTO app.user_roles VALUES ($1, $2)', [users[k], role]);
+    users[k] = (await createUser(t.store, { loginId: `doc-${k}`, passwordHash: 'x', displayName: k, roles: [role] }, NOW)) as string;
   }
-  m['c'] = (await one(`INSERT INTO app.customers(code,name,closing_day) VALUES ('C1','顧客',31) RETURNING id`)).id;
-  m['p'] = (await one(`INSERT INTO app.products(customer_id,code,name,settlement_type) VALUES ($1,'P1','品1','QUANTITY') RETURNING id`, [m['c']])).id;
-  m['wt'] = (await one(`INSERT INTO app.work_types(product_id,code,name) VALUES ($1,'INSP','検査') RETURNING id`, [m['p']])).id;
-  m['w'] = (await one(`INSERT INTO app.workers(code,name) VALUES ('W1','作業者') RETURNING id`)).id;
-  const k = (await one(`INSERT INTO app.customer_contacts(customer_id,code,name,email,send_daily) VALUES ($1,'K1','担当','k1@example.com',true) RETURNING id`, [m['c']])).id;
-  await db.pool.query(`INSERT INTO app.product_contacts VALUES ($1,$2,'DAILY')`, [m['p'], k]);
-  const svc = new FieldReportService(db.pool);
+  m['c'] = await master('customers', { code: 'C1', name: '顧客', closingDay: 31 });
+  m['p'] = await master('products', { customerId: m['c'], code: 'P1', name: '品1', settlementType: 'QUANTITY' });
+  m['wt'] = await master('work-types', { productId: m['p'], code: 'INSP', name: '検査' });
+  m['w'] = await master('workers', { code: 'W1', name: '作業者' });
+  await master('contacts', { customerId: m['c'], code: 'K1', name: '担当', email: 'k1@example.com', sendDaily: true, dailyProductIds: [m['p']] });
+  const svc = new FieldReportService(t.store);
   const w = await svc.createWork(
-    { workDate: '2026-10-08', reporterId: users['field'] as string, customerId: m['c'] as string, productId: m['p'] as string, workTypeId: m['wt'] as string, lotNo: null, workerIds: [m['w'] as string], startAt: jstToInstant('2026-10-08', '09:00'), endAt: jstToInstant('2026-10-08', '10:00'), quantity: 10, defects: [] },
+    { workDate: '2026-10-08', reporterId: users['field'] as string, customerId: m['c'] as string, productId: m['p'] as string, workTypeId: m['wt'] as string, lotNo: null, workerIds: [m['w'] as string], startAt: jstToInstant('2026-10-08', '09:00'), endAt: jstToInstant('2026-10-08', '10:00'), quantity: 10, defects: [], workLocationId: null, vehicleId: null, remarks: null },
     ctx(),
   );
   await svc.confirm('WORK', w.id, 1, ctx());
   work = { id: w.id, reportNo: w.reportNo };
-  const d = await svc.createDelivery({ deliveryDate: '2026-10-08', driverId: m['w'] as string, customerId: m['c'] as string, items: [{ productId: m['p'] as string, quantity: 1 }] }, ctx());
+  const d = await svc.createDelivery({ deliveryDate: '2026-10-08', driverId: m['w'] as string, customerId: m['c'] as string, items: [{ productId: m['p'] as string, quantity: 1 }], vehicleId: null, tripCount: 1, deliveryFeeYen: null }, ctx());
   await svc.confirm('DELIVERY', d.id, 1, ctx());
   delivery = { id: d.id };
 }, 120_000);
 
 afterAll(async () => {
-  // 配信 route が使った web の共有 pool を先に閉じる（DROP DATABASE WITH FORCE 前）
-  const shared = (globalThis as { inspexorPgPool?: { end(): Promise<void> } }).inspexorPgPool;
-  await shared?.end();
-  await db?.drop();
+  setDocStoreForTest(undefined);
+  await t?.close();
 });
 
 describe('G4: 実績の documentStatus / documentId（CHG-003）', () => {
@@ -173,7 +199,7 @@ describe('G4: API-024 getDocument（scope・10分署名 URL）', () => {
 });
 
 describe('G4: API-025 documentAction（理由必須・冪等・状態）', () => {
-  const version = async () => (await one<{ version: number }>('SELECT version FROM app.work_reports WHERE id=$1', [work.id])).version;
+  const version = async () => ((await t.store.get<ReportHeaderDoc>(`${C.workReports}/${work.id}`)) as ReportHeaderDoc).version;
 
   it('FIELD は 403、Idempotency-Key 欠落は 422、理由なしは 422、古い version は 409', async () => {
     const h = documentActionHandlers(docDeps());
@@ -193,12 +219,12 @@ describe('G4: API-025 documentAction（理由必須・冪等・状態）', () =>
     expect(r1.status).toBe(202);
     const r2 = await h.POST(req('office', 'POST', `documents/${workDocId}/send`, body, KEY('send1')));
     expect(r2.headers.get('idempotent-replayed')).toBe('true');
-    expect(Number((await one<{ n: string }>(`SELECT count(*) n FROM app.outbox_events WHERE event_type='MailRequested'`)).n)).toBe(1);
-    const audit = await one<{ reason: string }>(`SELECT reason FROM app.audit_events WHERE action='DOCUMENT_SEND_REQUEST' AND target_id=$1`, [workDocId]);
-    expect(audit.reason).toBe('お客様から再送依頼');
+    expect((await t.store.query<OutboxDoc>(C.outbox, { where: [{ field: 'type', op: '==', value: 'MailRequested' }] })).length).toBe(1);
+    const audit = (await auditEventsFor(t.store, 'DOCUMENT_JOB', workDocId)).find((a) => a.action === 'DOCUMENT_SEND_REQUEST');
+    expect(audit?.reason).toBe('お客様から再送依頼');
     await worker();
-    const mails = await db.pool.query<{ send_revision: number; status: string }>('SELECT send_revision, status::text AS status FROM app.mail_jobs WHERE document_job_id=$1 ORDER BY send_revision', [workDocId]);
-    expect(mails.rows).toEqual([{ send_revision: 1, status: 'SENT' }, { send_revision: 2, status: 'SENT' }]);
+    const mails = (await mailJobs(workDocId)).sort((a, b) => a.sendRevision - b.sendRevision);
+    expect(mails.map((x) => ({ send_revision: x.sendRevision, status: x.status }))).toEqual([{ send_revision: 1, status: 'SENT' }, { send_revision: 2, status: 'SENT' }]);
     expect(sent).toHaveLength(2);
   });
 
@@ -209,26 +235,26 @@ describe('G4: API-025 documentAction（理由必須・冪等・状態）', () =>
     const regen = await h.POST(req('office', 'POST', `documents/${workDocId}/regenerate`, { expectedVersion: v, reason: '帳票の再作成' }, KEY('g1')));
     expect(regen.status).toBe(202);
     await worker();
-    const jobs = await db.pool.query<{ status: string; idempotency_key: string }>(
-      `SELECT d.status::text AS status, d.idempotency_key FROM app.document_jobs d JOIN app.work_report_revisions r ON r.id=d.source_id WHERE r.report_id=$1 ORDER BY d.created_at`,
-      [work.id],
-    );
-    expect(jobs.rows.map((j) => j.status)).toEqual(['GENERATED', 'GENERATED']);
-    expect(jobs.rows[1]?.idempotency_key).toMatch(/:regenerate:/);
-    expect(await one('SELECT status::text AS status, version FROM app.work_reports WHERE id=$1', [work.id])).toEqual({ status: 'SUBMITTED', version: v });
+    const jobs = (await t.store.query<DocumentJobDoc>(C.documents, { where: [{ field: 'reportId', op: '==', value: work.id }] }))
+      .map((r) => r.data)
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+    expect(jobs.map((j) => j.status)).toEqual(['GENERATED', 'GENERATED']);
+    expect(jobs[1]?.idempotencyKey).toMatch(/:regenerate:/);
+    const hd = (await t.store.get<ReportHeaderDoc>(`${C.workReports}/${work.id}`)) as ReportHeaderDoc;
+    expect({ status: hd.status, version: hd.version }).toEqual({ status: 'SUBMITTED', version: v });
     expect(sent).toHaveLength(2);
     const latest = (await json(await fieldItemHandlers('WORK', fieldDeps()).GET(req('field', 'GET', `work-reports/${work.id}`)))).data;
     expect(latest?.['documentId']).not.toBe(workDocId);
   });
 
   it('CHG-004: メール無効（既定）では send は未定義の操作（404）、理由があっても副作用なし', async () => {
-    const off = (): DocumentRouteDeps => ({ service: () => new DocumentService(db.pool, SECRET), pool: () => db.pool, api });
-    const before = Number((await one<{ n: string }>('SELECT count(*) n FROM app.outbox_events')).n);
-    const v = Number((await one<{ version: number }>('SELECT version FROM app.work_reports WHERE id=$1', [work.id])).version);
+    const off = (): DocumentRouteDeps => ({ service: () => new DocumentService(t.store, SECRET), idempotency: idem, api });
+    const before = await t.store.count(C.outbox);
+    const v = await version();
     const r = await documentActionHandlers(off()).POST(req('office', 'POST', `documents/${workDocId}/send`, { expectedVersion: v, reason: '送信' }, KEY('off')));
     expect(r.status).toBe(404);
     expect((await json(r)).error?.fields?.[0]?.path).toBe('/action');
-    expect(Number((await one<{ n: string }>('SELECT count(*) n FROM app.outbox_events')).n)).toBe(before);
+    expect(await t.store.count(C.outbox)).toBe(before);
   });
 
   it('運搬の帳票は send 不可（CHG-003: メール送信なし）', async () => {
@@ -241,16 +267,17 @@ describe('G4: API-025 documentAction（理由必須・冪等・状態）', () =>
   });
 
   it('retry: 宛先0件で FAILED_FINAL のメールは再実行できる（新 mail job）', async () => {
-    await db.pool.query(`UPDATE app.customer_contacts SET send_daily=false`);
+    await setSendDaily(false);
     const v = await version();
     const h = documentActionHandlers(docDeps());
     const docNow = (await json(await fieldItemHandlers('WORK', fieldDeps()).GET(req('field', 'GET', `work-reports/${work.id}`)))).data?.['documentId'] as string;
     expect((await h.POST(req('office', 'POST', `documents/${docNow}/send`, { expectedVersion: v, reason: '送信' }, KEY('s0')))).status).toBe(202);
     await worker();
-    expect(await one('SELECT status::text AS status, error_code FROM app.mail_jobs WHERE document_job_id=$1 ORDER BY created_at DESC LIMIT 1', [docNow])).toEqual({ status: 'FAILED_FINAL', error_code: 'RECIPIENT_EMPTY' });
-    await db.pool.query(`UPDATE app.customer_contacts SET send_daily=true`);
+    const failed = (await mailJobs(docNow)).at(-1);
+    expect({ status: failed?.status, error_code: failed?.errorCode }).toEqual({ status: 'FAILED_FINAL', error_code: 'RECIPIENT_EMPTY' });
+    await setSendDaily(true);
     expect((await h.POST(req('office', 'POST', `documents/${docNow}/retry`, { expectedVersion: v, reason: '宛先を修正したため' }, KEY('rt')))).status).toBe(202);
     await worker();
-    expect(await one('SELECT status::text AS status FROM app.mail_jobs WHERE document_job_id=$1 ORDER BY created_at DESC LIMIT 1', [docNow])).toEqual({ status: 'SENT' });
+    expect((await mailJobs(docNow)).at(-1)?.status).toBe('SENT');
   });
 });

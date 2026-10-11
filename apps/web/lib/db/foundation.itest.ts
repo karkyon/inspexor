@@ -1,68 +1,36 @@
 /**
- * G1 統合試験（実PostgreSQL 16 / fresh DB = schema.sql のみから構築）
- *  - T-AUD-001   audit_events append-only（UPDATE/DELETE は trigger で 55000 拒否）
- *  - T-OUTBOX-001 業務更新と outbox が同一TX（rollback で outbox も消える）
- *  - T-IDEM-001  Idempotency-Key: 初回/同一hash再送/異hash/処理中/期限切れ
+ * G1 統合試験。CHG-006: Firestore（エミュレータ、無ければ MemoryDocStore）。
+ *  - T-AUD-001   監査は追記のみ（更新・削除の経路を持たない。読出しで before/after を復元）
+ *  - T-OUTBOX-001 業務更新と outbox が同一 transaction（失敗で両方とも残らない）
+ *  - T-IDEM-001  Idempotency-Key: 初回/同一hash再送/異hash/処理中/期限切れ/並行
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { createFreshDatabase, insertUser, type FreshDatabase } from '../testing/fresh-db';
-import { withTransaction } from './pg';
-import { PgAuditRepository } from './pg-audit-repository';
-import { PgOutboxRepository } from './pg-outbox-repository';
-import { PgIdempotencyRepository } from './pg-idempotency-repository';
+import { appendAudit, auditEventsFor, C, createUser, DocIdempotencyRepository, enqueueOutbox, findUserById, type OutboxDoc } from '@inspexor/docstore';
+import { createTestStore, type TestStore } from '@inspexor/docstore/testing';
 import { beginIdempotentRequest, computeRequestHash } from '../idempotency/idempotency-service';
 
-let db: FreshDatabase;
+let t: TestStore;
 let userId: string;
 
 beforeAll(async () => {
-  db = await createFreshDatabase('foundation');
-  userId = await insertUser(db.pool, 'itest-user');
+  t = createTestStore('foundation');
+  userId = (await createUser(t.store, { loginId: 'itest-user', passwordHash: 'x', displayName: 'user', roles: ['OFFICE'] }, new Date())) as string;
 }, 60_000);
 
 afterAll(async () => {
-  await db?.drop();
+  await t?.close();
 });
 
-describe('fresh DB', () => {
-  it('schema.sql＋追記migration から app スキーマ業務36テーブル（34＋CHG-004 車両・作業場所）が作成される', async () => {
-    const r = await db.pool.query<{ n: string }>(
-      `SELECT count(*)::text AS n FROM information_schema.tables WHERE table_schema = 'app' AND table_name <> 'schema_migrations'`,
-    );
-    expect(r.rows[0]?.n).toBe('36');
-  });
-
-  it('追記migration（CHG-001 / CHG-004）が適用・記録されている', async () => {
-    const r = await db.pool.query<{ id: string }>(`SELECT id FROM app.schema_migrations ORDER BY id`);
-    expect(r.rows.map((row) => row.id)).toEqual(['0001_chg001_master_columns', '0002_chg004_field_items']);
-  });
-});
-
-describe('T-AUD-001: audit_events append-only', () => {
-  it('appendでき、UPDATE/DELETEは55000で拒否される', async () => {
-    const repo = new PgAuditRepository(db.pool);
+describe('T-AUD-001: 監査（追記のみ）', () => {
+  it('追記した監査は before/after・理由・相関IDとともに読み出せる', async () => {
     const correlationId = randomUUID();
-    const id = await repo.append({
-      actorId: userId,
-      action: 'AUTHZ_DENIED',
-      targetType: 'USER',
-      targetId: userId,
-      afterData: { operationId: 'createMaster' },
-      correlationId,
+    await t.store.runTransaction(async (tx) => {
+      appendAudit(tx, { actorId: userId, action: 'X_UPDATE', targetType: 'USER', targetId: userId, beforeData: { v: 1 }, afterData: { v: 2 }, reason: '試験', correlationId }, new Date());
     });
-    const row = await db.pool.query(`SELECT action, after_data, correlation_id FROM app.audit_events WHERE id = $1`, [id]);
-    expect(row.rows[0]).toMatchObject({ action: 'AUTHZ_DENIED', correlation_id: correlationId, after_data: { operationId: 'createMaster' } });
-
-    await expect(db.pool.query(`UPDATE app.audit_events SET action = 'X' WHERE id = $1`, [id])).rejects.toMatchObject({ code: '55000' });
-    await expect(db.pool.query(`DELETE FROM app.audit_events WHERE id = $1`, [id])).rejects.toMatchObject({ code: '55000' });
-  });
-
-  it('correlation_id はuuid必須（不正値は拒否）', async () => {
-    const repo = new PgAuditRepository(db.pool);
-    await expect(
-      repo.append({ actorId: userId, action: 'X', targetType: 'USER', targetId: userId, correlationId: 'not-a-uuid' }),
-    ).rejects.toBeDefined();
+    const rows = await auditEventsFor(t.store, 'USER', userId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ action: 'X_UPDATE', actorId: userId, reason: '試験', correlationId, beforeData: { v: 1 }, afterData: { v: 2 } });
   });
 });
 
@@ -81,29 +49,29 @@ describe('T-OUTBOX-001: 業務更新とoutboxは同一TX', () => {
 
   it('commit時は業務更新とoutboxが両方残る', async () => {
     const event = envelope(userId);
-    await withTransaction(db.pool, async (client) => {
-      await client.query(`UPDATE app.users SET version = version + 1 WHERE id = $1`, [userId]);
-      await new PgOutboxRepository(client).enqueue(event);
+    const before = (await findUserById(t.store, userId))?.version ?? 0;
+    await t.store.runTransaction(async (tx) => {
+      tx.update(`${C.users}/${userId}`, { version: before + 1 });
+      enqueueOutbox(tx, event, new Date());
     });
-    const r = await db.pool.query(`SELECT event_type, status, payload FROM app.outbox_events WHERE id = $1`, [event.eventId]);
-    expect(r.rows[0]).toMatchObject({ event_type: 'RecordApproved', status: 'PENDING' });
-    expect(r.rows[0].payload).toMatchObject({ correlationId: event.correlationId, causationId: null, version: 1 });
+    const ob = await t.store.get<OutboxDoc>(`${C.outbox}/${event.eventId}`);
+    expect(ob).toMatchObject({ type: 'RecordApproved', status: 'PENDING' });
+    expect(JSON.parse(ob?.envelopeJson ?? '{}')).toMatchObject({ correlationId: event.correlationId, causationId: null, version: 1 });
+    expect((await findUserById(t.store, userId))?.version).toBe(before + 1);
   });
 
   it('業務処理が失敗すると outbox も rollback される', async () => {
     const event = envelope(userId);
-    const before = await db.pool.query<{ version: number }>(`SELECT version FROM app.users WHERE id = $1`, [userId]);
+    const before = (await findUserById(t.store, userId))?.version;
     await expect(
-      withTransaction(db.pool, async (client) => {
-        await client.query(`UPDATE app.users SET version = version + 1 WHERE id = $1`, [userId]);
-        await new PgOutboxRepository(client).enqueue(event);
+      t.store.runTransaction(async (tx) => {
+        tx.update(`${C.users}/${userId}`, { version: (before ?? 0) + 1 });
+        enqueueOutbox(tx, event, new Date());
         throw new Error('domain invariant violated');
       }),
     ).rejects.toThrow('domain invariant violated');
-    const outbox = await db.pool.query(`SELECT 1 FROM app.outbox_events WHERE id = $1`, [event.eventId]);
-    expect(outbox.rowCount).toBe(0);
-    const after = await db.pool.query<{ version: number }>(`SELECT version FROM app.users WHERE id = $1`, [userId]);
-    expect(after.rows[0]?.version).toBe(before.rows[0]?.version);
+    expect(await t.store.get(`${C.outbox}/${event.eventId}`)).toBeNull();
+    expect((await findUserById(t.store, userId))?.version).toBe(before);
   });
 });
 
@@ -112,7 +80,7 @@ describe('T-IDEM-001: Idempotency-Key', () => {
   const scope = (key: string) => ({ actorId: userId, route: 'POST /billing-runs', key });
 
   it('初回PROCEED → 完了後の同一hash再送はREPLAY（同応答）', async () => {
-    const repo = new PgIdempotencyRepository(db.pool);
+    const repo = new DocIdempotencyRepository(t.store);
     const hash = computeRequestHash('POST', '/billing-runs', { customerId: 'c', periodEnd: '2026-09-30' });
     const first = await beginIdempotentRequest(repo, scope('key-replay-000001'), hash, NOW);
     expect(first.kind).toBe('PROCEED');
@@ -124,7 +92,7 @@ describe('T-IDEM-001: Idempotency-Key', () => {
   });
 
   it('同一key・異payloadはCONFLICT（409）', async () => {
-    const repo = new PgIdempotencyRepository(db.pool);
+    const repo = new DocIdempotencyRepository(t.store);
     const h1 = computeRequestHash('POST', '/billing-runs', { a: 1 });
     const h2 = computeRequestHash('POST', '/billing-runs', { a: 2 });
     await beginIdempotentRequest(repo, scope('key-conflict-00001'), h1, NOW);
@@ -132,14 +100,14 @@ describe('T-IDEM-001: Idempotency-Key', () => {
   });
 
   it('処理中（PROCESSING）の同一requestはIN_PROGRESS', async () => {
-    const repo = new PgIdempotencyRepository(db.pool);
+    const repo = new DocIdempotencyRepository(t.store);
     const h = computeRequestHash('POST', '/billing-runs', { a: 3 });
     await beginIdempotentRequest(repo, scope('key-inprogress-001'), h, NOW);
     expect((await beginIdempotentRequest(repo, scope('key-inprogress-001'), h, NOW)).kind).toBe('IN_PROGRESS');
   });
 
   it('並行requestでも PROCEED は1件だけ（一意制約）', async () => {
-    const repo = new PgIdempotencyRepository(db.pool);
+    const repo = new DocIdempotencyRepository(t.store);
     const h = computeRequestHash('POST', '/billing-runs', { a: 4 });
     const results = await Promise.all(
       Array.from({ length: 5 }, () => beginIdempotentRequest(repo, scope('key-concurrent-01'), h, NOW)),
@@ -149,7 +117,7 @@ describe('T-IDEM-001: Idempotency-Key', () => {
   });
 
   it('24時間経過後は新規requestとしてPROCEED', async () => {
-    const repo = new PgIdempotencyRepository(db.pool);
+    const repo = new DocIdempotencyRepository(t.store);
     const h1 = computeRequestHash('POST', '/billing-runs', { a: 5 });
     const first = await beginIdempotentRequest(repo, scope('key-expired-00001'), h1, NOW);
     if (first.kind === 'PROCEED') await repo.complete(first.recordId, 201, { ok: true });
@@ -159,8 +127,8 @@ describe('T-IDEM-001: Idempotency-Key', () => {
   });
 
   it('actorが違えば同一keyでも独立（actor+route+key一意）', async () => {
-    const repo = new PgIdempotencyRepository(db.pool);
-    const other = await insertUser(db.pool, 'itest-other');
+    const repo = new DocIdempotencyRepository(t.store);
+    const other = (await createUser(t.store, { loginId: 'itest-other', passwordHash: 'x', displayName: 'other', roles: ['OFFICE'] }, NOW)) as string;
     const h = computeRequestHash('POST', '/billing-runs', { a: 7 });
     expect((await beginIdempotentRequest(repo, scope('key-shared-000001'), h, NOW)).kind).toBe('PROCEED');
     expect(

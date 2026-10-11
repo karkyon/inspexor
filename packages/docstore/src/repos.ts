@@ -27,6 +27,8 @@ export const C = {
   workReports: 'workReports',
   deliveryReports: 'deliveryReports',
   documents: 'documents',
+  files: 'files',
+  templateVersions: 'templateVersions',
   mailJobs: 'mailJobs',
   outbox: 'outbox',
   idempotency: 'idempotency',

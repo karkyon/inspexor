@@ -1,51 +1,41 @@
-import pg from 'pg';
+/**
+ * worker の Firestore 書込部品（CHG-006）。worker の処理は SYSTEM（actorId null）。
+ */
+import { randomUUID } from 'node:crypto';
+import { appendAudit as append, enqueueOutbox, type DocTransaction } from '@inspexor/docstore';
+import type { OutboxEventType } from '@inspexor/application';
 
-// PostgreSQL date（OID 1082）は 'YYYY-MM-DD' 文字列のまま扱う（web と同じ）
-pg.types.setTypeParser(1082, (value: string) => value);
-
-export type Pool = pg.Pool;
-export type PoolClient = pg.PoolClient;
-export type Queryable = Pick<pg.Pool, 'query'>;
-
-export function createPool(connectionString: string): pg.Pool {
-  return new pg.Pool({ connectionString, max: 4 });
-}
-
-export async function withTransaction<T>(pool: pg.Pool, work: (client: pg.PoolClient) => Promise<T>): Promise<T> {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const result = await work(client);
-    await client.query('COMMIT');
-    return result;
-  } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
-    throw error;
-  } finally {
-    client.release();
-  }
-}
-
-/** audit（append-only）。worker の処理は SYSTEM（actor_id NULL） */
-export async function appendAudit(
-  db: Queryable,
+export function appendAudit(
+  tx: DocTransaction,
   e: { action: string; targetType: string; targetId: string; beforeData?: unknown; afterData?: unknown; reason?: string | null; correlationId: string; occurredAt: Date },
-): Promise<void> {
-  await db.query(
-    `INSERT INTO app.audit_events (actor_id, action, target_type, target_id, before_data, after_data, reason, correlation_id, occurred_at)
-     VALUES (NULL, $1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8)`,
-    [e.action, e.targetType, e.targetId, e.beforeData === undefined ? null : JSON.stringify(e.beforeData), e.afterData === undefined ? null : JSON.stringify(e.afterData), e.reason ?? null, e.correlationId, e.occurredAt.toISOString()],
+): void {
+  append(
+    tx,
+    {
+      actorId: null,
+      action: e.action,
+      targetType: e.targetType,
+      targetId: e.targetId,
+      ...(e.beforeData !== undefined ? { beforeData: e.beforeData } : {}),
+      ...(e.afterData !== undefined ? { afterData: e.afterData } : {}),
+      ...(e.reason !== undefined && e.reason !== null ? { reason: e.reason } : {}),
+      correlationId: e.correlationId,
+      occurredAt: e.occurredAt,
+    },
+    e.occurredAt,
   );
 }
 
-/** outbox（API設計書 §Event envelope を payload に保存: GAP-012） */
-export async function enqueueEvent(
-  db: Queryable,
-  e: { eventId: string; type: string; aggregateType: string; aggregateId: string; correlationId: string; causationId: string | null; occurredAt: Date; payload: Record<string, unknown> },
-): Promise<void> {
-  const envelope = { eventId: e.eventId, type: e.type, version: 1, occurredAt: e.occurredAt.toISOString(), aggregateType: e.aggregateType, aggregateId: e.aggregateId, correlationId: e.correlationId, causationId: e.causationId, payload: e.payload };
-  await db.query(
-    `INSERT INTO app.outbox_events (id, event_type, aggregate_type, aggregate_id, payload) VALUES ($1, $2, $3, $4, $5::jsonb)`,
-    [e.eventId, e.type, e.aggregateType, e.aggregateId, JSON.stringify(envelope)],
+/** outbox（API設計書 §Event envelope） */
+export function enqueueEvent(
+  tx: DocTransaction,
+  e: { type: OutboxEventType; aggregateType: string; aggregateId: string; correlationId: string; causationId: string | null; occurredAt: Date; payload: Record<string, unknown>; eventId?: string },
+): string {
+  const eventId = e.eventId ?? randomUUID();
+  enqueueOutbox(
+    tx,
+    { eventId, type: e.type, version: 1, occurredAt: e.occurredAt.toISOString(), aggregateType: e.aggregateType, aggregateId: e.aggregateId, correlationId: e.correlationId, causationId: e.causationId, payload: e.payload },
+    e.occurredAt,
   );
+  return eventId;
 }
