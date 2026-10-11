@@ -46,7 +46,8 @@ if (mode === 'http') {
   const budgetMs = Number(process.env['WORKER_BUDGET_MS'] ?? '240000');
   let running: Promise<unknown> | null = null;
   const server = createServer((req, res) => {
-    if (req.method === 'GET' && req.url === '/healthz') {
+    // Cloud Run は末尾が z のパス（/healthz 等）を予約しているため /health（g26）
+    if (req.method === 'GET' && req.url === '/health') {
       res.writeHead(200, { 'content-type': 'text/plain' }).end('ok');
       return;
     }

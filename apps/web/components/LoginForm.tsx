@@ -47,26 +47,23 @@ export function LoginForm({ onLoginSuccess }: LoginFormProps) {
   }
 
   return (
-    <form onSubmit={handleSubmit} style={{ maxWidth: 320, display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <div>
-        <label htmlFor="loginId" style={{ display: 'block', marginBottom: 4 }}>
-          ログインID
-        </label>
+    <form onSubmit={handleSubmit} className="px-form" aria-busy={submitting}>
+      <div className="px-field">
+        <label htmlFor="loginId">ログインID</label>
         <input
           id="loginId"
           name="loginId"
           type="text"
           autoComplete="username"
+          autoCapitalize="none"
+          spellCheck={false}
           required
           value={loginId}
           onChange={(event) => setLoginId(event.target.value)}
-          style={{ width: '100%', padding: 8 }}
         />
       </div>
-      <div>
-        <label htmlFor="password" style={{ display: 'block', marginBottom: 4 }}>
-          パスワード
-        </label>
+      <div className="px-field">
+        <label htmlFor="password">パスワード</label>
         <input
           id="password"
           name="password"
@@ -75,15 +72,14 @@ export function LoginForm({ onLoginSuccess }: LoginFormProps) {
           required
           value={password}
           onChange={(event) => setPassword(event.target.value)}
-          style={{ width: '100%', padding: 8 }}
         />
       </div>
       {errorMessage !== null ? (
-        <p role="alert" style={{ color: '#b00020', margin: 0 }}>
+        <p role="alert" className="px-alert">
           {errorMessage}
         </p>
       ) : null}
-      <button type="submit" disabled={submitting} style={{ padding: 10 }}>
+      <button type="submit" className="px-primary" disabled={submitting}>
         {submitting ? 'ログイン中…' : 'ログイン'}
       </button>
     </form>

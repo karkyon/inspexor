@@ -6,9 +6,11 @@ import { clearAllDrafts } from '../lib/field/draft-store';
 
 export interface LogoutButtonProps {
   readonly onLoggedOut: () => void;
+  readonly className?: string;
+  readonly errorClassName?: string;
 }
 
-export function LogoutButton({ onLoggedOut }: LogoutButtonProps) {
+export function LogoutButton({ onLoggedOut, className, errorClassName }: LogoutButtonProps) {
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -49,11 +51,11 @@ export function LogoutButton({ onLoggedOut }: LogoutButtonProps) {
 
   return (
     <div>
-      <button type="button" onClick={handleClick} disabled={submitting} style={{ padding: 8 }}>
+      <button type="button" onClick={handleClick} disabled={submitting} className={className} style={className === undefined ? { padding: 8 } : undefined}>
         {submitting ? 'ログアウト中…' : 'ログアウト'}
       </button>
       {errorMessage !== null ? (
-        <p role="alert" style={{ color: '#b00020' }}>
+        <p role="alert" className={errorClassName} style={errorClassName === undefined ? { color: '#b00020' } : undefined}>
           {errorMessage}
         </p>
       ) : null}
