@@ -27,14 +27,20 @@ for (const ix of j.indexes ?? []) {
 created=0; existed=0
 while IFS= read -r args; do
   [ -z "$args" ] && continue
-  # shellcheck disable=SC2086
-  if out=$(gcloud firestore indexes composite create $args --database='(default)' --project="$P" --async --quiet 2>&1); then
-    created=$((created+1))
-  elif echo "$out" | grep -qi "already exists"; then
-    existed=$((existed+1))
-  else
-    echo "索引の作成に失敗: $args"; echo "$out" | tail -3; exit 1
-  fi
+  # 作成直後のプロジェクト・データベースでは権限の反映待ちで PERMISSION_DENIED 等になることがあるため、20 秒おきに最大 15 回まで再試行（g25b）
+  for try in $(seq 1 15); do
+    # shellcheck disable=SC2086
+    if out=$(gcloud firestore indexes composite create $args --database='(default)' --project="$P" --async --quiet 2>&1); then
+      created=$((created+1)); break
+    elif echo "$out" | grep -qi "already exists"; then
+      existed=$((existed+1)); break
+    elif echo "$out" | grep -qiE "PERMISSION_DENIED|FAILED_PRECONDITION|NOT_FOUND|UNAVAILABLE" && [ "$try" -lt 15 ]; then
+      [ "$try" = 1 ] && echo "索引: 権限・データベースの反映待ち（最大5分）"
+      sleep 20
+    else
+      echo "索引の作成に失敗: $args"; echo "$out" | tail -3; exit 1
+    fi
+  done
 done < /tmp/ix-fs-indexes.txt
 echo "索引: 新規 $created 件 / 既存 $existed 件（新規は作成完了まで数分かかります）"
 
