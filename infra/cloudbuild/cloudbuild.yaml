@@ -1,0 +1,17 @@
+# web・worker の container image を作って Artifact Registry に保存する（CHG-006 g25）。
+#   gcloud builds submit --config infra/cloudbuild/cloudbuild.yaml --substitutions _WEB_IMAGE=...,_WORKER_IMAGE=... .
+steps:
+  - id: web
+    name: gcr.io/cloud-builders/docker
+    args: ['build', '-f', 'apps/web/Dockerfile', '-t', '${_WEB_IMAGE}', '.']
+    waitFor: ['-']
+  - id: worker
+    name: gcr.io/cloud-builders/docker
+    args: ['build', '-f', 'apps/worker/Dockerfile', '-t', '${_WORKER_IMAGE}', '.']
+    waitFor: ['-']
+images:
+  - '${_WEB_IMAGE}'
+  - '${_WORKER_IMAGE}'
+options:
+  logging: CLOUD_LOGGING_ONLY
+timeout: 1800s

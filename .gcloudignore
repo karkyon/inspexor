@@ -1,0 +1,19 @@
+# Cloud Build へ送るファイルの除外（CHG-006 g25。.dockerignore と同じ）
+.gcloudignore
+node_modules
+**/node_modules
+.git
+**/.next
+dist
+build
+coverage
+*.tsbuildinfo
+.env
+.env.*
+**/.env.local
+playwright-report
+test-results
+**/playwright-report
+**/test-results
+g[0-9]*_*.sh
+b[0-9]*_*.sh

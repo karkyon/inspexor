@@ -38,3 +38,4 @@ playwright-report/
 test-results/
 g[0-9]*_*.sh
 b[0-9]*_*.sh
+.gcp-prod-web-url

@@ -1,11 +1,18 @@
+# Docker build に含めないファイル（CHG-006 g25）
 node_modules
 **/node_modules
 .git
-.next
+**/.next
 dist
 build
 coverage
 *.tsbuildinfo
-.env.local
-tests/e2e/playwright-report
-tests/e2e/test-results
+.env
+.env.*
+**/.env.local
+playwright-report
+test-results
+**/playwright-report
+**/test-results
+g[0-9]*_*.sh
+b[0-9]*_*.sh
