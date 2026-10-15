@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>運搬実績報告書 {{report_no}}</title>
+<!-- DELIVERY_REPORT_V2（CHG-010）: 作業結果報告書（DAILY_REPORT_V2）と同じ体裁の A4 縦。使用車両・運搬回数を載せる（要件定義書 Q-06 当方案。金額欄は持たない） -->
+<style>
+  @page { size: A4; margin: 10mm 11mm 10mm; }
+  * { box-sizing: border-box; }
+  body { font-family: "Noto Sans JP", sans-serif; font-size: 10pt; color: #111; margin: 0; }
+  .head { display: grid; grid-template-columns: 1fr auto; gap: 4mm; align-items: start; }
+  .to .name { font-size: 13pt; border-bottom: 0.3mm solid #111; padding: 0 6mm 0.8mm 0; display: inline-block; }
+  h1 { text-align: center; font-size: 19pt; letter-spacing: .25em; margin: 4mm 0 2mm; }
+  h1 span { border-bottom: 0.5mm solid #111; padding: 0 2mm 0.6mm; }
+  .from { text-align: right; font-size: 9pt; line-height: 1.55; }
+  .from b { font-size: 11pt; }
+  .greet { font-size: 9.5pt; line-height: 1.6; margin: 1mm 0 3mm; }
+  table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  td, th { border: 0.35mm solid #222; padding: 1.4mm 2mm; vertical-align: middle; }
+  th { font-weight: 500; text-align: center; letter-spacing: .3em; background: #fff; white-space: nowrap; }
+  .shade { background: #e3e6e8; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .items th { letter-spacing: .1em; }
+  .items td { height: 8.5mm; }
+  .total td { font-weight: 700; }
+  .bottom { display: grid; grid-template-columns: 1fr 70mm; gap: 6mm; margin-top: 6mm; align-items: end; }
+  .stamps td { height: 16mm; width: 25mm; }
+  .stamps th { font-size: 8.5pt; letter-spacing: 0; padding: 1mm; }
+  .note { display: flex; justify-content: space-between; margin-top: 3mm; font-size: 8pt; color: #444; }
+  thead { display: table-header-group; }
+  tr { break-inside: avoid; }
+</style>
+</head>
+<body>
+  <div class="head">
+    <div class="to"><div class="name">{{customer_name}} 御中</div></div>
+    <div></div>
+  </div>
+  <h1><span>運搬実績報告書</span></h1>
+  <div class="head">
+    <div class="greet">いつも大変お世話さまになっております。<br>運搬の実績は下記の通りです。よろしくお願い致します。</div>
+    <div class="from"><b>三成興業株式会社</b><br>TEL 086-448-1930<br>FAX 086-448-1936<br>E-mail sansei0112@nifty.com</div>
+  </div>
+
+  <table>
+    <colgroup><col style="width:30mm"><col><col style="width:30mm"><col></colgroup>
+    <tr><th class="shade">運搬日</th><td>{{delivery_date_jp}}</td><th class="shade">運転者</th><td>{{driver_name}}</td></tr>
+    <tr><th class="shade">お客様</th><td colspan="3">{{customer_code}} {{customer_name}}</td></tr>
+    <tr><th class="shade">使用車両</th><td>{{vehicle}}</td><th class="shade">運搬回数</th><td class="num">{{trip_count}} 回</td></tr>
+  </table>
+
+  <table class="items" style="margin-top:4mm">
+    <colgroup><col style="width:50mm"><col><col style="width:32mm"></colgroup>
+    <thead><tr><th class="shade">品番</th><th class="shade">品名</th><th class="shade">数量（個）</th></tr></thead>
+    <tbody>
+      {{item_rows}}
+      <tr class="total"><td class="shade" colspan="2" style="text-align:center">計（{{item_count}}品番）</td><td class="num">{{total_quantity}}</td></tr>
+    </tbody>
+  </table>
+
+  <div class="bottom">
+    <div></div>
+    <table class="stamps">
+      <tr><th>実施先担当者</th><th>三成担当者</th></tr>
+      <tr><td></td><td></td></tr>
+    </table>
+  </div>
+  <div class="note"><span>報告番号 {{report_no}}（第{{revision_no}}版）</span><span>確定 {{confirmed_at}}</span></div>
+</body>
+</html>

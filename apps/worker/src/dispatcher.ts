@@ -23,7 +23,8 @@ import { workSnapshot } from './templates';
 export const DOCUMENT_EVENT_TEMPLATE: Readonly<Record<string, { template: string; documentType: string; sourceType: 'WORK_REVISION' | 'DELIVERY_REVISION'; reportType: ReportType }>> = {
   // CHG-005: 新しく確定する作業日報は現行の作業結果報告書様式（V2）
   WorkReportConfirmed: { template: 'DAILY_REPORT_V2', documentType: 'DAILY_REPORT', sourceType: 'WORK_REVISION', reportType: 'WORK' },
-  DeliveryReportConfirmed: { template: 'DELIVERY_REPORT_V1', documentType: 'DELIVERY_REPORT', sourceType: 'DELIVERY_REVISION', reportType: 'DELIVERY' },
+  // CHG-010: 新しく確定する運搬実績は V2（使用車両・運搬回数。運搬費は載せない）
+  DeliveryReportConfirmed: { template: 'DELIVERY_REPORT_V2', documentType: 'DELIVERY_REPORT', sourceType: 'DELIVERY_REVISION', reportType: 'DELIVERY' },
 };
 
 export function autoDocumentKey(template: string, revisionId: string): string {

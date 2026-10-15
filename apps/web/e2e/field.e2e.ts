@@ -112,10 +112,11 @@ test.describe('G3-E2E: 現場入力（SCR-02〜09）', () => {
     await page.getByLabel('SYN-W02 合成作業者2').check();
     await page.getByLabel(/^開始時刻/).fill('13:00');
     await page.getByLabel(/^終了時刻/).fill('18:00');
-    // 13:00–18:00 × 2名: 通常 8.0 人時、割増 2.0 人時（17時以降）
+    // 13:00–18:00 × 2名: 休憩 0、実作業時間 5.00H、総作業時間 10.00H（提案書 P.9 の表記。B-04）
     const calc = page.locator('.fx-timecalc');
-    await expect(calc).toContainText('8.0人時');
-    await expect(calc).toContainText('2.0人時');
+    await expect(calc).toContainText('実作業時間5.00H');
+    await expect(calc).toContainText('総作業時間10.00H');
+    await expect(calc).not.toContainText('割増');
     await page.getByRole('button', { name: '次へ進む →' }).click();
 
     await expect(page).toHaveURL(/step=4$/);

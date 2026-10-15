@@ -7,7 +7,7 @@
  * CHG-004（提案書 P.8/P.9）: Step1 に作業場所、Step2 に使用車（任意）、Step4 に備考。
  */
 import { useMemo, useState, type FormEvent } from 'react';
-import { computeBusinessTime, jstToInstant, toJstParts, validateWorkSpan, type FieldIssue } from '@inspexor/domain';
+import { computeBusinessTime, jstToInstant, minutesToHours, toJstParts, validateWorkSpan, type FieldIssue } from '@inspexor/domain';
 import { buildWorkDraft, emptyWorkForm, normalizeWorkForm, validateWorkStep, workDetailToForm, REMARKS_MAX, WORK_STEPS, type WorkForm } from '../../lib/field/wizard';
 import { canCreateReports, useFieldUser } from './FieldShell';
 import { ErrorSummary, FieldError, StateBar, Stepper, issueFor } from './FieldParts';
@@ -25,8 +25,13 @@ const STEP_PATHS: Record<number, string[]> = {
   4: ['/quantity', '/defects', '/remarks'],
 };
 
-function personHours(minutes: number): string {
-  return (minutes / 60).toLocaleString('ja-JP', { minimumFractionDigits: 1, maximumFractionDigits: 2 });
+/** 提案書 P.9 の表記: 実作業時間（休憩控除後）と総作業時間（作業者数×時間）を小数2桁の時間で示す（B-04） */
+function actualHours(c: { regularMinutes: number; overtimeMinutes: number }): string {
+  return `${minutesToHours(c.regularMinutes + c.overtimeMinutes)}H`;
+}
+
+function totalHours(c: { regularPersonMinutes: number; overtimePersonMinutes: number }): string {
+  return `${minutesToHours(c.regularPersonMinutes + c.overtimePersonMinutes)}H`;
 }
 
 function useTimeCalc(f: WorkForm, masters: FieldMasters | null) {
@@ -325,17 +330,18 @@ export function WorkWizard() {
             </div>
             <div className="fx-timecalc" aria-live="polite">
               <div>
-                <span>休憩控除</span>
-                <b>{calc === null ? '—' : `${calc.breakMinutes}分`}</b>
+                <span>休憩時間（自動）</span>
+                <b>{calc === null ? '—' : `${minutesToHours(calc.breakMinutes)}H`}</b>
+                <small>12:00〜13:00 に重なる時間</small>
               </div>
               <div>
-                <span>通常工数</span>
-                <b>{calc === null ? '—' : `${personHours(calc.regularPersonMinutes)}人時`}</b>
+                <span>実作業時間</span>
+                <b>{calc === null ? '—' : actualHours(calc)}</b>
               </div>
               <div>
-                <span>割増工数</span>
-                <b>{calc === null ? '—' : `${personHours(calc.overtimePersonMinutes)}人時`}</b>
-                <small>{calc?.isHoliday === true ? '休日のため全時間が時間外' : '17:00以降・土日祝の時間'}</small>
+                <span>総作業時間</span>
+                <b>{calc === null ? '—' : totalHours(calc)}</b>
+                <small>実作業時間 × 作業者数</small>
               </div>
             </div>
           </section>
@@ -398,12 +404,12 @@ export function WorkWizard() {
             </div>
             <div className="fx-finalsummary" aria-live="polite">
               <div>
-                <small>通常</small>
-                <b>{calc === null ? '—' : `${personHours(calc.regularPersonMinutes)}人時`}</b>
+                <small>実作業時間</small>
+                <b>{calc === null ? '—' : actualHours(calc)}</b>
               </div>
               <div>
-                <small>割増</small>
-                <b>{calc === null ? '—' : `${personHours(calc.overtimePersonMinutes)}人時`}</b>
+                <small>総作業時間</small>
+                <b>{calc === null ? '—' : totalHours(calc)}</b>
               </div>
               <div>
                 <small>数量</small>
@@ -449,7 +455,7 @@ export function WorkWizard() {
                 <dt>時間</dt>
                 <dd>
                   {f.startTime}–{f.endTime === '00:00' ? '24:00' : f.endTime}
-                  {calc !== null ? `（通常 ${personHours(calc.regularPersonMinutes)} / 割増 ${personHours(calc.overtimePersonMinutes)} 人時、休憩控除 ${calc.breakMinutes}分）` : ''}
+                  {calc !== null ? `（実作業時間 ${actualHours(calc)} / 総作業時間 ${totalHours(calc)}、休憩 ${minutesToHours(calc.breakMinutes)}H）` : ''}
                 </dd>
                 <dt>数量 / 不良</dt>
                 <dd>

@@ -26,6 +26,7 @@ export const TEMPLATE_FILES: Readonly<Record<TemplateType, string>> = {
   DAILY_REPORT_V1: 'daily-report-v1.html',
   DAILY_REPORT_V2: 'daily-report-v2.html',
   DELIVERY_REPORT_V1: 'delivery-report-v1.html',
+  DELIVERY_REPORT_V2: 'delivery-report-v2.html',
 };
 
 export interface LoadedTemplate {
@@ -274,8 +275,15 @@ export async function workSnapshot(db: DocReader, src: SnapshotSource, type: 'DA
   };
 }
 
-/** 運搬 revision（確定済み）→ DELIVERY_REPORT_V1 の値（CHG-003） */
-export async function deliverySnapshot(db: DocReader, src: SnapshotSource): Promise<DocumentSnapshot | null> {
+/**
+ * 運搬 revision（確定済み）→ 帳票の値。type: DELIVERY_REPORT_V1（CHG-003）/ DELIVERY_REPORT_V2（CHG-010: 使用車両・運搬回数、和暦）。
+ * 帳票 job の版に合わせる（作成済みの V1 は再出力も V1）
+ */
+export async function deliverySnapshot(
+  db: DocReader,
+  src: SnapshotSource,
+  type: 'DELIVERY_REPORT_V1' | 'DELIVERY_REPORT_V2' = 'DELIVERY_REPORT_V2',
+): Promise<DocumentSnapshot | null> {
   const rev = await db.get<DeliveryRevisionDoc>(revisionPath('DELIVERY', src.reportId, src.revisionId));
   const header = await db.get<ReportHeaderDoc>(reportPath('DELIVERY', src.reportId));
   if (rev === null || header === null || rev.confirmedAt === null) return null;
@@ -296,6 +304,34 @@ export async function deliverySnapshot(db: DocReader, src: SnapshotSource): Prom
     confirmed_at: rev.confirmedAt,
   };
   const date = row['delivery_date'] as string;
+  const itemRows = {
+    html: items.rows.map((i) => `<tr><td>${escapeHtml(i.code)}</td><td>${escapeHtml(i.name)}</td><td class="num">${n(i.quantity)}</td></tr>`).join(''),
+  };
+  const fileName = { date, customerCode: row['customer_code'] as string, reportNo: row['report_no'] as string, revisionNo: row['revision_no'] as number };
+  if (type === 'DELIVERY_REPORT_V2') {
+    const vehicle = await named(db, C.vehicles, rev.vehicleId);
+    return {
+      type: 'DELIVERY_REPORT_V2',
+      reportId: row['header_id'] as string,
+      reportNo: row['report_no'] as string,
+      values: {
+        report_no: row['report_no'] as string,
+        revision_no: String(row['revision_no']),
+        confirmed_at: jstDateTime(row['confirmed_at'] as Date),
+        delivery_date_jp: toWareki(date).text,
+        driver_name: row['driver_name'] as string,
+        customer_code: row['customer_code'] as string,
+        customer_name: row['customer_name'] as string,
+        vehicle: vehicle?.name ?? '',
+        trip_count: String(rev.tripCount),
+        item_rows: itemRows,
+        item_count: String(items.rows.length),
+        total_quantity: n(items.rows.reduce((s, i) => s + i.quantity, 0)),
+      },
+      fileName,
+      mail: null,
+    };
+  }
   return {
     type: 'DELIVERY_REPORT_V1',
     reportId: row['header_id'] as string,

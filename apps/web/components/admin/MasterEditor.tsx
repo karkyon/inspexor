@@ -399,7 +399,7 @@ export function MasterEditor({ type, id }: { readonly type: MasterType; readonly
         {dialog !== null ? (
           <div>
             <h2 id="deactivate-title">{label}を無効化しますか？</h2>
-            <p>削除はされず、新しい入力・請求計算の対象から外れます。過去の確定済みデータは変更されません。</p>
+            <p>削除はされず、新しい入力の選択肢から外れます。過去の確定済みデータは変更されません。</p>
             {dialog.impact === null && dialog.error === null ? <p className="ix-muted">影響を確認しています…</p> : null}
             {dialog.impact !== null ? <ImpactView impact={dialog.impact} /> : null}
             {dialog.error !== null ? (

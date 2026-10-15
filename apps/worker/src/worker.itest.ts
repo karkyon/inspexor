@@ -364,8 +364,46 @@ describe('G4: 再試行（network/5xx のみ、10s/30s/…、最大5回）', () 
   });
 });
 
-describe('G4: 運搬帳票（CHG-003）・実 Chromium・Mailpit adapter', () => {
-  it('運搬確定 → DELIVERY_REPORT_V1（実 Chromium、日本語フォント埋込）→ SUBMITTED、メールなし', async () => {
+describe('CHG-010: 運搬実績報告書 V2（使用車両・運搬回数、運搬費は載せない）', () => {
+  it('新しく確定した運搬実績は V2: 和暦・使用車両・運搬回数・品番と合計。運搬費・請求の文言は無い', async () => {
+    const car = await master('vehicles', { code: 'V9', name: 'キャンター' });
+    const svc = new FieldReportService(t.store);
+    const r = await svc.createDelivery(
+      { deliveryDate: '2026-10-08', driverId: m['w1'] as string, customerId: m['customer'] as string, items: [{ productId: m['pA'] as string, quantity: 1600 }], vehicleId: car, tripCount: 3, deliveryFeeYen: 2500 },
+      ctx(),
+    );
+    await svc.confirm('DELIVERY', r.id, 1, ctx());
+    const renderer = new FakeRenderer();
+    await runOnce(deps(renderer, new FakeSender()));
+    const job = await jobFor(r.id, 'delivery');
+    expect(job.status).toBe('GENERATED');
+    expect(job.template_version).toBe('DELIVERY_REPORT_V2');
+    const html = renderer.lastHtml;
+    expect(html).not.toMatch(/\{\{/);
+    for (const text of ['運搬実績報告書', '令和 8 年 10 月 8 日（木）', '作業者 一郎', 'キャンター', '3 回', 'PA', '1,600', '計（1品番）', '三成興業株式会社', '合成顧客＆&lt;A&gt; 御中', r.reportNo]) {
+      expect(html, text).toContain(text);
+    }
+    for (const text of ['運搬費', '請求', '運搬ルール', '2,500']) {
+      expect(html, text).not.toContain(text);
+    }
+  });
+
+  it('使用車両が未選択なら空欄', async () => {
+    const svc = new FieldReportService(t.store);
+    const r = await svc.createDelivery(
+      { deliveryDate: '2026-10-08', driverId: m['w1'] as string, customerId: m['customer'] as string, items: [{ productId: m['pA'] as string, quantity: 5 }], vehicleId: null, tripCount: 1, deliveryFeeYen: null },
+      ctx(),
+    );
+    await svc.confirm('DELIVERY', r.id, 1, ctx());
+    const renderer = new FakeRenderer();
+    await runOnce(deps(renderer, new FakeSender()));
+    expect((await jobFor(r.id, 'delivery')).template_version).toBe('DELIVERY_REPORT_V2');
+    expect(renderer.lastHtml).toMatch(/使用車両<\/th><td><\/td>/);
+  });
+});
+
+describe('G4: 運搬帳票（CHG-003 / CHG-010）・実 Chromium・Mailpit adapter', () => {
+  it('運搬確定 → DELIVERY_REPORT_V2（実 Chromium、日本語フォント埋込）→ SUBMITTED、メールなし', async () => {
     const r = await confirmDelivery();
     const renderer = new ChromiumPdfRenderer(process.env['CHROMIUM_PATH']);
     const sender = new FakeSender();

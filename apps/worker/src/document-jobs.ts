@@ -122,7 +122,7 @@ export async function processOneDocumentJob(deps: DocumentDeps): Promise<'none' 
     const snapshot: DocumentSnapshot | null =
       job.sourceType === 'WORK_REVISION'
         ? await workSnapshot(deps.store, src, template === 'DAILY_REPORT_V1' ? 'DAILY_REPORT_V1' : 'DAILY_REPORT_V2')
-        : await deliverySnapshot(deps.store, src);
+        : await deliverySnapshot(deps.store, src, template === 'DELIVERY_REPORT_V1' ? 'DELIVERY_REPORT_V1' : 'DELIVERY_REPORT_V2');
     if (snapshot === null || snapshot.type !== template) throw new FinalFailure('SOURCE_NOT_FOUND', '確定済み revision が見つかりません');
     timer.lap('snapshot');
     let loaded;

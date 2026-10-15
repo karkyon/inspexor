@@ -3,11 +3,12 @@
  *  - template: `{{placeholder}}` を HTML エスケープして置換。未置換 `{{...}}` が残れば FAILED_FINAL（TEMPLATE_INVALID）
  *  - 日報: 必須 placeholder、0 不良は「不具合なし」、filename `日報_YYYY-MM-DD_customerCode_reportNo_rN.pdf`
  *  - 運搬（CHG-003）: DELIVERY_REPORT_V1、filename `運搬_YYYY-MM-DD_customerCode_reportNo_rN.pdf`、メール送信なし
+ *  - 運搬（CHG-010）: 新しく確定する運搬実績は DELIVERY_REPORT_V2（使用車両・運搬回数、運搬費は載せない）。V1 で作成済みの帳票は版を固定
  *  - mail: 件名 `【INSPEXOR作業報告】{workDate} {productCode} {reportNo}`、CRLF/header injection 拒否、宛先正規化、20MB
  *  - retry: network/408/429/5xx のみ、10s/30s/2m/10m/30m、最大5回（機能別詳細設計書 §9）
  */
 
-export type TemplateType = 'DAILY_REPORT_V1' | 'DAILY_REPORT_V2' | 'DELIVERY_REPORT_V1';
+export type TemplateType = 'DAILY_REPORT_V1' | 'DAILY_REPORT_V2' | 'DELIVERY_REPORT_V1' | 'DELIVERY_REPORT_V2';
 
 export const DAILY_REPORT_PLACEHOLDERS = [
   'report_no', 'revision_no', 'work_date', 'customer_code', 'customer_name', 'product_code', 'product_name', 'work_type', 'lot_no',
@@ -29,10 +30,17 @@ export const DELIVERY_REPORT_PLACEHOLDERS = [
   'report_no', 'revision_no', 'delivery_date', 'driver_name', 'customer_code', 'customer_name', 'item_rows', 'item_count', 'total_quantity', 'confirmed_at',
 ] as const;
 
+/** CHG-010: 作業結果報告書と同じ体裁。運搬日は和暦、使用車両・運搬回数を追加。運搬費は載せない（提案書: 自動計算しない） */
+export const DELIVERY_REPORT_V2_PLACEHOLDERS = [
+  'report_no', 'revision_no', 'confirmed_at', 'delivery_date_jp', 'driver_name', 'customer_code', 'customer_name', 'vehicle', 'trip_count',
+  'item_rows', 'item_count', 'total_quantity',
+] as const;
+
 export const TEMPLATE_PLACEHOLDERS: Readonly<Record<TemplateType, readonly string[]>> = {
   DAILY_REPORT_V1: DAILY_REPORT_PLACEHOLDERS,
   DAILY_REPORT_V2: DAILY_REPORT_V2_PLACEHOLDERS,
   DELIVERY_REPORT_V1: DELIVERY_REPORT_PLACEHOLDERS,
+  DELIVERY_REPORT_V2: DELIVERY_REPORT_V2_PLACEHOLDERS,
 };
 
 /** 値は HTML エスケープ済みで埋め込む。行（*_rows）だけは呼出側で組んだ安全な HTML を受ける */
