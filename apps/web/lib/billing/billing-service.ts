@@ -7,7 +7,8 @@
  *  レビュー: すべての警告に処置（ACCEPT=そのまま／EXCLUDE=その報告を請求から除外）と理由 → REVIEWED
  *  確定   : 計算に使った版が今も現在版で承認済みか、期間内に新しく承認された報告が無いかを照合（違えば 409 SOURCE_CHANGED → 再計算）。
  *           請求書（snapshot）を作り、対象の報告を BILLING_LOCKED にする（除外した報告は残す）
- *  取消   : 確定前の run を VOIDED（理由必須）。同じ期間で作り直せる
+ *  取消   : 確定前の run を VOIDED（理由必須）。同じ期間で作り直せる。確定後は請求書の無効化（CHG-011、invoice-service）
+ *  調整   : CHG-011 遅延訂正。お客様の未適用の調整（元の締め日の翌日以降に締める請求）を計算に入れ、確定で適用済みにする
  *  すべての操作は version 照合・監査記録。計算は request 内で同期に行う（1お客様×1か月は数百件規模）
  */
 import { createHash, randomUUID } from 'node:crypto';
@@ -18,6 +19,7 @@ import {
   calculateBilling,
   canonicalJson,
   closingDateForMonth,
+  invoiceDisplayNo,
   resolveBillingTransition,
   resolveRecordTransition,
   totalsOf,
@@ -25,6 +27,7 @@ import {
   type BillingEngineInput,
   type BillingLine,
   type BillingRole,
+  type EngineAdjustment,
   type EngineDeliverySource,
   type EngineFixedCharge,
   type EngineProduct,
@@ -35,6 +38,7 @@ import {
 } from '@inspexor/domain';
 import {
   appendAudit,
+  billingAdjustmentPath,
   billingCalcCollection,
   billingCalcPath,
   billingRunPath,
@@ -49,6 +53,7 @@ import {
   revisionPath,
   writeChunks,
   writeCounter,
+  type BillingAdjustmentDoc,
   type BillingCalcDoc,
   type BillingRunDoc,
   type BillingRunStatus,
@@ -240,6 +245,14 @@ async function periodHeaders(db: DocReader, customerId: string, start: string, e
   return { work: approved(work), delivery: approved(delivery), unapproved };
 }
 
+/** CHG-011: お客様の未適用の調整のうち、この締め日の請求に入れるもの（元の締め日の翌日以降に締める請求） */
+async function pendingAdjustments(db: DocReader, customerId: string, periodEnd: string): Promise<EngineAdjustment[]> {
+  const rows = await db.query<BillingAdjustmentDoc>(C.billingAdjustments, { where: [{ field: 'customerId', op: '==', value: customerId }] });
+  return rows
+    .filter((r) => r.data.status === 'PENDING' && r.data.applyFrom <= periodEnd)
+    .map((r) => ({ id: r.id, productId: r.data.productId, description: r.data.description, amountYen: r.data.amountYen, sourceInvoiceNo: r.data.sourceInvoiceNo, sourceReportNo: r.data.sourceReportNo }));
+}
+
 export class BillingService {
   constructor(private readonly store: DocStore) {}
 
@@ -249,7 +262,10 @@ export class BillingService {
     const rows = await this.store.query<BillingRunDoc>(C.billingRuns, filter.customerId !== null ? { where: [{ field: 'customerId', op: '==', value: filter.customerId }] } : {});
     const invoiceIds = rows.map((r) => r.data.invoiceId).filter((x): x is string => x !== null);
     const invoices = invoiceIds.length === 0 ? [] : await this.store.getMany<InvoiceDoc>(invoiceIds.map(invoicePath));
-    const invoiceNo = new Map(invoiceIds.map((id, i) => [id, invoices[i]?.invoiceNo ?? null]));
+    const invoiceNo = new Map(invoiceIds.map((id, i) => {
+      const inv = invoices[i];
+      return [id, inv === null || inv === undefined ? null : invoiceDisplayNo(inv.invoiceNo, inv.revision)];
+    }));
     return rows
       .filter((r) => filter.status === null || r.data.status === filter.status)
       .sort((a, b) => (a.data.periodEnd < b.data.periodEnd ? 1 : a.data.periodEnd > b.data.periodEnd ? -1 : a.data.customerCode.localeCompare(b.data.customerCode) || a.data.createdAt.getTime() - b.data.createdAt.getTime()))
@@ -267,7 +283,7 @@ export class BillingService {
     const lines = calc === null ? [] : await readChunks<BillingLine[]>(this.store, id, calc.calcVersion, 'lines', calc.chunkCounts.lines);
     const invoice = run.invoiceId === null ? null : await this.store.get<InvoiceDoc>(invoicePath(run.invoiceId));
     return {
-      ...toView(id, run, invoice?.invoiceNo ?? null),
+      ...toView(id, run, invoice === null ? null : invoiceDisplayNo(invoice.invoiceNo, invoice.revision)),
       viewingCalcVersion: calc?.calcVersion ?? 0,
       lines,
       warnings: (calc?.warnings ?? []).map(warningView),
@@ -405,6 +421,13 @@ export class BillingService {
         if (p !== null && p !== undefined) products.push({ id: pid, code: p.code, name: p.name, settlementType: p.settlementType });
       });
     }
+    const adjustments = await pendingAdjustments(db, run.customerId, run.periodEnd);
+    for (const a of adjustments) {
+      if (!products.some((p) => p.id === a.productId)) {
+        const doc = await db.get<ProductDoc>(`${C.products}/${a.productId}`);
+        if (doc !== null) products.push({ id: a.productId, code: doc.code, name: doc.name, settlementType: doc.settlementType });
+      }
+    }
     return {
       customer: { code: customer.code, name: customer.name, closingDay: customer.closingDay },
       unapprovedCount: headers.unapproved,
@@ -419,6 +442,7 @@ export class BillingService {
         fixedCharges,
         work,
         deliveries,
+        adjustments,
       },
     };
   }
@@ -496,6 +520,7 @@ export class BillingService {
           warnings,
           sources: [...result.sources],
           chunkCounts: { lines: lineChunks, input: inputChunks },
+          adjustmentIds: [...result.adjustmentIds],
         };
         tx.create(billingCalcPath(id, calcVersion), calc);
         tx.update(billingRunPath(id), {
@@ -634,6 +659,14 @@ export class BillingService {
       const now = await periodHeaders(tx, run.customerId, run.periodStart, run.periodEnd);
       const known = new Set(calc.sources.map((s) => s.reportId));
       for (const h of [...now.work, ...now.delivery]) if (!known.has(h.id)) changed.push(h.data.reportNo);
+      // CHG-011: 計算に入れた調整が未適用のままか、計算後に新しい調整が登録されていないか
+      const usedAdjustments = calc.adjustmentIds ?? [];
+      const adjustmentDocs = await tx.getMany<BillingAdjustmentDoc>(usedAdjustments.map(billingAdjustmentPath));
+      usedAdjustments.forEach((aid, i) => {
+        if (adjustmentDocs[i]?.status !== 'PENDING') changed.push(`調整 ${adjustmentDocs[i]?.description ?? aid}`);
+      });
+      const usedSet = new Set(usedAdjustments);
+      for (const a of await pendingAdjustments(tx, run.customerId, run.periodEnd)) if (!usedSet.has(a.id)) changed.push(`調整 ${a.description}`);
       if (changed.length > 0) {
         const list = [...new Set(changed)].sort();
         throw new BillingError(409, 'SOURCE_CHANGED', `計算後に報告が変わりました（${list.slice(0, 5).join('、')}${list.length > 5 ? ` ほか${list.length - 5}件` : ''}）。再計算してください。`, [], { changedReports: list });
@@ -674,8 +707,12 @@ export class BillingService {
         createdAt: ctx.now,
         createdBy: ctx.actorId,
         updatedAt: ctx.now,
+        appliedAdjustmentIds: [...usedAdjustments],
       };
       writeCounter(tx, counterName, revision);
+      usedAdjustments.forEach((aid, i) => {
+        tx.update(billingAdjustmentPath(aid), { status: 'APPLIED', appliedRunId: id, appliedInvoiceId: invoiceId, version: (adjustmentDocs[i]?.version ?? 0) + 1, updatedAt: ctx.now });
+      });
       tx.create(invoicePath(invoiceId), invoice);
       for (const l of lock) {
         tx.update(reportPath(l.type, l.reportId), { status: 'BILLING_LOCKED', version: l.header.version + 1, updatedAt: ctx.now, billingRunId: id });
@@ -705,6 +742,9 @@ export class BillingService {
     await this.store.runTransaction(async (tx: DocTransaction) => {
       const run = await readRun(tx, id);
       checkVersion(run, cmd.expectedVersion);
+      if (run.status === 'FINALIZED' || run.status === 'ISSUED' || run.status === 'SENT') {
+        throw new BillingError(409, 'STATE_CONFLICT', '確定済みの請求は、請求書の画面で無効化してください（報告を承認済みに戻します）。', [], { currentStatus: run.status, invoiceId: run.invoiceId });
+      }
       const to = transition(run.status, 'void', ctx);
       const owner = await readUniqueOwner(tx, UNIQUE_KIND, run.customerId, run.periodEnd);
       if (owner === id) releaseUnique(tx, UNIQUE_KIND, run.customerId, run.periodEnd);

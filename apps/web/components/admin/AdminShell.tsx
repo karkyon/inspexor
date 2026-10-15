@@ -45,6 +45,8 @@ const ADMIN_AREA_ROLES = ['OFFICE', 'ADMIN', 'AUDITOR'];
 /** CHG-004: 提案書 P.6 の事務所 Web 管理画面（報告一覧・月次集計・マスタ管理） */
 interface NavItem {
   readonly prefix: string;
+  /** CHG-011: このメニューを選択中にする他の path（請求書 /admin/invoices は「請求」） */
+  readonly also?: readonly string[];
   readonly href: string;
   readonly code: string;
   readonly label: string;
@@ -58,10 +60,14 @@ const NAV: readonly NavItem[] = [
   { prefix: '/admin/dashboard', href: '/admin/dashboard', code: 'SCR-10', label: 'ダッシュボード', feature: 'approval' },
   { prefix: '/admin/records', href: '/admin/records', code: 'SCR-11', label: '報告一覧' },
   { prefix: '/admin/monthly', href: '/admin/monthly', code: '集計', label: '月次集計' },
-  { prefix: '/admin/billing', href: '/admin/billing', code: 'SCR-14', label: '請求', feature: 'billing' },
+  { prefix: '/admin/billing', also: ['/admin/invoices'], href: '/admin/billing', code: 'SCR-14', label: '請求', feature: 'billing' },
   { prefix: '/admin/masters', href: '/admin/masters/products', code: 'SCR-13', label: 'マスター管理' },
   { prefix: '/admin/users', href: '/admin/users', code: 'USER', label: '利用者管理' },
 ];
+
+function matches(n: NavItem, pathname: string): boolean {
+  return pathname.startsWith(n.prefix) || (n.also ?? []).some((p) => pathname.startsWith(p));
+}
 
 function visibleNav(user: AdminUser | null): NavItem[] {
   return NAV.filter((n) => (n.feature === undefined || hasFeature(user, n.feature)) && (n.roles === undefined || (user !== null && user.roles.some((r) => n.roles?.includes(r)))));
@@ -110,7 +116,7 @@ export function AdminShell({ children }: { readonly children: ReactNode }) {
         </div>
         <nav>
           {visibleNav(user).map((n) => {
-            const active = pathname.startsWith(n.prefix);
+            const active = matches(n, pathname);
             return (
               <a key={n.prefix} className={`ix-navitem${active ? ' active' : ''}`} href={n.href} aria-current={active ? 'page' : undefined}>
                 <span>{n.code}</span>
@@ -126,7 +132,7 @@ export function AdminShell({ children }: { readonly children: ReactNode }) {
       </aside>
       <div className="ix-content">
         <header className="ix-appbar">
-          <b>{NAV.find((n) => pathname.startsWith(n.prefix))?.label ?? '管理'}</b>
+          <b>{NAV.find((n) => matches(n, pathname))?.label ?? '管理'}</b>
           <div className="ix-spacer" />
           {user !== null ? (
             <div className="ix-user">

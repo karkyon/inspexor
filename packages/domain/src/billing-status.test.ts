@@ -51,8 +51,13 @@ describe('billing-status: システム基本設計書 §状態遷移 準拠', ()
     for (const from of ['OPEN', 'CALCULATED', 'NEEDS_REVIEW', 'REVIEWED'] as const) {
       expect(resolveBillingTransition(from, 'void', { roles: ['ADMIN'] })).toEqual({ ok: true, to: 'VOIDED' });
     }
-    for (const from of ['CALCULATING', 'FINALIZED', 'ISSUED', 'SENT', 'VOIDED'] as const) {
+    for (const from of ['CALCULATING', 'VOIDED'] as const) {
       expect(resolveBillingTransition(from, 'void', { roles: ['ADMIN'] }).ok).toBe(false);
+    }
+    // CHG-011: 確定後は請求書の無効化（API-023 void）と同時に VOIDED
+    for (const from of ['FINALIZED', 'ISSUED', 'SENT'] as const) {
+      expect(resolveBillingTransition(from, 'void', { roles: ['OFFICE'] })).toEqual({ ok: true, to: 'VOIDED' });
+      expect(resolveBillingTransition(from, 'void', { roles: ['AUDITOR' as never] }).ok).toBe(false);
     }
     expect(resolveBillingTransition('FINALIZED', 'calculate', { roles: ['ADMIN'] }).ok).toBe(false);
     expect(resolveBillingTransition('NEEDS_REVIEW', 'finalize', { roles: ['ADMIN'] }).ok).toBe(false);

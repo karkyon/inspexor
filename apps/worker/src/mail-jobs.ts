@@ -3,26 +3,32 @@
  *  - 宛先は作成時に snapshot（品番の DAILY 担当かつ sendDaily の有効な連絡先）。0件・不正は FAILED_FINAL（帳票は残す）
  *  - 送信前に PDF を storage から読み戻して files.sha256 と照合、20MB 以下
  *  - Message-ID は冪等 key から決定し、送信前に provider を検索（timeout 後に実は送れていた場合の二重送信防止: T-MAIL-001）
+ *  - CHG-011: 請求書の送付（invoiceId・documentJobIds）は鏡・明細の2件を添付し、送信できたら請求書・請求 run を SENT にする
  */
 import { createHash } from 'node:crypto';
 import {
   dailyReportSubject,
   decideRetry,
   hasHeaderInjection,
+  resolveBillingTransition,
   MAIL_MAX_ATTACHMENTS,
   MAIL_MAX_TOTAL_BYTES,
   normalizeRecipients,
 } from '@inspexor/domain';
 import {
+  billingRunPath,
   C,
   documentPath,
+  invoicePath,
   mailJobPath,
   StorageError,
   uuidFromKey,
   type DocStore,
   type DocTransaction,
   type DocumentJobDoc,
+  type BillingRunDoc,
   type FileDoc,
+  type InvoiceDoc,
   type MailJobDoc,
   type MailSnapshotDoc,
   type StorageAdapter,
@@ -141,15 +147,21 @@ export async function processOneMailJob(deps: MailDeps): Promise<'none' | 'sent'
   const job = await claim(deps.store, deps.now());
   if (job === null) return 'none';
   try {
-    const d = await deps.store.get<DocumentJobDoc>(documentPath(job.documentJobId));
-    const f = d?.fileId ? await deps.store.get<FileDoc>(`${C.files}/${d.fileId}`) : null;
-    if (d === null || d.status !== 'GENERATED' || f === null) throw new FinalFailure('DOCUMENT_NOT_READY', '帳票が生成されていません');
+    // 添付: 日報は1件、請求書（CHG-011）は鏡・明細の2件
+    const jobIds = job.documentJobIds !== undefined && job.documentJobIds.length > 0 ? [...job.documentJobIds] : [job.documentJobId];
+    const names = job.recipients.attachmentNames !== undefined && job.recipients.attachmentNames.length === jobIds.length ? [...job.recipients.attachmentNames] : [job.recipients.attachmentName];
     const check = normalizeRecipients([...job.recipients.to]);
     if (!check.ok) throw new FinalFailure(check.code, check.detail);
     if (hasHeaderInjection(job.subject)) throw new FinalFailure('RECIPIENT_INVALID', 'subject header injection');
-    const stored = await deps.storage.get(f.storageKey);
-    if (createHash('sha256').update(stored.bytes).digest('hex') !== f.sha256) throw new FinalFailure('HASH_MISMATCH', 'PDF hash 不一致');
-    const attachments = [{ filename: job.recipients.attachmentName, contentType: 'application/pdf', bytes: stored.bytes }];
+    const attachments: Array<{ filename: string; contentType: string; bytes: Buffer }> = [];
+    for (const [i, docId] of jobIds.entries()) {
+      const d = await deps.store.get<DocumentJobDoc>(documentPath(docId));
+      const f = d?.fileId ? await deps.store.get<FileDoc>(`${C.files}/${d.fileId}`) : null;
+      if (d === null || d.status !== 'GENERATED' || f === null) throw new FinalFailure('DOCUMENT_NOT_READY', '帳票が生成されていません');
+      const stored = await deps.storage.get(f.storageKey);
+      if (createHash('sha256').update(stored.bytes).digest('hex') !== f.sha256) throw new FinalFailure('HASH_MISMATCH', 'PDF hash 不一致');
+      attachments.push({ filename: names[i] ?? (f.storageKey.split('/').pop() as string), contentType: 'application/pdf', bytes: stored.bytes });
+    }
     if (attachments.length > MAIL_MAX_ATTACHMENTS || attachments.reduce((s, a) => s + a.bytes.byteLength, 0) > MAIL_MAX_TOTAL_BYTES) {
       throw new FinalFailure('FILE_TOO_LARGE', '添付が 20MB を超えています');
     }
@@ -159,7 +171,18 @@ export async function processOneMailJob(deps: MailDeps): Promise<'none' | 'sent'
       (await deps.sender.send({ messageId, to: check.recipients, cc: [...job.recipients.cc], bcc: [...job.recipients.bcc], subject: job.subject, text: job.recipients.text, attachments }));
     const now = deps.now();
     await deps.store.runTransaction(async (tx) => {
+      // ---- 読込（請求書の送付: 請求書・請求 run を SENT に）
+      const invoice = job.invoiceId ? await tx.get<InvoiceDoc>(invoicePath(job.invoiceId)) : null;
+      const run = invoice !== null ? await tx.get<BillingRunDoc>(billingRunPath(invoice.billingRunId)) : null;
+      // ---- 書込
       tx.update(mailJobPath(job.id), { status: 'SENT', providerMessageId: providerId, errorCode: null, updatedAt: now });
+      if (invoice !== null && job.invoiceId && (invoice.status === 'ISSUED' || invoice.status === 'SENT')) {
+        tx.update(invoicePath(job.invoiceId), { status: 'SENT', version: invoice.version + 1, sentAt: now, sendCount: (invoice.sendCount ?? 0) + 1, updatedAt: now });
+        if (run !== null && resolveBillingTransition(run.status, 'mailSent', { roles: ['SYSTEM'] }).ok) {
+          tx.update(billingRunPath(invoice.billingRunId), { status: 'SENT', version: run.version + 1, updatedAt: now });
+        }
+        appendAudit(tx, { action: 'INVOICE_SENT', targetType: 'INVOICE', targetId: job.invoiceId, beforeData: { status: invoice.status }, afterData: { status: 'SENT', mailJobId: job.id, sendRevision: job.sendRevision }, correlationId: job.id, occurredAt: now });
+      }
       // audit に宛先・本文は残さない（SEC-017）。件数のみ
       appendAudit(tx, { action: 'MAIL_SENT', targetType: 'MAIL_JOB', targetId: job.id, afterData: { documentJobId: job.documentJobId, recipientCount: check.recipients.length, providerMessageId: providerId, attempts: job.attempts }, correlationId: job.documentJobId, occurredAt: now });
       enqueueEvent(tx, { type: 'MailSent', aggregateType: 'Mail', aggregateId: job.id, correlationId: job.documentJobId, causationId: null, occurredAt: now, payload: { mailJobId: job.id, providerMessageId: providerId } });

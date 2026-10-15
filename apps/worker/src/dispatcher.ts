@@ -133,7 +133,8 @@ export async function dispatchOutbox(store: DocStore, now: Date, limit = 20): Pr
 async function onDocumentRequested(tx: DocTransaction, eventId: string, p: Record<string, unknown>, now: Date): Promise<(() => void) | null> {
   if (typeof p['documentJobId'] !== 'string' || typeof p['template'] !== 'string') return null;
   const original = await tx.get<DocumentJobDoc>(documentPath(p['documentJobId']));
-  if (original === null) return null;
+  // CHG-011: 請求書の帳票は請求書の発行（API-023 issue）で作る
+  if (original === null || original.sourceType === 'INVOICE' || original.reportType === 'INVOICE') return null;
   return prepareDocumentJob(
     tx,
     {

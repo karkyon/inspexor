@@ -21,7 +21,11 @@ import {
   type FileDoc,
   type MailJobDoc,
   type ReportHeaderDoc,
+  type ReportType,
 } from '@inspexor/docstore';
+
+/** 報告の帳票 job（請求書の帳票は除く。CHG-011） */
+type ReportJobDoc = Omit<DocumentJobDoc, 'sourceType' | 'reportType'> & { readonly sourceType: 'WORK_REVISION' | 'DELIVERY_REVISION'; readonly reportType: ReportType };
 import { signFileUrl } from './signed-url';
 
 export class DocumentError extends Error {
@@ -46,7 +50,7 @@ export const DOCUMENT_ACTIONS: readonly DocumentAction[] = ['regenerate', 'send'
 
 interface DocRow {
   readonly id: string;
-  readonly job: DocumentJobDoc;
+  readonly job: ReportJobDoc;
   readonly file: FileDoc | null;
   readonly header: ReportHeaderDoc;
 }
@@ -62,8 +66,10 @@ function notFound(): DocumentError {
 }
 
 async function load(db: DocReader, id: string): Promise<DocRow | null> {
-  const job = await db.get<DocumentJobDoc>(documentPath(id));
-  if (job === null) return null;
+  const raw = await db.get<DocumentJobDoc>(documentPath(id));
+  // CHG-011: 請求書の帳票は請求書の画面（API-022）で扱う（この API の対象外）
+  if (raw === null || raw.sourceType === 'INVOICE' || raw.reportType === 'INVOICE') return null;
+  const job = raw as ReportJobDoc;
   const header = await db.get<ReportHeaderDoc>(reportPath(job.reportType, job.reportId));
   if (header === null) return null;
   const file = job.fileId === null ? null : await db.get<FileDoc>(filePath(job.fileId));

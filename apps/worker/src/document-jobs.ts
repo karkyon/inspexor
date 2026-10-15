@@ -4,6 +4,7 @@
  *   → PDF（Chromium）→ 20MB 検査 → storage → 読み戻し hash 照合 → files / GENERATED（＋CONFIRMED→SUBMITTED）
  *   → 日報は mail job（宛先 snapshot。CHG-004 により dailyMailEnabled=true のときだけ）。失敗は retry（network/5xx 相当）か FAILED_FINAL。record は失敗でも保持。
  * 報告ヘッダの帳票状態（documentStatus）は、その job が最新の帳票（header.documentId）のときだけ更新する。
+ * CHG-011: 請求書の鏡・明細（sourceType INVOICE）も同じ流れで作り、両方そろえば請求書を ISSUED にする（invoice-jobs.ts）。
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { decideRetry, documentFileName, findUnresolvedPlaceholders, MAIL_MAX_TOTAL_BYTES, renderTemplate, type TemplateType } from '@inspexor/domain';
@@ -24,6 +25,7 @@ import {
 } from '@inspexor/docstore';
 import { appendAudit, enqueueEvent } from './db';
 import { CLAIM_STATUSES, isClaimable } from './jobs-common';
+import { invoiceSnapshot, invoiceStatusUpdater } from './invoice-jobs';
 import { prepareDailyMailJob } from './mail-jobs';
 import { AdapterError, type PdfRenderer } from './ports';
 import { deliverySnapshot, ensureRegistered, loadFixtureTemplate, workSnapshot, type DocumentSnapshot } from './templates';
@@ -51,16 +53,18 @@ const TARGET: Record<string, { aggregate: string; target: string }> = {
   DELIVERY_REVISION: { aggregate: 'Delivery', target: 'DELIVERY_REPORT' },
 };
 
-/** 読込段階: ヘッダ。書込段階で帳票状態を反映する関数を返す */
+/** 読込段階: ヘッダ。書込段階で帳票状態を反映する関数を返す（請求書の帳票は報告ヘッダを持たない） */
 async function headerStatusUpdater(tx: DocTransaction, job: JobRow): Promise<{ header: ReportHeaderDoc | null; apply: (status: JobStatus, extra?: Record<string, unknown>) => void }> {
-  const header = await tx.get<ReportHeaderDoc>(reportPath(job.reportType, job.reportId));
+  if (job.reportType === 'INVOICE') return { header: null, apply: () => undefined };
+  const reportType = job.reportType;
+  const header = await tx.get<ReportHeaderDoc>(reportPath(reportType, job.reportId));
   return {
     header,
     apply: (status, extra = {}) => {
       if (header === null) return;
       const own = header.documentId === job.id;
       if (own || Object.keys(extra).length > 0) {
-        tx.update(reportPath(job.reportType, job.reportId), { ...(own ? { documentStatus: status } : {}), ...extra });
+        tx.update(reportPath(reportType, job.reportId), { ...(own ? { documentStatus: status } : {}), ...extra });
       }
     },
   };
@@ -120,9 +124,11 @@ export async function processOneDocumentJob(deps: DocumentDeps): Promise<'none' 
   try {
     const src = { reportId: job.reportId, revisionId: job.revisionId };
     const snapshot: DocumentSnapshot | null =
-      job.sourceType === 'WORK_REVISION'
-        ? await workSnapshot(deps.store, src, template === 'DAILY_REPORT_V1' ? 'DAILY_REPORT_V1' : 'DAILY_REPORT_V2')
-        : await deliverySnapshot(deps.store, src, template === 'DELIVERY_REPORT_V1' ? 'DELIVERY_REPORT_V1' : 'DELIVERY_REPORT_V2');
+      job.sourceType === 'INVOICE'
+        ? await invoiceSnapshot(deps.store, job, template)
+        : job.sourceType === 'WORK_REVISION'
+          ? await workSnapshot(deps.store, src, template === 'DAILY_REPORT_V1' ? 'DAILY_REPORT_V1' : 'DAILY_REPORT_V2')
+          : await deliverySnapshot(deps.store, src, template === 'DELIVERY_REPORT_V1' ? 'DELIVERY_REPORT_V1' : 'DELIVERY_REPORT_V2');
     if (snapshot === null || snapshot.type !== template) throw new FinalFailure('SOURCE_NOT_FOUND', '確定済み revision が見つかりません');
     timer.lap('snapshot');
     let loaded;
@@ -160,6 +166,7 @@ export async function processOneDocumentJob(deps: DocumentDeps): Promise<'none' 
       const current = await tx.get<DocumentJobDoc>(documentPath(job.id));
       if (current === null || current.status !== 'PROCESSING' || current.attempts !== job.attempts) return; // 他の worker が取得し直した
       const h = await headerStatusUpdater(tx, job);
+      const inv = job.sourceType === 'INVOICE' ? await invoiceStatusUpdater(tx, job) : null;
       const t = TARGET[job.sourceType];
       // RECORD_TRANSITIONS: CONFIRMED --documentGenerated(SYSTEM, PDF hash 有)--> SUBMITTED。current revision の帳票のみ
       const submit = t !== undefined && h.header !== null && h.header.status === 'CONFIRMED' && h.header.currentRevisionId === job.revisionId;
@@ -174,6 +181,7 @@ export async function processOneDocumentJob(deps: DocumentDeps): Promise<'none' 
       tx.create(filePath(fileId), file);
       tx.update(documentPath(job.id), { status: 'GENERATED', fileId, errorCode: null, updatedAt: now });
       h.apply('GENERATED', submitVersion !== null ? { status: 'SUBMITTED', version: submitVersion, updatedAt: now, submittedAt: now } : {});
+      inv?.apply('GENERATED', now);
       appendAudit(tx, {
         action: 'DOCUMENT_GENERATED',
         targetType: 'DOCUMENT_JOB',

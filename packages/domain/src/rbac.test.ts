@@ -5,11 +5,11 @@ const ALL = Object.keys(OPERATION_POLICIES) as OperationId[];
 const as = (...roles: RoleCode[]) => ({ roles });
 
 describe('rbac: API設計書 §6 認証/権限 準拠', () => {
-  it('34 operation（API-001〜025＋CHG-004 API-026〜028＋CHG-007 API-029＋CHG-008 API-030〜033＋CHG-009 API-034）を網羅し apiId が一意', () => {
-    expect(ALL).toHaveLength(34);
+  it('37 operation（API-001〜025＋CHG-004 API-026〜028＋CHG-007 API-029＋CHG-008 API-030〜033＋CHG-009 API-034＋CHG-011 API-035〜037）を網羅し apiId が一意', () => {
+    expect(ALL).toHaveLength(37);
     const ids = ALL.map((op) => OPERATION_POLICIES[op].apiId);
-    expect(new Set(ids).size).toBe(34);
-    expect([...ids].sort()).toEqual(Array.from({ length: 34 }, (_, i) => `API-${String(i + 1).padStart(3, '0')}`));
+    expect(new Set(ids).size).toBe(37);
+    expect([...ids].sort()).toEqual(Array.from({ length: 37 }, (_, i) => `API-${String(i + 1).padStart(3, '0')}`));
   });
 
   it('CHG-004: setDeliveryFee は OFFICE/ADMIN のみ', () => {
@@ -85,9 +85,9 @@ describe('rbac: API設計書 §6 認証/権限 準拠', () => {
     expect(authorizeOperation('createMaster', as('OFFICE', 'ADMIN')).ok).toBe(true);
   });
 
-  it('冪等性 yes は設計書の7操作', () => {
+  it('冪等性 yes は設計書の7操作＋CHG-011 の調整登録・取消', () => {
     expect(ALL.filter((op) => OPERATION_POLICIES[op].idempotent).sort()).toEqual(
-      ['confirmDeliveryReport', 'confirmWorkReport', 'createBillingRun', 'documentAction', 'transitionBillingRun', 'transitionInvoice', 'transitionRecord'],
+      ['cancelBillingAdjustment', 'confirmDeliveryReport', 'confirmWorkReport', 'createBillingAdjustment', 'createBillingRun', 'documentAction', 'transitionBillingRun', 'transitionInvoice', 'transitionRecord'],
     );
   });
 });

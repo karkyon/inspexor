@@ -13,6 +13,7 @@
  *        運搬費が入力済みで按分対象が無い → NO_ALLOCATION_TARGET。
  *  期間に1回: 月額固定の運搬ルール・固定費ルールは、お客様の品番で請求期間に重なる有効なルールを1明細。同じ品番（固定費は費目）に複数重なれば RULE_AMBIGUOUS。
  *  税: tax=ROUND_HALF_UP(小計×税率)、合計=小計+税。合計が負なら NEGATIVE_INVOICE。
+ *  調整（CHG-011、遅延訂正 FR-019）: 確定済みの請求書への訂正額を、次の請求期間の明細（ADJUSTMENT、元の請求書番号付き）にする。負も可
  */
 import Decimal from 'decimal.js';
 import { allocateTransportFee } from './transport-allocation';
@@ -89,6 +90,17 @@ export interface EngineDeliverySource {
   readonly items: ReadonlyArray<{ readonly productId: string; readonly quantity: number }>;
 }
 
+/** 遅延訂正の調整（CHG-011）。確定済みの請求書を変えず、次の請求で差額を明細にする */
+export interface EngineAdjustment {
+  readonly id: string;
+  readonly productId: string;
+  readonly description: string;
+  /** 0 以外の整数円（負は値引き・返金） */
+  readonly amountYen: number;
+  readonly sourceInvoiceNo: string;
+  readonly sourceReportNo: string | null;
+}
+
 export interface BillingEngineInput {
   readonly customerId: string;
   readonly periodStart: string;
@@ -102,10 +114,12 @@ export interface BillingEngineInput {
   readonly fixedCharges: readonly EngineFixedCharge[];
   readonly work: readonly EngineWorkSource[];
   readonly deliveries: readonly EngineDeliverySource[];
+  /** CHG-011: この請求に入れる調整（未適用のもの） */
+  readonly adjustments?: readonly EngineAdjustment[];
 }
 
-export type BillingLineType = 'WORK_QUANTITY' | 'WORK_REGULAR' | 'WORK_OVERTIME' | 'TRANSPORT_PER_TRIP' | 'TRANSPORT_ALLOCATED' | 'TRANSPORT_MONTHLY' | 'FIXED_CHARGE';
-export type BillingSourceType = 'WORK' | 'DELIVERY' | 'RULE';
+export type BillingLineType = 'WORK_QUANTITY' | 'WORK_REGULAR' | 'WORK_OVERTIME' | 'TRANSPORT_PER_TRIP' | 'TRANSPORT_ALLOCATED' | 'TRANSPORT_MONTHLY' | 'FIXED_CHARGE' | 'ADJUSTMENT';
+export type BillingSourceType = 'WORK' | 'DELIVERY' | 'RULE' | 'ADJUSTMENT';
 export type BillingWarningCode = 'RULE_NOT_FOUND' | 'RULE_AMBIGUOUS' | 'NO_ALLOCATION_TARGET' | 'NEGATIVE_INVOICE';
 
 export interface BillingLine {
@@ -165,6 +179,8 @@ export interface BillingEngineResult extends BillingTotals {
   /** 計算に使った実績（報告ID・版）。確定時に現在版と一致するかを確認する */
   readonly sources: ReadonlyArray<{ readonly type: 'WORK' | 'DELIVERY'; readonly reportId: string; readonly revisionId: string }>;
   readonly ruleIds: readonly string[];
+  /** CHG-011: 明細に入れた調整の ID。確定時に未適用のままかを照合する */
+  readonly adjustmentIds: readonly string[];
 }
 
 type Draft = Omit<BillingLine, 'no'>;
@@ -177,6 +193,7 @@ const LINE_ORDER: Record<BillingLineType, number> = {
   TRANSPORT_ALLOCATED: 4,
   TRANSPORT_MONTHLY: 5,
   FIXED_CHARGE: 6,
+  ADJUSTMENT: 7,
 };
 
 const cmp = (a: string | number, b: string | number): number => (a < b ? -1 : a > b ? 1 : 0);
@@ -472,6 +489,26 @@ export function calculateBilling(input: BillingEngineInput): BillingEngineResult
     }
   }
 
+  // ---------------- 調整（CHG-011） ----------------
+  const adjustments = [...(input.adjustments ?? [])].sort((a, b) => cmp(a.sourceInvoiceNo, b.sourceInvoiceNo) || cmp(a.id, b.id));
+  for (const a of adjustments) {
+    const p = productOf(a.productId);
+    lines.push({
+      sourceType: 'ADJUSTMENT', reportId: null, reportNo: a.sourceReportNo, revisionId: null, revisionNo: null, businessDate: null, productId: p.id, productCode: p.code,
+      lineType: 'ADJUSTMENT',
+      description: `調整 ${a.description}（${a.sourceInvoiceNo} の訂正）`,
+      quantity: '1',
+      unit: '式',
+      unitPrice: String(a.amountYen),
+      multiplier: null,
+      unrounded: String(a.amountYen),
+      amountYen: a.amountYen,
+      ruleId: a.id,
+      ruleSnapshot: { type: 'adjustment', ...a },
+      calculation: { formula: '調整額（確定済みの請求書の訂正を次の請求に反映）', amountYen: a.amountYen, sourceInvoiceNo: a.sourceInvoiceNo, sourceReportNo: a.sourceReportNo },
+    });
+  }
+
   const sorted = sortLines(lines);
   const totals = totalsOf(sorted, taxRate);
   if (totals.totalYen < 0) {
@@ -495,6 +532,7 @@ export function calculateBilling(input: BillingEngineInput): BillingEngineResult
     warnings: [...warnings.values()].sort((a, b) => cmp(a.businessDate ?? '9999', b.businessDate ?? '9999') || cmp(a.reportNo ?? '', b.reportNo ?? '') || cmp(a.id, b.id)),
     sources,
     ruleIds: [...usedRules].sort(cmp),
+    adjustmentIds: adjustments.map((a) => a.id),
     ...totals,
   };
 }

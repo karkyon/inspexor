@@ -151,3 +151,6 @@ body:has(.ix-shell){margin:0}
 .ix-pwrow input{flex:1 1 240px;min-height:44px;border:1px solid #aebfcb;border-radius:9px;padding:10px 12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 fieldset.ix-field{border:0;padding:0;margin:0;min-width:0}
 .ix-checklist small{font-weight:400}
+
+/* CHG-011 請求書 */
+.ix-plainlist{list-style:none;padding:0;margin:0 0 8px;display:grid;gap:6px}

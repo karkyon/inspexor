@@ -4,7 +4,8 @@
  * CHG-009 で次を追加した（設計書に記載が無かった遷移）:
  *  - 再計算: CALCULATED / NEEDS_REVIEW / REVIEWED → calculate → CALCULATING（仕様書「再計算は新calc_versionで旧結果を保持」）
  *  - 取消: OPEN / CALCULATED / NEEDS_REVIEW / REVIEWED → void → VOIDED（確定前の請求 run の取消。理由必須）
- *    確定後（FINALIZED 以降）の無効化は請求書の無効化（API-023 void、遅延訂正）で扱う
+ *    確定後（FINALIZED 以降）の無効化は請求書の無効化（API-023 void）で扱う
+ * CHG-011: FINALIZED / ISSUED / SENT → void → VOIDED（請求書の無効化と同時。理由必須。報告は承認済みに戻り、同じ期間を作り直せる）
  */
 
 export type BillingStatus =
@@ -48,6 +49,9 @@ export const BILLING_TRANSITIONS: readonly BillingTransitionRule[] = [
   { from: 'CALCULATED', command: 'void', to: 'VOIDED', allowedRoles: ['OFFICE', 'ADMIN'], guardNote: 'CHG-009 確定前の取消、理由必須' },
   { from: 'NEEDS_REVIEW', command: 'void', to: 'VOIDED', allowedRoles: ['OFFICE', 'ADMIN'], guardNote: 'CHG-009 確定前の取消、理由必須' },
   { from: 'REVIEWED', command: 'void', to: 'VOIDED', allowedRoles: ['OFFICE', 'ADMIN'], guardNote: 'CHG-009 確定前の取消、理由必須' },
+  { from: 'FINALIZED', command: 'void', to: 'VOIDED', allowedRoles: ['OFFICE', 'ADMIN'], guardNote: 'CHG-011 請求書の無効化、理由必須' },
+  { from: 'ISSUED', command: 'void', to: 'VOIDED', allowedRoles: ['OFFICE', 'ADMIN'], guardNote: 'CHG-011 請求書の無効化、理由必須' },
+  { from: 'SENT', command: 'void', to: 'VOIDED', allowedRoles: ['OFFICE', 'ADMIN'], guardNote: 'CHG-011 請求書の無効化、理由必須' },
 ] as const;
 
 export interface BillingActor {

@@ -22,7 +22,8 @@ export type RecordCommand =
   | 'reject'
   | 'revoke'
   | 'revise'
-  | 'billingFinalize';
+  | 'billingFinalize'
+  | 'billingUnlock';
 
 export interface RecordTransitionRule {
   readonly from: RecordStatus;
@@ -43,6 +44,8 @@ export const RECORD_TRANSITIONS: readonly RecordTransitionRule[] = [
   { from: 'REJECTED', command: 'revise', to: 'DRAFT', ownerAllowed: true, allowedRoles: ['OFFICE'], reasonRequired: false, guardNote: 'parent revision' },
   { from: 'REVOKED', command: 'revise', to: 'DRAFT', ownerAllowed: true, allowedRoles: ['OFFICE'], reasonRequired: false, guardNote: 'parent revision' },
   { from: 'APPROVED', command: 'billingFinalize', to: 'BILLING_LOCKED', ownerAllowed: false, allowedRoles: ['SYSTEM'], reasonRequired: false, guardNote: 'run finalizing' },
+  // CHG-011: 請求書の無効化（理由必須）で、その請求に入っていた報告を承認済みに戻す（同じ期間を作り直すため）
+  { from: 'BILLING_LOCKED', command: 'billingUnlock', to: 'APPROVED', ownerAllowed: false, allowedRoles: ['SYSTEM'], reasonRequired: false, guardNote: 'CHG-011 invoice void' },
 ] as const;
 
 export interface RecordActor {

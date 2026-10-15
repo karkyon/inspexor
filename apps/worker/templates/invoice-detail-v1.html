@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>請求明細 {{invoice_no}}</title>
+<meta name="inspexor-page-footer" content="請求明細 {{invoice_no}}">
+<!-- INVOICE_DETAIL_V1（CHG-011、fixture HTML）: 請求明細。A4、表の見出しを各ページに繰り返す（合計は最後に1回だけ）、0円の明細は出さない（固定費を除く）、金額は桁区切りの整数円 -->
+<style>
+  @page { size: A4; margin: 14mm 12mm 18mm; }
+  * { box-sizing: border-box; }
+  body { font-family: "Noto Sans JP", sans-serif; font-size: 9pt; color: #111; margin: 0; }
+  h1 { font-size: 15pt; letter-spacing: .3em; margin: 0 0 3mm; }
+  .meta { display: flex; justify-content: space-between; font-size: 9.5pt; margin-bottom: 3mm; }
+  table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  th, td { border: 0.3mm solid #333; padding: 1mm 1.6mm; vertical-align: top; }
+  td:nth-child(2), td:nth-child(3) { white-space: nowrap; overflow: hidden; }
+  th { background: #e3e6e8; font-weight: 500; white-space: nowrap; text-align: center; }
+  thead { display: table-header-group; }
+  tr { break-inside: avoid; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .small { font-size: 8pt; color: #333; }
+  table.sum { width: 78mm; margin: 3mm 0 0 auto; break-inside: avoid; }
+  table.sum th { text-align: right; }
+  table.sum td { font-weight: 700; }
+</style>
+</head>
+<body>
+  <h1>請求明細</h1>
+  <div class="meta"><span>{{customer_name}} 御中</span><span>請求書番号 {{invoice_no}}　対象期間 {{period}}</span></div>
+  <table>
+    <colgroup><col style="width:9mm"><col style="width:20mm"><col style="width:30mm"><col><col style="width:22mm"><col style="width:20mm"><col style="width:12mm"><col style="width:24mm"></colgroup>
+    <thead><tr><th>No</th><th>日付</th><th>品番 / 元実績</th><th>内容</th><th>数量</th><th>単価</th><th>倍率</th><th>金額（円）</th></tr></thead>
+    <tbody>
+      {{line_rows}}
+    </tbody>
+  </table>
+  <table class="sum">
+    <colgroup><col><col style="width:30mm"></colgroup>
+    <tr><th>小計</th><td class="num">{{subtotal}}</td></tr>
+    <tr><th>消費税（10%）</th><td class="num">{{tax}}</td></tr>
+    <tr><th>合計</th><td class="num">{{total}}</td></tr>
+  </table>
+</body>
+</html>

@@ -3,8 +3,10 @@
  * 請求機能（BILLING_ENABLED、APPROVAL_ENABLED も必要）が無効なら 404（提案書の対象外: Blind）。
  * 入口ガード（認証→CSRF→認可→Idempotency-Key 形式）は createApiHandler、ここでは path/query → Zod（未知field拒否）→ BillingService。
  * 作成・遷移は Idempotency-Key で 24h 冪等（同key同payload=同応答、異payload=409）。
+ * CHG-011: API-022 getInvoice / API-023 transitionInvoice（/api/v1/invoices）、
+ *          API-035 listBillingAdjustments / API-036 createBillingAdjustment / API-037 cancelBillingAdjustment（/api/v1/billing-adjustments）。
  */
-import { featureFlags, type OperationId } from '@inspexor/domain';
+import { featureFlags, INVOICE_ACTIONS, type AdjustmentStatus, type InvoiceAction, type OperationId } from '@inspexor/domain';
 import type { IdempotencyRepository } from '@inspexor/application';
 import type { BillingRunStatus } from '@inspexor/docstore';
 import { z, type ZodTypeAny } from 'zod';
@@ -12,7 +14,9 @@ import { createApiHandler, type ApiContext, type ApiHandlerDeps } from '../http/
 import { dataResponse, errorResponse } from '../http/api-response';
 import { zodIssueMessageJa, type ZodIssueLike } from '../http/zod-messages';
 import { beginIdempotentRequest, computeRequestHash } from '../idempotency/idempotency-service';
+import type { AdjustmentService } from './adjustment-service';
 import { BillingError, type BillingContext, type BillingService } from './billing-service';
+import type { InvoiceService } from './invoice-service';
 
 const UUID_RE = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -22,6 +26,9 @@ type Action = (typeof ACTIONS)[number];
 
 export interface BillingRouteDeps {
   readonly service: () => BillingService;
+  /** CHG-011 */
+  readonly invoices: () => InvoiceService;
+  readonly adjustments: () => AdjustmentService;
   readonly idempotency: () => IdempotencyRepository;
   readonly api: () => ApiHandlerDeps;
   /** 機能の有効化設定の参照元（試験用。既定は process.env） */
@@ -49,10 +56,28 @@ class RequestError extends Error {
   }
 }
 
-function segmentsAfter(request: Request): string[] {
+function segmentsAfter(request: Request, collection = 'billing-runs'): string[] {
   const segments = new URL(request.url).pathname.split('/').filter((s) => s.length > 0);
-  return segments.slice(segments.indexOf('billing-runs') + 1);
+  return segments.slice(segments.indexOf(collection) + 1);
 }
+
+function idOf(request: Request, collection: string, label: string): string {
+  const id = segmentsAfter(request, collection)[0] ?? '';
+  if (!UUID_RE.test(id)) throw new RequestError(404, 'VALIDATION_ERROR', `${label}が見つかりません。`, [{ path: '/id', code: 'not_found', message: 'idが不正です。' }]);
+  return id.toLowerCase();
+}
+
+const adjustmentCreateSchema = z
+  .object({
+    sourceInvoiceId: z.string().regex(UUID_RE, 'uuid形式ではありません'),
+    productId: z.string().regex(UUID_RE, 'uuid形式ではありません'),
+    sourceReportId: z.string().regex(UUID_RE, 'uuid形式ではありません').nullable().optional(),
+    description: z.string().trim().min(1, '内容を入力してください。').max(200),
+    amountYen: z.number().int(),
+    reason: z.string().trim().min(1, '調整の理由を入力してください。').max(1000),
+  })
+  .strict();
+const ADJUSTMENT_STATUSES: readonly AdjustmentStatus[] = ['PENDING', 'APPLIED', 'CANCELLED'];
 
 function runId(request: Request): string {
   const id = segmentsAfter(request)[0] ?? '';
@@ -205,6 +230,83 @@ export function billingActionHandlers(deps: BillingRouteDeps) {
           return idempotent(deps, ctx, route, raw, 200, () => service.finalize(id, { expectedVersion: cmd.expectedVersion }, bc));
         }
       }
+    }),
+  };
+}
+
+// ---------------------------------------------------------------- CHG-011 請求書（API-022・023）
+
+export function invoiceItemHandlers(deps: BillingRouteDeps) {
+  return {
+    GET: handler('getInvoice', deps, async (ctx) => {
+      const id = idOf(ctx.request, 'invoices', '請求書');
+      rejectQuery(ctx.request, []);
+      return dataResponse(200, await deps.invoices().get(id, ctx.now), ctx.correlationId);
+    }),
+  };
+}
+
+export function invoiceActionHandlers(deps: BillingRouteDeps) {
+  return {
+    POST: handler('transitionInvoice', deps, async (ctx) => {
+      const id = idOf(ctx.request, 'invoices', '請求書');
+      const action = segmentsAfter(ctx.request, 'invoices')[1] ?? '';
+      if (!(INVOICE_ACTIONS as readonly string[]).includes(action)) {
+        throw new RequestError(404, 'VALIDATION_ERROR', '未定義の操作です。', [{ path: '/action', code: 'enum', message: `${INVOICE_ACTIONS.join(' / ')} のみ利用できます。` }]);
+      }
+      rejectQuery(ctx.request, []);
+      const raw = await readJson(ctx.request);
+      const cmd = parseBody(commandSchema, raw);
+      const status = action === 'void' ? 200 : 202;
+      return idempotent(deps, ctx, `POST /invoices/${id}/${action}`, raw, status, () => deps.invoices().action(id, action as InvoiceAction, cmd, ctxOf(ctx)));
+    }),
+  };
+}
+
+// ---------------------------------------------------------------- CHG-011 遅延訂正の調整（API-035〜037）
+
+export function adjustmentCollectionHandlers(deps: BillingRouteDeps) {
+  return {
+    GET: handler('listBillingAdjustments', deps, async (ctx) => {
+      const q = rejectQuery(ctx.request, ['customerId', 'status']);
+      const customerId = q.get('customerId');
+      const status = q.get('status');
+      if (customerId !== null && !UUID_RE.test(customerId)) throw new RequestError(400, 'VALIDATION_ERROR', 'customerId が不正です。', [{ path: '/query/customerId', code: 'format', message: 'uuid形式ではありません。' }]);
+      if (status !== null && !(ADJUSTMENT_STATUSES as readonly string[]).includes(status)) throw new RequestError(400, 'VALIDATION_ERROR', 'status が不正です。', [{ path: '/query/status', code: 'enum', message: '未定義の状態です。' }]);
+      const data = await deps.adjustments().list({ customerId: customerId?.toLowerCase() ?? null, status: status as AdjustmentStatus | null });
+      return dataResponse(200, data, ctx.correlationId);
+    }),
+    POST: handler('createBillingAdjustment', deps, async (ctx) => {
+      rejectQuery(ctx.request, []);
+      const raw = await readJson(ctx.request);
+      const body = parseBody(adjustmentCreateSchema, raw);
+      return idempotent(deps, ctx, 'POST /billing-adjustments', raw, 201, () =>
+        deps.adjustments().create(
+          {
+            sourceInvoiceId: body.sourceInvoiceId.toLowerCase(),
+            productId: body.productId.toLowerCase(),
+            sourceReportId: body.sourceReportId === undefined || body.sourceReportId === null ? null : body.sourceReportId.toLowerCase(),
+            description: body.description,
+            amountYen: body.amountYen,
+            reason: body.reason,
+          },
+          ctxOf(ctx),
+        ),
+      );
+    }),
+  };
+}
+
+export function adjustmentActionHandlers(deps: BillingRouteDeps) {
+  return {
+    POST: handler('cancelBillingAdjustment', deps, async (ctx) => {
+      const id = idOf(ctx.request, 'billing-adjustments', '調整');
+      const action = segmentsAfter(ctx.request, 'billing-adjustments')[1] ?? '';
+      if (action !== 'cancel') throw new RequestError(404, 'VALIDATION_ERROR', '未定義の操作です。', [{ path: '/action', code: 'enum', message: 'cancel のみ利用できます。' }]);
+      rejectQuery(ctx.request, []);
+      const raw = await readJson(ctx.request);
+      const cmd = parseBody(commandSchema, raw);
+      return idempotent(deps, ctx, `POST /billing-adjustments/${id}/cancel`, raw, 200, () => deps.adjustments().cancel(id, { expectedVersion: cmd.expectedVersion, reason: cmd.reason?.trim() ?? '' }, ctxOf(ctx)));
     }),
   };
 }

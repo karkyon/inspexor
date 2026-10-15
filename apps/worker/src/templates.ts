@@ -27,6 +27,9 @@ export const TEMPLATE_FILES: Readonly<Record<TemplateType, string>> = {
   DAILY_REPORT_V2: 'daily-report-v2.html',
   DELIVERY_REPORT_V1: 'delivery-report-v1.html',
   DELIVERY_REPORT_V2: 'delivery-report-v2.html',
+  // CHG-011 請求書（鏡・明細）
+  INVOICE_COVER_V1: 'invoice-cover-v1.html',
+  INVOICE_DETAIL_V1: 'invoice-detail-v1.html',
 };
 
 export interface LoadedTemplate {

@@ -88,6 +88,10 @@ export const OPERATION_POLICIES = {
   userAction: { apiId: 'API-033', method: 'POST', path: '/users/{id}/{action}', access: roles(['ADMIN']), idempotent: false },
   // CHG-009: 請求 run の一覧（SCR-14）。BILLING_ENABLED のときだけ提供
   listBillingRuns: { apiId: 'API-034', method: 'GET', path: '/billing-runs', access: roles(['OFFICE', 'ADMIN', 'AUDITOR']), idempotent: false },
+  // CHG-011: 遅延訂正の調整（BILLING_ENABLED）
+  listBillingAdjustments: { apiId: 'API-035', method: 'GET', path: '/billing-adjustments', access: roles(['OFFICE', 'ADMIN', 'AUDITOR']), idempotent: false },
+  createBillingAdjustment: { apiId: 'API-036', method: 'POST', path: '/billing-adjustments', access: roles(['OFFICE', 'ADMIN']), idempotent: true },
+  cancelBillingAdjustment: { apiId: 'API-037', method: 'POST', path: '/billing-adjustments/{id}/{action}', access: roles(['OFFICE', 'ADMIN']), idempotent: true },
 } as const satisfies Record<string, OperationPolicy>;
 
 export type OperationId = keyof typeof OPERATION_POLICIES;

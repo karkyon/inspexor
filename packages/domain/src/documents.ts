@@ -8,7 +8,7 @@
  *  - retry: network/408/429/5xx のみ、10s/30s/2m/10m/30m、最大5回（機能別詳細設計書 §9）
  */
 
-export type TemplateType = 'DAILY_REPORT_V1' | 'DAILY_REPORT_V2' | 'DELIVERY_REPORT_V1' | 'DELIVERY_REPORT_V2';
+export type TemplateType = 'DAILY_REPORT_V1' | 'DAILY_REPORT_V2' | 'DELIVERY_REPORT_V1' | 'DELIVERY_REPORT_V2' | 'INVOICE_COVER_V1' | 'INVOICE_DETAIL_V1';
 
 export const DAILY_REPORT_PLACEHOLDERS = [
   'report_no', 'revision_no', 'work_date', 'customer_code', 'customer_name', 'product_code', 'product_name', 'work_type', 'lot_no',
@@ -36,11 +36,21 @@ export const DELIVERY_REPORT_V2_PLACEHOLDERS = [
   'item_rows', 'item_count', 'total_quantity',
 ] as const;
 
+/** 帳票・メール定義書 §6（CHG-011）: 請求書の鏡 */
+export const INVOICE_COVER_PLACEHOLDERS = [
+  'issuer', 'customer', 'invoice_no', 'issue_date', 'due_date', 'subtotal', 'tax', 'total', 'bank_note', 'period',
+] as const;
+
+/** 帳票・メール定義書 §6（CHG-011）: 請求明細 */
+export const INVOICE_DETAIL_PLACEHOLDERS = ['invoice_no', 'period', 'customer_name', 'line_rows', 'subtotal', 'tax', 'total'] as const;
+
 export const TEMPLATE_PLACEHOLDERS: Readonly<Record<TemplateType, readonly string[]>> = {
   DAILY_REPORT_V1: DAILY_REPORT_PLACEHOLDERS,
   DAILY_REPORT_V2: DAILY_REPORT_V2_PLACEHOLDERS,
   DELIVERY_REPORT_V1: DELIVERY_REPORT_PLACEHOLDERS,
   DELIVERY_REPORT_V2: DELIVERY_REPORT_V2_PLACEHOLDERS,
+  INVOICE_COVER_V1: INVOICE_COVER_PLACEHOLDERS,
+  INVOICE_DETAIL_V1: INVOICE_DETAIL_PLACEHOLDERS,
 };
 
 /** 値は HTML エスケープ済みで埋め込む。行（*_rows）だけは呼出側で組んだ安全な HTML を受ける */
@@ -77,7 +87,7 @@ function safeFilePart(value: string): string {
 }
 
 export function documentFileName(type: TemplateType, input: { date: string; customerCode: string; reportNo: string; revisionNo: number }): string {
-  const prefix = type.startsWith('DAILY_REPORT') ? '日報' : '運搬';
+  const prefix = type.startsWith('DAILY_REPORT') ? '日報' : type === 'INVOICE_COVER_V1' ? '請求書' : type === 'INVOICE_DETAIL_V1' ? '請求明細' : '運搬';
   return `${prefix}_${safeFilePart(input.date)}_${safeFilePart(input.customerCode)}_${safeFilePart(input.reportNo)}_r${input.revisionNo}.pdf`;
 }
 

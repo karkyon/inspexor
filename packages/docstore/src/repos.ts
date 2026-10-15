@@ -39,6 +39,8 @@ export const C = {
   fixedChargeRules: 'fixedChargeRules',
   billingRuns: 'billingRuns',
   invoices: 'invoices',
+  // CHG-011 遅延訂正の調整（次の請求に反映）
+  billingAdjustments: 'billingAdjustments',
 } as const;
 
 // ---------------- 監査 ----------------

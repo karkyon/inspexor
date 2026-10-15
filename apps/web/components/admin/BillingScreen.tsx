@@ -4,6 +4,7 @@
  * CHG-009 SCR-14 請求計算・レビュー（BILLING_ENABLED のときだけ。OFFICE/ADMIN が操作、AUDITOR は参照）。
  *  一覧: 請求 run（期間の新しい順）と、お客様＋年月から請求を作って計算する（API-034 / API-019 → API-021 calculate）
  *  詳細: 合計・警告（処置と理由 → review）・明細・計算版の切替、再計算・確定・取消（API-020 / API-021）
+ *  CHG-011: 確定後は請求書（SCR-15 /admin/invoices/{id}）へ。確定後の取消は請求書の無効化で行う
  */
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import { closingDateForMonth, toJstParts } from '@inspexor/domain';
@@ -50,7 +51,7 @@ export interface BillingRun {
 interface Line {
   readonly no: number;
   readonly lineType: string;
-  readonly sourceType: 'WORK' | 'DELIVERY' | 'RULE';
+  readonly sourceType: 'WORK' | 'DELIVERY' | 'RULE' | 'ADJUSTMENT';
   readonly reportId: string | null;
   readonly reportNo: string | null;
   readonly businessDate: string | null;
@@ -112,6 +113,7 @@ const LINE_LABEL: Readonly<Record<string, string>> = {
   TRANSPORT_ALLOCATED: '運搬按分',
   TRANSPORT_MONTHLY: '運搬（月額）',
   FIXED_CHARGE: '固定費',
+  ADJUSTMENT: '調整（訂正）',
 };
 const WARNING_LABEL: Readonly<Record<string, string>> = {
   RULE_NOT_FOUND: 'ルールがありません',
@@ -301,7 +303,7 @@ export function BillingListScreen() {
                     </td>
                     <td className="num">{r.calcVersion === 0 ? '—' : yen(r.totalYen)}</td>
                     <td className="num">{r.openWarningCount > 0 ? <b className="ix-red">{r.openWarningCount}件</b> : '—'}</td>
-                    <td>{r.invoiceNo ?? '—'}</td>
+                    <td>{r.invoiceNo !== null && r.invoiceId !== null ? <a href={`/admin/invoices/${r.invoiceId}`}>{r.invoiceNo}</a> : '—'}</td>
                     <td>{when(r.updatedAt)}</td>
                   </tr>
                 ))}
@@ -420,7 +422,8 @@ export function BillingRunScreen({ id, notice: initialNotice }: { readonly id: s
         <div className="ix-decision approve">
           <b>確定済み（{when(d.finalizedAt)}）</b>
           <p>
-            請求書 {d.invoiceNo ?? '—'}。対象の報告は「請求確定済」になり、修正・取消できません。
+            請求書 {d.invoiceId !== null ? <a href={`/admin/invoices/${d.invoiceId}`}>{d.invoiceNo}</a> : '—'}。対象の報告は「請求確定済」になり、修正・取消できません。
+            請求書の発行・送付・無効化と、後から見つかった誤りの調整は請求書の画面で行います。
           </p>
         </div>
       ) : null}

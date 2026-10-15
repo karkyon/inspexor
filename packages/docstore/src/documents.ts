@@ -10,8 +10,9 @@ export type JobStatus = 'QUEUED' | 'PROCESSING' | 'GENERATED' | 'SENDING' | 'SEN
 
 export interface DocumentJobDoc {
   readonly documentType: string;
-  readonly sourceType: 'WORK_REVISION' | 'DELIVERY_REVISION';
-  readonly reportType: ReportType;
+  /** CHG-011: INVOICE は請求書の鏡・明細（reportId = 請求書 ID、revisionId = 請求書 ID、revisionNo = 発行回） */
+  readonly sourceType: 'WORK_REVISION' | 'DELIVERY_REVISION' | 'INVOICE';
+  readonly reportType: ReportType | 'INVOICE';
   readonly reportId: string;
   readonly revisionId: string;
   readonly revisionNo: number;
@@ -40,10 +41,19 @@ export interface MailSnapshotDoc {
   readonly bcc: readonly string[];
   readonly text: string;
   readonly attachmentName: string;
+  /** CHG-011: 請求書は鏡・明細の2件（documentJobIds と同じ順） */
+  readonly attachmentNames?: readonly string[];
 }
 
 export interface MailJobDoc {
+  /** 日報: 帳票 job。請求書: 鏡の帳票 job（添付は documentJobIds） */
   readonly documentJobId: string;
+  /** CHG-011: 請求書の送付（鏡・明細を添付） */
+  readonly invoiceId?: string | null;
+  readonly documentJobIds?: readonly string[];
+  /** CHG-011: 再送の理由・操作した利用者（送信履歴の表示用） */
+  readonly reason?: string | null;
+  readonly requestedBy?: string | null;
   readonly recipients: MailSnapshotDoc;
   readonly subject: string;
   readonly status: JobStatus;

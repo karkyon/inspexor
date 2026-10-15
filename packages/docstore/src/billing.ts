@@ -4,7 +4,8 @@
  *  billingRuns/{runId}                           請求 run（お客様×請求期間。取消以外は1件: uniqueKeys billingRun:{customerId}:{periodEnd}）
  *  billingRuns/{runId}/calcs/{calcVersion}       計算結果（再計算ごとに新しい版。旧結果は残す）。警告と処置（review）を持つ
  *  billingRuns/{runId}/calcs/{calcVersion}/chunks/{kind}-{n}  明細・計算入力の JSON（1文書 1MiB の上限のため分割）
- *  invoices/{invoiceId}                          請求書（確定時に作る snapshot。PDF・送付は CHG-010）
+ *  invoices/{invoiceId}                          請求書（確定時に作る snapshot。CHG-011: 発行・PDF・送付・無効化）
+ *  billingAdjustments/{id}                       CHG-011 遅延訂正の調整（確定済みの請求書を変えず、次の請求の明細にする）
  *
  * 明細・入力は入れ子配列を含むため JSON 文字列で保存する（Firestore は配列の入れ子不可）。
  */
@@ -100,6 +101,8 @@ export interface BillingCalcDoc {
   /** 計算に使った実績（報告ID・版）。確定時に現在版と照合する */
   readonly sources: ReadonlyArray<{ readonly type: 'WORK' | 'DELIVERY'; readonly reportId: string; readonly revisionId: string }>;
   readonly chunkCounts: { readonly lines: number; readonly input: number };
+  /** CHG-011: 明細に入れた調整（確定時に未適用のままかを照合し、適用済みにする） */
+  readonly adjustmentIds?: readonly string[];
 }
 
 export type InvoiceStatus = 'FINALIZED' | 'ISSUED' | 'SENT' | 'VOIDED';
@@ -124,7 +127,69 @@ export interface InvoiceDoc {
   readonly createdAt: Date;
   readonly createdBy: string;
   readonly updatedAt: Date;
+  // ---- CHG-011 発行・送付・無効化（旧データには無い）
+  /** 発行（PDF 作成）の依頼回数。帳票 job の冪等 key と版に使う */
+  readonly issueCount?: number;
+  readonly issueRequestedAt?: Date | null;
+  readonly issueRequestedBy?: string | null;
+  /** 鏡・明細の帳票 job（最新の発行分） */
+  readonly coverDocumentId?: string | null;
+  readonly detailDocumentId?: string | null;
+  /** 発行日（JST の日付）・支払期限・発行元（発行時に snapshot） */
+  readonly issueDate?: string | null;
+  readonly dueDate?: string | null;
+  readonly issuer?: InvoiceIssuerSnapshot | null;
+  readonly issuedAt?: Date | null;
+  readonly sentAt?: Date | null;
+  readonly sendCount?: number;
+  readonly voidedAt?: Date | null;
+  readonly voidedBy?: string | null;
+  readonly voidReason?: string | null;
+  /** この請求に入れた調整（確定時に適用済みにしたもの） */
+  readonly appliedAdjustmentIds?: readonly string[];
 }
+
+export interface InvoiceIssuerSnapshot {
+  readonly name: string;
+  readonly postalCode: string;
+  readonly address: string;
+  readonly tel: string;
+  readonly fax: string;
+  readonly email: string;
+  readonly registrationNo: string;
+  readonly bankNote: string;
+}
+
+export type AdjustmentStatus = 'PENDING' | 'APPLIED' | 'CANCELLED';
+
+/** CHG-011 遅延訂正の調整（FR-019）。元の請求書は変えない */
+export interface BillingAdjustmentDoc {
+  readonly customerId: string;
+  readonly customerCode: string;
+  readonly sourceInvoiceId: string;
+  /** 版付きの請求書番号（INV-YYYYMM-code-NNN） */
+  readonly sourceInvoiceNo: string;
+  readonly sourcePeriodEnd: string;
+  /** この日以降に締める請求に入れる（元の締め日の翌日） */
+  readonly applyFrom: string;
+  readonly sourceReportId: string | null;
+  readonly sourceReportNo: string | null;
+  readonly productId: string;
+  readonly productCode: string;
+  readonly description: string;
+  readonly amountYen: number;
+  readonly reason: string;
+  readonly status: AdjustmentStatus;
+  readonly version: number;
+  readonly appliedRunId: string | null;
+  readonly appliedInvoiceId: string | null;
+  readonly cancelReason: string | null;
+  readonly createdAt: Date;
+  readonly createdBy: string;
+  readonly updatedAt: Date;
+}
+
+export const billingAdjustmentPath = (id: string): string => `${C.billingAdjustments}/${id}`;
 
 export const billingRunPath = (runId: string): string => `${C.billingRuns}/${runId}`;
 export const billingCalcCollection = (runId: string): string => `${billingRunPath(runId)}/calcs`;

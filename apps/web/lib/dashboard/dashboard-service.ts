@@ -87,13 +87,15 @@ export class DashboardService {
       }
     });
     // 帳票の失敗は、その報告の最新の帳票のときだけ（再出力で成功していれば対象外）
-    const failedHeaders = await this.db.getMany<ReportHeaderDoc>(failed.map((f) => reportPath(f.data.reportType, f.data.reportId)));
+    // CHG-011: 請求書の帳票は請求書の画面で扱うため除く
+    const failedReports = failed.flatMap((f) => (f.data.reportType === 'INVOICE' ? [] : [{ id: f.id, reportType: f.data.reportType, reportId: f.data.reportId, updatedAt: f.data.updatedAt }]));
+    const failedHeaders = await this.db.getMany<ReportHeaderDoc>(failedReports.map((f) => reportPath(f.reportType, f.reportId)));
     let failedDocuments = 0;
-    failed.forEach((f, i) => {
+    failedReports.forEach((f, i) => {
       const h = failedHeaders[i];
       if (h === null || h === undefined || h.documentId !== f.id) return;
       failedDocuments += 1;
-      attention.push({ kind: 'DOCUMENT_FAILED', type: f.data.reportType, reportId: f.data.reportId, reportNo: h.reportNo, at: f.data.updatedAt.toISOString() });
+      attention.push({ kind: 'DOCUMENT_FAILED', type: f.reportType, reportId: f.reportId, reportNo: h.reportNo, at: f.updatedAt.toISOString() });
     });
     attention.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : a.reportNo < b.reportNo ? -1 : 1));
 

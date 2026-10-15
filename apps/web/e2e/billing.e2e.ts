@@ -4,6 +4,8 @@ import { MONTH, TODAY } from './today';
 // CHG-009 E2E: 請求計算・レビュー・確定（SCR-14、FR-009〜014）。前提: 開発環境で APPROVAL_ENABLED=true・BILLING_ENABLED=true、worker 稼働、synthetic seed 投入済み。
 //   管理者が E2E 専用のお客様（実行ごとに一意）・品番・単価/固定費ルールを作る → 現場が2件確定（1件は単価ルールなし）→ 提出済 → 承認
 //   → 請求画面でお客様・今月を選んで計算 → 要確認（単価なし）を「除外」でレビュー → 確定 → 請求書番号・報告が請求確定済
+// CHG-011: → 請求書画面で発行（鏡・明細の PDF）→ 送付（Mailpit に添付2件）→ 遅延訂正の調整を登録・取消 → 無効化（報告は承認済みに戻る）
+const MAILPIT = process.env['MAILPIT_URL'] ?? 'http://127.0.0.1:8025';
 const ADMIN_PASSWORD = process.env['E2E_PASSWORD'] ?? '';
 const FIELD_PASSWORD = process.env['E2E_FIELD_PASSWORD'] ?? '';
 
@@ -32,8 +34,8 @@ test.describe('CHG-009 E2E: 請求', () => {
     if (ADMIN_PASSWORD === '' || FIELD_PASSWORD === '') throw new Error('E2E_PASSWORD / E2E_FIELD_PASSWORD が未設定です');
   });
 
-  test('ルール作成 → 承認済みの報告で計算 → 要確認を除外してレビュー → 確定（請求書番号・請求確定済）', async ({ page, browser }) => {
-    test.setTimeout(300_000);
+  test('ルール作成 → 承認済みの報告で計算 → 要確認を除外してレビュー → 確定 → 請求書の発行・送付・調整・無効化', async ({ page, browser }) => {
+    test.setTimeout(480_000);
     const adminCsrf = await login(page, process.env['E2E_LOGIN_ID'] ?? 'dev-admin', ADMIN_PASSWORD);
     const admin = page.request;
     const me = ((await (await admin.get('/api/v1/me')).json()) as { data: { features: { billing: boolean } } }).data;
@@ -48,6 +50,7 @@ test.describe('CHG-009 E2E: 請求', () => {
     const wt2 = await post(admin, adminCsrf, '/masters/work-types', { productId: p2['id'], code: 'INSP', name: '検査' });
     await post(admin, adminCsrf, '/masters/rates', { productId: p1['id'], unitPrice: '4.4', validFrom: '2026-01-01' });
     await post(admin, adminCsrf, '/masters/fixed-charges', { productId: p1['id'], label: '保管料', amountYen: 1000, validFrom: '2026-01-01' });
+    await post(admin, adminCsrf, '/masters/contacts', { customerId: customer['id'], code: 'KEIRI', name: '経理', email: `e2e-inv-${code.toLowerCase()}@example.com`, sendInvoice: true });
 
     // ---- 現場: 2件を確定（帳票作成で提出済になるまで待つ）
     const fieldPage = await (await browser.newContext()).newPage();
@@ -110,6 +113,61 @@ test.describe('CHG-009 E2E: 請求', () => {
     const row = page.getByRole('row').filter({ hasText: code });
     await expect(row).toContainText('確定済み');
     await expect(row).toContainText('¥8,844');
+
+    // ---- CHG-011 請求書: 一覧の請求書番号から請求書画面へ
+    const invoiceNo = `INV-${MONTH.replace('-', '')}-${code}-001`;
+    await row.getByRole('link', { name: invoiceNo }).click();
+    await expect(page).toHaveURL(/\/admin\/invoices\/[0-9a-f-]{36}$/);
+    await expect(page.getByRole('heading', { level: 1, name: new RegExp(invoiceNo) })).toBeVisible();
+    await expect(page.locator('.ix-pagehead .ix-pill')).toHaveText('未発行');
+    await expect(page.getByRole('region', { name: '請求書の金額' })).toContainText('¥8,844');
+
+    // 発行 → worker が鏡・明細の PDF を作ると「発行済み」（画面は自動で再読込）
+    await page.getByRole('button', { name: '請求書を発行（PDF 作成）' }).click();
+    await expect(page.getByRole('status')).toContainText('請求書PDFの作成を受け付けました');
+    await expect(page.locator('.ix-pagehead .ix-pill')).toHaveText('発行済み', { timeout: 120_000 });
+    const coverLink = page.getByRole('link', { name: /^請求書_.*\.pdf$/ });
+    await expect(coverLink).toBeVisible();
+    await expect(page.getByRole('link', { name: /^請求明細_.*\.pdf$/ })).toBeVisible();
+    const pdf = await admin.get(String(await coverLink.getAttribute('href')));
+    expect(pdf.status()).toBe(200);
+    expect(pdf.headers()['content-type']).toContain('application/pdf');
+
+    // 送付 → Mailpit に件名【請求書送付】・添付2件
+    await expect(page.getByText(`e2e-inv-${code.toLowerCase()}@example.com`).first()).toBeVisible();
+    await page.getByRole('button', { name: 'お客様へ送付' }).click();
+    await expect(page.locator('.ix-pagehead .ix-pill')).toHaveText('送付済み', { timeout: 120_000 });
+    await expect
+      .poll(async () => {
+        const r = await admin.get(`${MAILPIT}/api/v1/search?query=${encodeURIComponent(`subject:"${invoiceNo}"`)}`);
+        const messages = ((await r.json()) as { messages: Array<{ Subject: string; Attachments: number }> }).messages;
+        return messages.map((m) => `${m.Subject}|${m.Attachments}`);
+      }, { timeout: 60_000 })
+      .toEqual([`【請求書送付】${Number(MONTH.slice(0, 4))}年${Number(MONTH.slice(5, 7))}月分 ${invoiceNo}|2`]);
+
+    // 遅延訂正: 調整を登録（次の請求に入る）→ 有効な調整があるうちは無効化できない → 取消
+    await page.getByLabel(/^品番/).selectOption({ label: `${code}-1 請求品1` });
+    await page.getByLabel(/^内容/).fill('E2E 数量の訂正');
+    await page.getByLabel(/^金額（円）/).fill('-300');
+    await page.getByLabel(/^理由/).fill('E2E の訂正');
+    await page.getByRole('button', { name: '調整を登録' }).click();
+    await expect(page.getByRole('status')).toContainText('調整を登録しました');
+    const adjRow = page.getByRole('row').filter({ hasText: 'E2E 数量の訂正' });
+    await expect(adjRow).toContainText('未適用');
+    await expect(adjRow).toContainText('−¥300');
+    await page.getByLabel(/^無効にする理由/).fill('E2E の無効化');
+    await expect(page.getByRole('button', { name: '無効にする' })).toBeDisabled();
+    await adjRow.getByLabel(/の取消理由$/).fill('E2E の取消');
+    await adjRow.getByRole('button', { name: '取り消す' }).click();
+    await expect(page.getByRole('status')).toContainText('調整を取り消しました');
+    await expect(adjRow).toContainText('取消');
+
+    // 無効化 → 請求書は無効、報告は承認済みに戻る
+    await page.getByLabel(/^無効にする理由/).fill('E2E の無効化');
+    await page.getByRole('button', { name: '無効にする' }).click();
+    await expect(page.getByRole('status')).toContainText('請求書を無効にしました');
+    await expect(page.locator('.ix-pagehead .ix-pill')).toHaveText('無効');
+    expect((await detailOf(admin, ids[0] as string))['status']).toBe('APPROVED');
 
     // 後始末: E2E 専用のお客様を無効化（請求の選択肢に残さない。記録は残る）
     const del = await admin.delete(`/api/v1/masters/customers/${String(customer['id'])}`, { headers: { 'x-csrf-token': adminCsrf }, data: { expectedVersion: 1, reason: 'E2E の後片付け' } });

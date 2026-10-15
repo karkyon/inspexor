@@ -17,3 +17,4 @@ export * from './monthly-summary';
 export * from './features';
 export * from './billing-period';
 export * from './billing-engine';
+export * from './invoice';

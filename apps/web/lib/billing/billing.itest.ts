@@ -19,7 +19,9 @@ import { SESSION_COOKIE_NAME } from '../auth/session-cookie';
 import { issueCsrfToken } from '../security/csrf';
 import { FieldReportService, type FieldReportType } from '../field/field-report-service';
 import { fieldCollectionHandlers, fieldConfirmHandlers, recordTransitionHandlers, type FieldRouteDeps } from '../field/field-handlers';
+import { AdjustmentService } from './adjustment-service';
 import { BillingService } from './billing-service';
+import { InvoiceService } from './invoice-service';
 import { billingActionHandlers, billingCollectionHandlers, billingItemHandlers, type BillingRouteDeps } from './billing-handlers';
 
 const SECRET = 'b'.repeat(32);
@@ -114,7 +116,14 @@ beforeAll(async () => {
     api: () => ({ sessionSecret: SECRET, now: () => NOW, auditRepository: new StoreAuditRepository(t.store, () => NOW), logError: () => undefined }),
     env: () => env,
   };
-  billing = { service: () => new BillingService(t.store), idempotency: field.idempotency, api: field.api, env: () => env };
+  billing = {
+    service: () => new BillingService(t.store),
+    invoices: () => new InvoiceService(t.store, SECRET, () => env),
+    adjustments: () => new AdjustmentService(t.store),
+    idempotency: field.idempotency,
+    api: field.api,
+    env: () => env,
+  };
 
   r['w1'] = await report('WORK', work('2026-09-07', m['pQ'] as string, m['wt-pQ'] as string, '09:00', '10:00', 1600));
   r['w2'] = await report('WORK', work('2026-09-07', m['pT'] as string, m['wt-pT'] as string, '16:30', '18:00', 10));
@@ -219,14 +228,14 @@ describe('CHG-009: 計算 → レビュー → 確定', () => {
     expect((await item().GET(req('office', 'GET', `billing-runs/${run}?calcVersion=9`))).status).toBe(404);
   });
 
-  it('確定: 請求書（INV-年月-お客様コード、版1）を作り、対象の報告を BILLING_LOCKED に（除外した報告は承認済みのまま）。確定後の取消・再計算は 409', async () => {
+  it('確定: 請求書（INV-年月-お客様コード-001。CHG-011 で表示は版付き）を作り、対象の報告を BILLING_LOCKED に（除外した報告は承認済みのまま）。確定後の取消・再計算は 409', async () => {
     const run = r['run'] as string;
     const d = (await json(await item().GET(req('office', 'GET', `billing-runs/${run}`)))).data as unknown as Record<string, unknown> & { version: number; warnings: Array<{ id: string }> };
     const rv = await json(await act('admin', run, 'review', { expectedVersion: d.version, reason: '再確認', resolutions: d.warnings.map((w) => ({ warningId: w.id, resolution: 'EXCLUDE' })) }));
     const fin = await act('office', run, 'finalize', { expectedVersion: rv.data?.version as number });
     expect(fin.status).toBe(200);
     const f = (await json(fin)).data as Record<string, unknown>;
-    expect(f).toMatchObject({ status: 'FINALIZED', invoiceNo: 'INV-202609-CB1', totalYen: 20290 });
+    expect(f).toMatchObject({ status: 'FINALIZED', invoiceNo: 'INV-202609-CB1-001', totalYen: 20290 });
     const invoice = (await t.store.get<InvoiceDoc>(invoicePath(f['invoiceId'] as string))) as InvoiceDoc;
     expect(invoice).toMatchObject({ invoiceNo: 'INV-202609-CB1', revision: 1, status: 'FINALIZED', subtotalYen: 18445, taxYen: 1845, totalYen: 20290, calcVersion: 2, excludedReportIds: [r['w3']] });
     for (const [type, id] of [['WORK', 'w1'], ['WORK', 'w2'], ['WORK', 'w4'], ['DELIVERY', 'd1']] as const) {
@@ -247,7 +256,7 @@ describe('CHG-009: 計算 → レビュー → 確定', () => {
     const list = await json(await runs().GET(req('auditor', 'GET', `billing-runs?customerId=${m['customer']}&status=FINALIZED`)));
     const rows = list.data as unknown as Array<Record<string, unknown>>;
     expect(rows.map((x) => x['id'])).toEqual([r['run']]);
-    expect(rows[0]).toMatchObject({ invoiceNo: 'INV-202609-CB1' });
+    expect(rows[0]).toMatchObject({ invoiceNo: 'INV-202609-CB1-001' });
     for (const row of rows) expect(schema('BillingRun')(row)).toBe(true);
     expect((await runs().GET(req('office', 'GET', 'billing-runs?sort=x'))).status).toBe(400);
   });

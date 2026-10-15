@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>請求書 {{invoice_no}}</title>
+<meta name="inspexor-page-footer" content="請求書 {{invoice_no}}">
+<!-- INVOICE_COVER_V1（CHG-011、fixture HTML）: 請求書の鏡。帳票・メール定義書: issuer/customer/invoiceNo/issueDate/dueDate/subtotal/tax/total/bank note -->
+<style>
+  @page { size: A4; margin: 16mm 16mm 18mm; }
+  * { box-sizing: border-box; }
+  body { font-family: "Noto Sans JP", sans-serif; font-size: 10.5pt; color: #111; margin: 0; }
+  h1 { text-align: center; font-size: 22pt; letter-spacing: .5em; margin: 0 0 8mm; }
+  h1 span { border-bottom: 0.6mm double #111; padding: 0 3mm 1mm; }
+  .head { display: grid; grid-template-columns: 1fr 72mm; gap: 8mm; align-items: start; }
+  .customer { font-size: 15pt; border-bottom: 0.35mm solid #111; padding: 0 0 1mm; }
+  .meta { font-size: 9.5pt; line-height: 1.8; }
+  .meta th { text-align: left; font-weight: 500; padding-right: 3mm; white-space: nowrap; }
+  .issuer { margin-top: 4mm; font-size: 9.5pt; line-height: 1.65; }
+  .issuer .name { font-size: 12.5pt; font-weight: 700; }
+  .lead { margin: 10mm 0 4mm; font-size: 10.5pt; }
+  .amount { display: grid; grid-template-columns: 42mm 1fr; border: 0.5mm solid #111; margin-bottom: 8mm; }
+  .amount .label { background: #e3e6e8; padding: 3mm 4mm; font-size: 12pt; font-weight: 700; letter-spacing: .3em; }
+  .amount .value { padding: 3mm 6mm; font-size: 18pt; font-weight: 700; text-align: right; font-variant-numeric: tabular-nums; }
+  table.sum { width: 100%; border-collapse: collapse; }
+  table.sum th, table.sum td { border: 0.35mm solid #222; padding: 2mm 3mm; }
+  table.sum th { background: #e3e6e8; font-weight: 500; text-align: center; width: 33.3%; }
+  table.sum td { text-align: right; font-variant-numeric: tabular-nums; font-size: 11pt; }
+  .note { margin-top: 10mm; border: 0.35mm solid #222; padding: 3mm 4mm; min-height: 24mm; font-size: 9.5pt; line-height: 1.7; }
+  .note b { display: block; margin-bottom: 1mm; }
+  .foot { margin-top: 6mm; font-size: 8.5pt; color: #444; }
+</style>
+</head>
+<body>
+  <h1><span>請求書</span></h1>
+  <div class="head">
+    <div>
+      <div class="customer">{{customer}}</div>
+      <p class="lead">下記のとおりご請求申し上げます。</p>
+    </div>
+    <div>
+      <table class="meta">
+        <tr><th>請求書番号</th><td>{{invoice_no}}</td></tr>
+        <tr><th>発行日</th><td>{{issue_date}}</td></tr>
+        <tr><th>対象期間</th><td>{{period}}</td></tr>
+        <tr><th>お支払期限</th><td>{{due_date}}</td></tr>
+      </table>
+      <div class="issuer">{{issuer}}</div>
+    </div>
+  </div>
+
+  <div class="amount"><div class="label">ご請求金額</div><div class="value">￥{{total}}</div></div>
+
+  <table class="sum">
+    <tr><th>小計（税抜）</th><th>消費税（10%）</th><th>合計（税込）</th></tr>
+    <tr><td>￥{{subtotal}}</td><td>￥{{tax}}</td><td>￥{{total}}</td></tr>
+  </table>
+
+  <div class="note"><b>お振込先・備考</b>{{bank_note}}</div>
+  <p class="foot">明細は別紙「請求明細」をご覧ください。</p>
+</body>
+</html>

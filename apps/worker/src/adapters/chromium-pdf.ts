@@ -18,6 +18,10 @@ function fontLinks(): string {
     .join('');
 }
 
+function escapeFooter(value: string): string {
+  return value.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string);
+}
+
 export class ChromiumPdfRenderer implements PdfRenderer {
   private browser: Browser | null = null;
 
@@ -47,7 +51,20 @@ export class ChromiumPdfRenderer implements PdfRenderer {
           await document.fonts.ready;
         });
         const t3 = Date.now();
-        const pdf = await page.pdf({ format: 'A4', printBackground: true, preferCSSPageSize: true });
+        // CHG-011: <meta name="inspexor-page-footer" content="…"> があれば、各ページの下に「…  n / 総ページ」を入れる（請求書・請求明細）
+        const footer = await page.evaluate(() => document.querySelector('meta[name="inspexor-page-footer"]')?.getAttribute('content') ?? null);
+        const pdf = await page.pdf({
+          format: 'A4',
+          printBackground: true,
+          preferCSSPageSize: true,
+          ...(footer !== null
+            ? {
+                displayHeaderFooter: true,
+                headerTemplate: '<span></span>',
+                footerTemplate: `<div style="width:100%;font-size:8px;color:#555;text-align:center;font-family:sans-serif">${escapeFooter(footer)}　<span class="pageNumber"></span> / <span class="totalPages"></span></div>`,
+              }
+            : {}),
+        });
         const t4 = Date.now();
         // 遅いときだけ内訳を記録（起動・読込・フォント・PDF化）
         if (t4 - t0 >= 10_000 && process.env['VITEST'] === undefined) {
