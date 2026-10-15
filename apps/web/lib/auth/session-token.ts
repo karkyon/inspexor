@@ -7,6 +7,10 @@ export interface SessionPayload {
   readonly roles: readonly string[];
   readonly issuedAt: string;
   readonly lastActivityAt: string;
+  /** CHG-012: 最後にパスワード（と確認コード）で認証した時刻。無い旧 session は issuedAt と同じ */
+  readonly authAt?: string;
+  /** CHG-012: 多要素認証を済ませた session（ADMIN_MFA_ENABLED のとき管理者に必要） */
+  readonly mfa?: boolean;
 }
 
 const SESSION_ID_BYTES = 18;
@@ -41,7 +45,9 @@ function isSessionPayload(value: unknown): value is SessionPayload {
     Array.isArray(candidate['roles']) &&
     candidate['roles'].every((role) => typeof role === 'string') &&
     typeof candidate['issuedAt'] === 'string' &&
-    typeof candidate['lastActivityAt'] === 'string'
+    typeof candidate['lastActivityAt'] === 'string' &&
+    (candidate['authAt'] === undefined || typeof candidate['authAt'] === 'string') &&
+    (candidate['mfa'] === undefined || typeof candidate['mfa'] === 'boolean')
   );
 }
 

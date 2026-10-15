@@ -8,11 +8,14 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from '
 import { useRouter, usePathname } from 'next/navigation';
 import { apiRequest, storeCsrfToken } from '../../lib/api/client';
 import { clearAllDrafts } from '../../lib/field/draft-store';
+import { ReauthDialog } from '../ReauthDialog';
 
 export interface AdminFeatures {
   readonly approval: boolean;
   readonly billing: boolean;
   readonly dailyMail: boolean;
+  /** CHG-012 管理者の多要素認証 */
+  readonly adminMfa?: boolean;
 }
 
 export interface AdminUser {
@@ -63,6 +66,7 @@ const NAV: readonly NavItem[] = [
   { prefix: '/admin/billing', also: ['/admin/invoices'], href: '/admin/billing', code: 'SCR-14', label: '請求', feature: 'billing' },
   { prefix: '/admin/masters', href: '/admin/masters/products', code: 'SCR-13', label: 'マスター管理' },
   { prefix: '/admin/users', href: '/admin/users', code: 'USER', label: '利用者管理' },
+  { prefix: '/admin/account', href: '/admin/account', code: 'MFA', label: '多要素認証', feature: 'adminMfa', roles: ['ADMIN'] },
 ];
 
 function matches(n: NavItem, pathname: string): boolean {
@@ -106,6 +110,9 @@ export function AdminShell({ children }: { readonly children: ReactNode }) {
   const user = state.status === 'loading' ? null : state.user;
   return (
     <div className="ix-shell">
+      <a className="ix-skip" href="#main">
+        本文へ移動
+      </a>
       <aside className="ix-sidenav" aria-label="メインメニュー">
         <div className="ix-brand">
           <div className="ix-brandmark" aria-hidden="true">IX</div>
@@ -148,7 +155,7 @@ export function AdminShell({ children }: { readonly children: ReactNode }) {
             </div>
           ) : null}
         </header>
-        <main className="ix-viewport" id="main">
+        <main className="ix-viewport" id="main" tabIndex={-1}>
           {state.status === 'loading' ? (
             <p className="ix-muted" aria-live="polite">
               読み込み中…
@@ -163,6 +170,7 @@ export function AdminShell({ children }: { readonly children: ReactNode }) {
             <AdminUserContext.Provider value={state.user}>{children}</AdminUserContext.Provider>
           )}
         </main>
+        <ReauthDialog />
       </div>
     </div>
   );

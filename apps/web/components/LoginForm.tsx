@@ -1,7 +1,8 @@
 'use client';
 
 import { useState, type FormEvent } from 'react';
-import { interpretLoginResponse, type LoginSuccessData } from '../lib/auth/login-response';
+import { interpretLoginResponse, type LoginSuccessData, type MfaChallengeData } from '../lib/auth/login-response';
+import { MfaStep } from './MfaStep';
 
 export const CSRF_TOKEN_STORAGE_KEY = 'inspexor_csrf_token';
 
@@ -14,6 +15,8 @@ export function LoginForm({ onLoginSuccess }: LoginFormProps) {
   const [password, setPassword] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  // CHG-012: 管理者の多要素認証（確認待ち）
+  const [mfa, setMfa] = useState<MfaChallengeData | null>(null);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -36,6 +39,9 @@ export function LoginForm({ onLoginSuccess }: LoginFormProps) {
           // sessionStorageが使えない環境でもログイン自体は継続する
         }
         onLoginSuccess(outcome.data);
+      } else if (outcome.kind === 'mfa') {
+        setPassword('');
+        setMfa(outcome.data);
       } else {
         setErrorMessage(outcome.message);
       }
@@ -44,6 +50,10 @@ export function LoginForm({ onLoginSuccess }: LoginFormProps) {
     } finally {
       setSubmitting(false);
     }
+  }
+
+  if (mfa !== null) {
+    return <MfaStep challenge={mfa} onSuccess={onLoginSuccess} onCancel={() => setMfa(null)} />;
   }
 
   return (

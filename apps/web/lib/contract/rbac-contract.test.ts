@@ -28,8 +28,8 @@ const hasIdempotencyKey = (op: Op) =>
   (op.parameters ?? []).some((p) => p.$ref === '#/components/parameters/IdempotencyKey' || p.name === 'Idempotency-Key');
 
 describe('G1-CONTRACT: RBAC ⇔ openapi', () => {
-  it('openapi 37 operation（25＋CHG-004 の3件＋CHG-007 の1件＋CHG-008 の4件＋CHG-009 の1件＋CHG-011 の3件）すべてに RBAC 方針がある', () => {
-    expect(operations).toHaveLength(37);
+  it('openapi 42 operation（25＋CHG-004 の3件＋CHG-007 の1件＋CHG-008 の4件＋CHG-009 の1件＋CHG-011 の3件＋CHG-012 の5件）すべてに RBAC 方針がある', () => {
+    expect(operations).toHaveLength(42);
     for (const { op } of operations) {
       expect(Object.keys(OPERATION_POLICIES), `方針なし: ${op.operationId}`).toContain(op.operationId);
     }

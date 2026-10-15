@@ -175,7 +175,7 @@ describe('G3: 作業日報（API-004〜007）', () => {
       [{ defects: [{ defectTypeId: m['dB1'], quantity: 1 }] }, '/defects/0/defectTypeId', 'mismatch'],
       [{ workerIds: [m['wOff']] }, '/workerIds/0', 'inactive'],
       [{ productId: m['pLot'], workTypeId: m['wtLot'], defects: [], lotNo: '   ' }, '/lotNo', 'required'],
-      [{ reporterId: users['field-b'] }, '/reporterId', 'proxy_unsupported'],
+      [{ reporterId: users['field-b'] }, '/reporterId', 'proxy_not_allowed'],
     ];
     for (const [over, path, code] of cases) {
       const res = await W().col.POST(req('field-a', 'POST', 'work-reports', work('field-a', over)));
@@ -208,7 +208,10 @@ describe('G3: 作業日報（API-004〜007）', () => {
   });
 
   it('未知field・型不一致は 422、JSON不正は 400、ADMIN の作成は 403', async () => {
-    expect((await W().col.POST(req('field-a', 'POST', 'work-reports', { ...work(), proxyReason: 'x' }))).status).toBe(422);
+    expect((await W().col.POST(req('field-a', 'POST', 'work-reports', { ...work(), unknownField: 'x' }))).status).toBe(422);
+    // CHG-012: 代理入力の理由は本人の報告では指定できない
+    const own = await json(await W().col.POST(req('field-a', 'POST', 'work-reports', { ...work(), proxyReason: 'x' })));
+    expect(own.error?.fields?.[0]).toMatchObject({ path: '/proxyReason', code: 'unexpected' });
     const bad = new Request('https://example.com/api/v1/work-reports', { method: 'POST', headers: req('field-a', 'POST', 'work-reports').headers, body: '{' });
     expect((await W().col.POST(bad)).status).toBe(400);
     expect((await W().col.POST(req('admin', 'POST', 'work-reports', work('admin')))).status).toBe(403);
@@ -505,5 +508,57 @@ describe('CHG-004 batch16: 事務所の一覧絞込・確定後修正（新し�
       .sort((a, b) => (a.beforeData as { version: number }).version - (b.beforeData as { version: number }).version);
     expect(audits.map((a) => (a.afterData as { deliveryFeeYen: number | null }).deliveryFeeYen)).toEqual([625, null]);
     expect(audits[1]?.reason).toBe('金額確認中');
+  });
+});
+
+describe('CHG-012 代理入力（SPEC-CONFLICT-G3-01、SEC-026）', () => {
+  const oldSession = (who: Who, body: unknown): Request => {
+    const at = '2026-10-08T02:40:00.000Z';
+    const payload = { sessionId: `sess-${who}`, userId: users[who] as string, displayName: who, roles: [ROLE[who]], issuedAt: at, lastActivityAt: '2026-10-08T02:59:00.000Z' };
+    return new Request('https://example.com/api/v1/work-reports', {
+      method: 'POST',
+      headers: { cookie: `${SESSION_COOKIE_NAME}=${issueSessionToken(payload, SECRET)}`, 'x-csrf-token': issueCsrfToken(`sess-${who}`, SECRET), 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  };
+
+  it('事務所は有効な現場の利用者を報告者に選び、理由を付けて作成できる。報告者が所有者になり、代理入力の記録が残る', async () => {
+    const res = await W().col.POST(req('office', 'POST', 'work-reports', work('field-a', { proxyReason: '  現場の端末故障のため事務所で入力  ' })));
+    expect(res.status).toBe(201);
+    const id = ((await json(res)).data as { id: string }).id;
+    const h = (await t.store.get<ReportHeaderDoc>(`${C.workReports}/${id}`)) as ReportHeaderDoc;
+    expect(h.ownerId).toBe(users['field-a']);
+    expect(h.proxy).toMatchObject({ enteredBy: users['office'], enteredByName: 'office', reason: '現場の端末故障のため事務所で入力' });
+    // 報告者本人も参照できる（自分の報告）。詳細に代理入力が出る
+    const d = (await json(await W().item.GET(req('field-a', 'GET', `work-reports/${id}`)))).data as Record<string, unknown>;
+    expect(schema('WorkReportDetail')(d), JSON.stringify(schema('WorkReportDetail').errors)).toBe(true);
+    expect(d['reporterId']).toBe(users['field-a']);
+    expect(d['proxy']).toMatchObject({ enteredBy: users['office'], reason: '現場の端末故障のため事務所で入力' });
+    // 事務所が下書きを直して確定できる（報告者は変わらない）
+    expect((await W().confirm.POST(req('office', 'POST', `work-reports/${id}/confirm`, { expectedVersion: 1 }, { 'idempotency-key': `proxy-confirm-${id}`.padEnd(24, '0') }))).status).toBe(202);
+    const audit = (await auditEventsFor(t.store, 'WORK_REPORT', id)).find((a) => a.action === 'WORK_REPORT_CREATE');
+    expect(audit).toMatchObject({ actorId: users['office'], reason: '現場の端末故障のため事務所で入力' });
+    expect(audit?.afterData).toMatchObject({ proxy: { reporterId: users['field-a'], enteredBy: users['office'] } });
+    // 本人の報告には代理入力が無い
+    const own = await json(await W().col.POST(req('field-a', 'POST', 'work-reports', work('field-a'))));
+    expect((await json(await W().item.GET(req('field-a', 'GET', `work-reports/${own.data?.id}`)))).data?.['proxy']).toBeNull();
+  });
+
+  it('理由なし・現場ロールでない報告者・無効な報告者は 422。現場（FIELD）の代理は 422', async () => {
+    const noReason = await json(await W().col.POST(req('office', 'POST', 'work-reports', work('field-a'))));
+    expect(noReason.error?.fields?.map((f) => [f.path, f.code])).toContainEqual(['/proxyReason', 'required']);
+    const notField = await json(await W().col.POST(req('office', 'POST', 'work-reports', work('auditor', { proxyReason: '理由' }))));
+    expect(notField.error?.fields?.map((f) => [f.path, f.code])).toContainEqual(['/reporterId', 'not_found']);
+    const ghost = await json(await W().col.POST(req('office', 'POST', 'work-reports', { ...work('field-a', { proxyReason: '理由' }), reporterId: '00000000-0000-4000-8000-000000000000' })));
+    expect(ghost.error?.fields?.map((f) => [f.path, f.code])).toContainEqual(['/reporterId', 'not_found']);
+    const byField = await json(await W().col.POST(req('field-b', 'POST', 'work-reports', work('field-a', { proxyReason: '理由' }))));
+    expect(byField.error?.fields?.map((f) => [f.path, f.code])).toContainEqual(['/reporterId', 'proxy_not_allowed']);
+  });
+
+  it('代理入力は直近10分以内の認証が必要（過ぎていれば 403 reauthRequired）。本人の報告は不要', async () => {
+    const res = await W().col.POST(oldSession('office', work('field-a', { proxyReason: '理由' })));
+    expect(res.status).toBe(403);
+    expect((await res.json()) as unknown).toMatchObject({ error: { code: 'FORBIDDEN', reauthRequired: true } });
+    expect((await W().col.POST(oldSession('office', work('office')))).status).toBe(201);
   });
 });

@@ -5,9 +5,24 @@ export interface LoginSuccessData {
   readonly csrfToken: string;
 }
 
+export interface MfaChallengeData {
+  readonly mfaRequired: true;
+  readonly mfaEnrolled: boolean;
+  readonly challenge: string;
+  readonly challengeExpiresAt: string;
+}
+
 export type LoginOutcome =
   | { readonly kind: 'success'; readonly data: LoginSuccessData }
+  /** CHG-012 管理者の多要素認証: 確認コードの入力（未登録なら登録）へ */
+  | { readonly kind: 'mfa'; readonly data: MfaChallengeData }
   | { readonly kind: 'error'; readonly message: string };
+
+function isMfaBody(value: unknown): value is { data: MfaChallengeData } {
+  if (typeof value !== 'object' || value === null || !('data' in value)) return false;
+  const d = (value as { data: unknown }).data as Record<string, unknown> | null;
+  return d !== null && typeof d === 'object' && d['mfaRequired'] === true && typeof d['challenge'] === 'string' && typeof d['mfaEnrolled'] === 'boolean';
+}
 
 function isSuccessBody(value: unknown): value is { data: LoginSuccessData } {
   if (typeof value !== 'object' || value === null || !('data' in value)) {
@@ -50,6 +65,9 @@ function loginErrorMessage(code: string, status: number): string {
 }
 
 export function interpretLoginResponse(status: number, body: unknown): LoginOutcome {
+  if (status === 200 && isMfaBody(body)) {
+    return { kind: 'mfa', data: body.data };
+  }
   if (status === 200 && isSuccessBody(body)) {
     return { kind: 'success', data: body.data };
   }

@@ -23,6 +23,17 @@ export interface UserDoc {
    * 旧データには無い（null と同じ）
    */
   readonly authChangedAt?: Date | null;
+  /** CHG-012 管理者の多要素認証（未登録・解除済みは null / 無し） */
+  readonly mfa?: UserMfaDoc | null;
+}
+
+/** CHG-012 多要素認証の登録情報。秘密鍵は AES-256-GCM で暗号化し、回復コードは HMAC で保存する（元の値は持たない） */
+export interface UserMfaDoc {
+  readonly secretEnc: string;
+  readonly enabledAt: Date;
+  /** 最後に使った TOTP の区間（同じコードの再利用を防ぐ） */
+  readonly lastStep: number;
+  readonly recoveryHashes: readonly string[];
 }
 
 export class DocUserRepository implements UserRepository {

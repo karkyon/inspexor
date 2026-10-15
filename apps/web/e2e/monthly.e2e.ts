@@ -1,3 +1,4 @@
+import { login as authLogin } from './auth';
 import { test, expect, type Page } from '@playwright/test';
 import { MONTH, TODAY } from './today';
 
@@ -5,11 +6,7 @@ import { MONTH, TODAY } from './today';
 const OFFICE_PASSWORD = process.env['E2E_OFFICE_PASSWORD'] ?? '';
 
 async function login(page: Page): Promise<void> {
-  await page.goto('/login');
-  await page.getByLabel('ログインID').fill(process.env['E2E_OFFICE_LOGIN_ID'] ?? 'dev-office');
-  await page.getByLabel('パスワード').fill(OFFICE_PASSWORD);
-  await page.getByRole('button', { name: 'ログイン' }).click();
-  await expect(page).toHaveURL(/\/$/);
+  await authLogin(page, process.env['E2E_OFFICE_LOGIN_ID'] ?? 'dev-office', OFFICE_PASSWORD);
 }
 
 test.describe('CHG-004 E2E: 月次集計・Excel/CSV', () => {

@@ -16,6 +16,20 @@ export interface ApiError {
   readonly fields?: readonly ApiFieldError[];
   readonly currentVersion?: number;
   readonly changedFields?: readonly string[];
+  /** CHG-012 SEC-026: この操作の前に再認証が必要（403） */
+  readonly reauthRequired?: boolean;
+  /** CHG-012: 429 のとき、再試行までの秒数 */
+  readonly retryAfterSeconds?: number;
+}
+
+/**
+ * CHG-012: 再認証が必要な操作（403 reauthRequired）を受けたときに呼ぶ処理（画面の再認証ダイアログが登録する）。
+ * true が返れば同じ要求を1回だけ送り直す
+ */
+type ReauthHandler = () => Promise<boolean>;
+let reauthHandler: ReauthHandler | null = null;
+export function setReauthHandler(handler: ReauthHandler | null): void {
+  reauthHandler = handler;
 }
 
 export type ApiResult<T> =
@@ -45,6 +59,19 @@ export async function apiRequest<T>(
   body?: unknown,
   extraHeaders: Readonly<Record<string, string>> = {},
 ): Promise<ApiResult<T>> {
+  const first = await send<T>(method, path, body, extraHeaders);
+  if (!first.ok && first.status === 403 && first.error.reauthRequired === true && reauthHandler !== null) {
+    if (await reauthHandler()) return send<T>(method, path, body, extraHeaders);
+  }
+  return first;
+}
+
+async function send<T>(
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
+  path: string,
+  body: unknown,
+  extraHeaders: Readonly<Record<string, string>>,
+): Promise<ApiResult<T>> {
   const headers: Record<string, string> = { ...extraHeaders };
   if (body !== undefined) headers['content-type'] = 'application/json';
   if (method !== 'GET') {
@@ -72,6 +99,9 @@ export async function apiRequest<T>(
   return {
     ok: false,
     status: response.status,
-    error: json?.error ?? { code: 'UNKNOWN', message: `エラーが発生しました（${response.status}）。` },
+    error:
+      response.status === 429
+        ? { ...(json?.error ?? { code: 'RATE_LIMITED' }), message: '操作が集中しています。しばらく時間をおいてから再度お試しください。' }
+        : (json?.error ?? { code: 'UNKNOWN', message: `エラーが発生しました（${response.status}）。` }),
   };
 }

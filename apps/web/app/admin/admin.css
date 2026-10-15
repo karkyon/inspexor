@@ -1,6 +1,6 @@
 /* 管理画面（SCR-13 ほか）— 画面UX設計書・ワイヤーフレーム v6.0 のトークン/寸法に準拠。クラスは ix- 接頭辞で衝突回避。 */
 body:has(.ix-shell){margin:0}
-:root{--ix-nav:#102a43;--ix-nav2:#173f5f;--ix-blue:#1769aa;--ix-cyan:#11a3a5;--ix-ink:#172b3a;--ix-muted:#5d6e7c;--ix-line:#dce5eb;--ix-bg:#eef3f6;--ix-green:#15936d;--ix-amber:#b06e00;--ix-red:#b93636;--ix-shadow:0 3px 12px #173a5010}
+:root{--ix-nav:#102a43;--ix-nav2:#173f5f;--ix-blue:#1769aa;--ix-cyan:#11a3a5;--ix-ink:#172b3a;--ix-muted:#4f5f6b;--ix-line:#dce5eb;--ix-bg:#eef3f6;--ix-green:#0d7053;--ix-amber:#8f5900;--ix-red:#b93636;--ix-shadow:0 3px 12px #173a5010}
 .ix-shell *{box-sizing:border-box}
 .ix-shell{min-height:100vh;display:grid;grid-template-columns:252px 1fr;background:#dfe7ec;color:var(--ix-ink);font:14px/1.45 "Noto Sans JP",system-ui,sans-serif}
 .ix-shell button,.ix-shell input,.ix-shell select,.ix-shell textarea{font:inherit}
@@ -154,3 +154,10 @@ fieldset.ix-field{border:0;padding:0;margin:0;min-width:0}
 
 /* CHG-011 請求書 */
 .ix-plainlist{list-style:none;padding:0;margin:0 0 8px;display:grid;gap:6px}
+.ix-codes{display:grid;grid-template-columns:repeat(2,minmax(0,12em));gap:6px 24px;margin:8px 0 0;padding:12px 12px 12px 36px;border:1px dashed #8aa3b3;border-radius:9px;background:#fbfcfd;font-size:16px}
+
+/* CHG-012 a11y: 本文へ移動（キーボードで最初に出る）・フォーカスの見える化 */
+.ix-skip{position:absolute;left:8px;top:-60px;z-index:100;padding:10px 16px;border-radius:8px;background:#102a43;color:#fff;font-weight:700;text-decoration:none}
+.ix-skip:focus{top:8px}
+#main:focus{outline:none}
+.ix-shell a:focus-visible,.ix-shell button:focus-visible,.ix-shell input:focus-visible,.ix-shell select:focus-visible,.ix-shell textarea:focus-visible,.ix-shell summary:focus-visible{outline:3px solid #1769aa;outline-offset:2px}

@@ -6,6 +6,7 @@
  */
 import { featureFlags, type OperationId } from '@inspexor/domain';
 import type { ZodTypeAny } from 'zod';
+import { reauthRequiredResponse } from '../auth/reauth';
 import { createApiHandler, type ApiContext, type ApiHandlerDeps } from '../http/api-handler';
 import { errorResponse, dataResponse } from '../http/api-response';
 import { zodIssueMessageJa, type ZodIssueLike } from '../http/zod-messages';
@@ -142,11 +143,16 @@ export function fieldCollectionHandlers(type: FieldReportType, deps: FieldRouteD
     POST: handler(type === 'WORK' ? 'createWorkReport' : 'createDeliveryReport', deps, async (ctx) => {
       rejectQuery(ctx.request, []);
       const body = await readJson(ctx.request);
-      const record =
-        type === 'WORK'
-          ? await deps.service().createWork(parseBody(workDraftSchema, body), ctxOf(ctx))
-          : await deps.service().createDelivery(parseBody(deliveryDraftSchema, body), ctxOf(ctx));
-      return dataResponse(201, record, ctx.correlationId);
+      if (type === 'WORK') {
+        const input = parseBody(workDraftSchema, body);
+        // CHG-012 代理入力（SEC-026）: 事務所が他の報告者で作成するときは、直近10分以内の再認証が必要
+        if (input.reporterId.toLowerCase() !== ctx.actor?.userId && ctx.actor?.roles.includes('OFFICE') === true) {
+          const reauth = reauthRequiredResponse(ctx);
+          if (reauth !== null) return reauth;
+        }
+        return dataResponse(201, await deps.service().createWork(input, ctxOf(ctx)), ctx.correlationId);
+      }
+      return dataResponse(201, await deps.service().createDelivery(parseBody(deliveryDraftSchema, body), ctxOf(ctx)), ctx.correlationId);
     }),
   };
 }

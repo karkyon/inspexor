@@ -118,7 +118,7 @@ describe('CHG-007: 承認ワークフロー（API-013 approve / reject / revoke�
     expect((await act('office', r.id, 'approve', { expectedVersion: r.version })).status).toBe(404);
     expect((await act('office', r.id, 'reject', { expectedVersion: r.version, reason: 'x' })).status).toBe(404);
     const me = await json(await handleMeRequest(req('office', 'GET', 'me'), { sessionSecret: SECRET, now: () => NOW, env: OFF }));
-    expect(me.data?.['features']).toEqual({ approval: false, billing: false, dailyMail: false });
+    expect(me.data?.['features']).toEqual({ approval: false, billing: false, dailyMail: false, adminMfa: false });
     expect((await dashboardHandlers(dash).GET(req('office', 'GET', 'dashboard'))).status).toBe(404);
     env = ON;
   });

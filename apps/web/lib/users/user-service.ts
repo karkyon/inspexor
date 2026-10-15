@@ -4,6 +4,7 @@
  *   ログインID は変更しない（uniqueKeys 'login' で一意）。パスワードは Argon2id で保存し、応答・監査に出さない
  *   無効化・ロール変更・パスワード再設定は authChangedAt を更新し、それ以前のセッションを使えなくする（user-guard）
  *   自分自身の無効化・ADMIN 外し、有効な ADMIN が 0 人になる変更は不可（管理不能を防ぐ）
+ *   CHG-012: 多要素認証の解除（reset-mfa、理由必須、自分以外）。次のログインで登録し直す。解除・パスワード再設定は再認証が必要（handler）
  */
 import { randomUUID } from 'node:crypto';
 import { checkLockout } from '@inspexor/domain';
@@ -12,7 +13,7 @@ import { invalidateUserGuard } from '../auth/user-guard';
 
 export const ROLE_CODES = ['FIELD', 'OFFICE', 'ADMIN', 'AUDITOR'] as const;
 export type Role = (typeof ROLE_CODES)[number];
-export type UserAction = 'deactivate' | 'activate' | 'reset-password' | 'unlock';
+export type UserAction = 'deactivate' | 'activate' | 'reset-password' | 'unlock' | 'reset-mfa';
 
 export class UserError extends Error {
   constructor(
@@ -33,6 +34,8 @@ export interface UserView {
   readonly roles: string[];
   readonly status: 'ACTIVE' | 'INACTIVE';
   readonly locked: boolean;
+  /** CHG-012 多要素認証を登録済みか */
+  readonly mfaEnabled: boolean;
   readonly version: number;
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -56,6 +59,7 @@ function view(id: string, d: UserDoc, now: Date): UserView {
     roles: [...d.roles],
     status: d.status === 'ACTIVE' ? 'ACTIVE' : 'INACTIVE',
     locked: checkLockout({ failedAttempts: d.failedAttempts, lockedUntil: d.lockedUntil }, now).locked,
+    mfaEnabled: (d.mfa ?? null) !== null,
     version: d.version,
     createdAt: d.createdAt.toISOString(),
     updatedAt: d.updatedAt.toISOString(),
@@ -167,6 +171,12 @@ export class UserService {
         case 'unlock':
           patch = { failedAttempts: 0, lockedUntil: null };
           break;
+        case 'reset-mfa':
+          if (id === ctx.actorId) throw new UserError(422, 'VALIDATION_ERROR', '自分自身の多要素認証は解除できません（回復コードを使うか、他の管理者に依頼してください）。');
+          if ((cur.mfa ?? null) === null) throw new UserError(409, 'STATE_CONFLICT', '多要素認証は登録されていません。', [], { currentVersion: cur.version });
+          // 解除後のログインで登録し直す。それより前の session は使えない
+          patch = { mfa: null, authChangedAt: ctx.now };
+          break;
       }
       const version = cur.version + 1;
       tx.update(path(id), { ...patch, version, updatedAt: ctx.now });
@@ -178,7 +188,7 @@ export class UserService {
           targetType: 'USER',
           targetId: id,
           beforeData: { status: cur.status, locked: checkLockout({ failedAttempts: cur.failedAttempts, lockedUntil: cur.lockedUntil }, ctx.now).locked, version: cur.version },
-          afterData: { status: patch.status ?? cur.status, version },
+          afterData: { status: patch.status ?? cur.status, version, ...(action === 'reset-mfa' ? { mfaEnabled: false } : {}) },
           ...(input.reason !== null ? { reason: input.reason } : {}),
           correlationId: ctx.correlationId,
           occurredAt: ctx.now,

@@ -42,6 +42,8 @@ export interface WorkForm {
   workLocationId: string;
   vehicleId: string;
   remarks: string;
+  /** CHG-012 代理入力の理由（事務所が他の報告者で作成するとき） */
+  proxyReason: string;
 }
 
 export const DELIVERY_FEE_MAX = 9_999_999;
@@ -56,7 +58,7 @@ export function emptyDeliveryForm(today: string): DeliveryForm {
 }
 
 export function emptyWorkForm(today: string, reporterId: string): WorkForm {
-  return { workDate: today, reporterId, customerId: '', productId: '', workTypeId: '', lotNo: '', workerIds: [], startTime: '', endTime: '', quantity: '', defects: {}, workLocationId: '', vehicleId: '', remarks: '' };
+  return { workDate: today, reporterId, customerId: '', productId: '', workTypeId: '', lotNo: '', workerIds: [], startTime: '', endTime: '', quantity: '', defects: {}, workLocationId: '', vehicleId: '', remarks: '', proxyReason: '' };
 }
 
 /** CHG-004 以前の端末下書き（新項目なし）を読み込んだときの補完 */
@@ -65,7 +67,7 @@ export function normalizeDeliveryForm(f: DeliveryForm): DeliveryForm {
 }
 
 export function normalizeWorkForm(f: WorkForm): WorkForm {
-  return { ...f, workLocationId: f.workLocationId ?? '', vehicleId: f.vehicleId ?? '', remarks: f.remarks ?? '' };
+  return { ...f, workLocationId: f.workLocationId ?? '', vehicleId: f.vehicleId ?? '', remarks: f.remarks ?? '', proxyReason: f.proxyReason ?? '' };
 }
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -229,7 +231,7 @@ function endInstant(f: WorkForm): string {
   return jstToInstant(f.workDate, f.endTime === '00:00' ? '24:00' : f.endTime);
 }
 
-export function buildWorkDraft(f: WorkForm) {
+export function buildWorkDraft(f: WorkForm, selfId?: string) {
   return {
     workDate: f.workDate,
     reporterId: f.reporterId,
@@ -247,6 +249,8 @@ export function buildWorkDraft(f: WorkForm) {
     workLocationId: f.workLocationId === '' ? null : f.workLocationId,
     vehicleId: f.vehicleId === '' ? null : f.vehicleId,
     remarks: f.remarks.trim() === '' ? null : f.remarks.trim(),
+    // CHG-012 代理入力（作成時だけ送る。更新では useWizard が外す）
+    ...(selfId !== undefined && f.reporterId !== selfId ? { proxyReason: f.proxyReason.trim() } : {}),
   };
 }
 
@@ -270,6 +274,7 @@ export function workDetailToForm(d: Record<string, unknown>, toJstTime: (iso: st
     workLocationId: (d['workLocationId'] as string | null) ?? '',
     vehicleId: (d['vehicleId'] as string | null) ?? '',
     remarks: (d['remarks'] as string | null) ?? '',
+    proxyReason: '',
   };
 }
 
@@ -289,8 +294,17 @@ export function deliveryDetailToForm(d: Record<string, unknown>): DeliveryForm {
 export function stepOfPath(type: 'work' | 'delivery', path: string): number {
   const key = path.split('/')[1] ?? '';
   if (type === 'delivery') return ['deliveryDate', 'driverId', 'customerId', 'vehicleId'].includes(key) ? 1 : 2;
-  if (['workDate', 'reporterId', 'customerId', 'workLocationId'].includes(key)) return 1;
+  if (['workDate', 'reporterId', 'proxyReason', 'customerId', 'workLocationId'].includes(key)) return 1;
   if (['productId', 'workTypeId', 'lotNo', 'vehicleId'].includes(key)) return 2;
   if (['workerIds', 'startAt', 'endAt'].includes(key)) return 3;
   return 4;
+}
+
+/** CHG-012 代理入力の理由の検証（報告者が本人以外のとき必須） */
+export function validateProxy(f: WorkForm, selfId: string): FieldIssue[] {
+  if (f.reporterId === selfId) return [];
+  const r = f.proxyReason.trim();
+  if (r === '') return [{ path: '/proxyReason', code: 'required', message: '代理入力の理由を入力してください。' }];
+  if (r.length > 500) return [{ path: '/proxyReason', code: 'too_big', message: '代理入力の理由は500文字以内で入力してください。' }];
+  return [];
 }

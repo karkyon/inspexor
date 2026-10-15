@@ -77,7 +77,19 @@ const workShape = {
   remarks: nullableText(500),
 };
 
-export const workDraftSchema = z.object(workShape).strict();
+/** CHG-012 代理入力の理由（報告者がログイン中の本人以外のとき必須。作成時だけ） */
+export const PROXY_REASON_MAX = 500;
+export const workDraftSchema = z
+  .object({
+    ...workShape,
+    proxyReason: z
+      .string()
+      .max(PROXY_REASON_MAX)
+      .nullable()
+      .optional()
+      .transform((v) => (v === undefined || v === null || v.trim() === '' ? null : v.trim())),
+  })
+  .strict();
 export const workUpdateSchema = z.object({ ...workShape, expectedVersion: expectedVersion() }).strict();
 
 export const deliveryItemSchema = z.object({ productId: uuid(), quantity: z.number().int().min(1) }).strict();
@@ -125,5 +137,6 @@ export const deliveryFeeSchema = z
   })
   .strict();
 
-export type WorkDraftInput = z.infer<typeof workDraftSchema>;
+/** 更新（PATCH）・版の再利用では proxyReason を持たない */
+export type WorkDraftInput = Omit<z.infer<typeof workDraftSchema>, 'proxyReason'> & { readonly proxyReason?: string | null };
 export type DeliveryDraftInput = z.infer<typeof deliveryDraftSchema>;

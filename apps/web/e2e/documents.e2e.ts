@@ -1,4 +1,5 @@
-import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
+import { login } from './auth';
+import { test, expect, type APIRequestContext } from '@playwright/test';
 import { TODAY } from './today';
 
 // G4-E2E（CHG-004 で更新）: 確定 → outbox → worker（常駐）→ 日報PDF → storage → SUBMITTED → 署名付き URL で取得
@@ -8,14 +9,6 @@ const FIELD_PASSWORD = process.env['E2E_FIELD_PASSWORD'] ?? '';
 const OFFICE_PASSWORD = process.env['E2E_OFFICE_PASSWORD'] ?? '';
 const MAILPIT = process.env['MAILPIT_URL'] ?? 'http://127.0.0.1:8025';
 
-async function login(page: Page, loginId: string, password: string): Promise<string> {
-  await page.goto('/login');
-  await page.getByLabel('ログインID').fill(loginId);
-  await page.getByLabel('パスワード').fill(password);
-  await page.getByRole('button', { name: 'ログイン' }).click();
-  await expect(page).toHaveURL(/\/$/);
-  return (await page.evaluate(() => window.sessionStorage.getItem('inspexor_csrf_token'))) ?? '';
-}
 
 async function masters(request: APIRequestContext, type: string): Promise<Array<Record<string, string>>> {
   const r = await request.get(`/api/v1/masters/${type}?pageSize=100`);

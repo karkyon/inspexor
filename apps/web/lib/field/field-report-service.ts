@@ -10,7 +10,8 @@
  *  - 確定（API-007/011）: master/関係/時間/数量を再検証 → revision.confirmedAt（以後は書き換えない）
  *                         → currentRevisionId・current（月次用の要約）→ CONFIRMED → outbox
  *  - 参照（API-005/009）: owner か OFFICE/ADMIN/AUDITOR のみ。それ以外は存在を秘匿して 404
- *  - 報告者は本人のみ（SPEC-CONFLICT-G3-01: 代理入力は別CHG）
+ *  - CHG-012 代理入力（SPEC-CONFLICT-G3-01）: 事務所（OFFICE）は有効な現場の利用者を報告者に選んで作成できる（理由必須・再認証は handler）。
+ *    報告者が所有者（ownerId）になり、本人の画面にも出る。代理で作ったことは header.proxy と監査に残す
  *  - CHG-004: 作業場所・使用車・備考（作業）、使用車両・運搬回数（運搬 revision）、運搬費（運搬 header、空欄可）
  *  - CHG-006 F1: 運搬明細の allocationEligible（按分対象）は請求（Blind）用のため常に false
  */
@@ -45,6 +46,8 @@ import {
   type Filter,
   type RecordDecision,
   type ReportHeaderDoc,
+  type ReportProxy,
+  type UserDoc,
   type WorkCurrent,
   type WorkRevisionDoc,
 } from '@inspexor/docstore';
@@ -230,10 +233,10 @@ interface WorkValidated {
 }
 
 /** expectedReporterId: 作成時=本人、更新・確定時=下書きの報告者（OFFICE が他人の下書きを直しても報告者は変えない） */
-async function validateWork(db: DocReader, input: WorkDraftInput, expectedReporterId: string): Promise<WorkValidated> {
-  const issues: FieldIssue[] = [];
+async function validateWork(db: DocReader, input: WorkDraftInput, expectedReporterId: string, extra: readonly FieldIssue[] = []): Promise<WorkValidated> {
+  const issues: FieldIssue[] = [...extra];
   if (input.reporterId !== expectedReporterId) {
-    issues.push({ path: '/reporterId', code: 'proxy_unsupported', message: '報告者はログイン中の本人を指定してください（代理入力は未対応です）。' });
+    issues.push({ path: '/reporterId', code: 'reporter_fixed', message: '報告者は変更できません（作成時の報告者のままです）。' });
   }
   const customers = await docsById(db, C.customers, [input.customerId]);
   checkActive(issues, customers.get(input.customerId), '/customerId', 'お客様');
@@ -439,7 +442,14 @@ function workDetail(header: Header, revisionId: string, rev: WorkRevisionDoc): R
     vehicleId: rev.vehicleId,
     remarks: rev.remarks,
     decision: decisionOut(header),
+    proxy: proxyOut(header),
   };
+}
+
+/** CHG-012 代理入力の表示（無ければ null） */
+function proxyOut(header: Header): { enteredBy: string; enteredByName: string; reason: string; enteredAt: string } | null {
+  const p = header.proxy ?? null;
+  return p === null ? null : { enteredBy: p.enteredBy, enteredByName: p.enteredByName, reason: p.reason, enteredAt: p.enteredAt.toISOString() };
 }
 
 function deliveryDetail(header: Header, revisionId: string, rev: DeliveryRevisionDoc): Record<string, unknown> {
@@ -558,10 +568,30 @@ export class FieldReportService {
     const reportId = randomUUID();
     const revisionId = randomUUID();
     return this.store.runTransaction(async (tx) => {
-      const v = await validateWork(tx, input, ctx.actor.userId);
+      // CHG-012 代理入力: 報告者がログイン中の本人以外なら、事務所のロール・理由・有効な現場の利用者を確かめる
+      const proxyIssues: FieldIssue[] = [];
+      const isProxy = input.reporterId !== ctx.actor.userId;
+      const reason = input.proxyReason ?? null;
+      let enteredByName = '';
+      if (isProxy) {
+        if (!ctx.actor.roles.includes('OFFICE')) {
+          proxyIssues.push({ path: '/reporterId', code: 'proxy_not_allowed', message: '報告者はログイン中の本人を指定してください（代理入力は事務所のロールで行えます）。' });
+        } else {
+          const [reporter, actor] = await tx.getMany<UserDoc>([`${C.users}/${input.reporterId}`, `${C.users}/${ctx.actor.userId}`]);
+          if (reporter === null || reporter === undefined || reporter.status !== 'ACTIVE' || !reporter.roles.includes('FIELD')) {
+            proxyIssues.push({ path: '/reporterId', code: 'not_found', message: '報告者は有効な現場の利用者から選んでください。' });
+          }
+          enteredByName = actor?.displayName ?? '';
+          if (reason === null) proxyIssues.push({ path: '/proxyReason', code: 'required', message: '代理入力の理由を入力してください。' });
+        }
+      } else if (reason !== null) {
+        proxyIssues.push({ path: '/proxyReason', code: 'unexpected', message: '代理入力の理由は、報告者が本人以外のときだけ入力します。' });
+      }
+      const v = await validateWork(tx, input, input.reporterId, proxyIssues);
       const no = await this.nextNo(tx, 'WORK', ctx.now);
       const rev = workRevisionDoc(input, v, { revisionNo: 1, parentRevisionId: null });
-      const header = this.newHeader('WORK', no.reportNo, ctx.actor.userId, revisionId, workSummary(rev), null, ctx.now);
+      const proxy: ReportProxy | null = isProxy ? { enteredBy: ctx.actor.userId, enteredByName, reason: reason as string, enteredAt: ctx.now } : null;
+      const header: ReportHeaderDoc = { ...this.newHeader('WORK', no.reportNo, input.reporterId, revisionId, workSummary(rev), null, ctx.now), ...(proxy !== null ? { proxy } : {}) };
       writeCounter(tx, no.counter, no.seq);
       tx.create(reportPath('WORK', reportId), header);
       tx.create(revisionPath('WORK', reportId, revisionId), rev);
@@ -572,7 +602,8 @@ export class FieldReportService {
           action: 'WORK_REPORT_CREATE',
           targetType: LABEL.WORK.target,
           targetId: reportId,
-          afterData: { reportNo: no.reportNo, revisionId, revisionNo: 1, status: 'DRAFT', ...v.computed },
+          afterData: { reportNo: no.reportNo, revisionId, revisionNo: 1, status: 'DRAFT', ...v.computed, ...(proxy !== null ? { proxy: { reporterId: input.reporterId, enteredBy: proxy.enteredBy } } : {}) },
+          ...(proxy !== null ? { reason: proxy.reason } : {}),
           correlationId: ctx.correlationId,
           occurredAt: ctx.now,
         },

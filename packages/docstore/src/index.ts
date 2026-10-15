@@ -9,3 +9,4 @@ export * from './reports';
 export * from './documents';
 export * from './storage';
 export * from './billing';
+export * from './security';

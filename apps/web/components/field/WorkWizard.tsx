@@ -3,12 +3,13 @@
 /**
  * SCR-06〜09 作業日報 5 step（FR-003 / REQ-WRK-001）。
  * 顧客 → 品番・作業 → 人員・時間（工数を即時計算） → 数量・不良 → 確認・確定。
- * 報告者は本人のみ（SPEC-CONFLICT-G3-01: 代理入力は別CHG）。
+ * CHG-012 代理入力（SPEC-CONFLICT-G3-01）: 事務所（OFFICE）は新しい報告で、有効な現場の利用者を報告者に選べる（理由必須・確定前に本人確認）。
  * CHG-004（提案書 P.8/P.9）: Step1 に作業場所、Step2 に使用車（任意）、Step4 に備考。
  */
-import { useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { apiRequest } from '../../lib/api/client';
 import { computeBusinessTime, jstToInstant, minutesToHours, toJstParts, validateWorkSpan, type FieldIssue } from '@inspexor/domain';
-import { buildWorkDraft, emptyWorkForm, normalizeWorkForm, validateWorkStep, workDetailToForm, REMARKS_MAX, WORK_STEPS, type WorkForm } from '../../lib/field/wizard';
+import { buildWorkDraft, emptyWorkForm, normalizeWorkForm, validateProxy, validateWorkStep, workDetailToForm, REMARKS_MAX, WORK_STEPS, type WorkForm } from '../../lib/field/wizard';
 import { canCreateReports, useFieldUser } from './FieldShell';
 import { ErrorSummary, FieldError, StateBar, Stepper, issueFor } from './FieldParts';
 import { nameOf, useFieldMasters, type FieldMasters } from './useFieldMasters';
@@ -19,7 +20,7 @@ import { ConflictBanner, DonePanel, NotAllowed } from './WizardCommon';
 const BASE = '/field/work-reports/new';
 const TITLES = ['日付・報告者・お客様', '品番・作業内容', '作業者・作業時間', '数量・不良', '登録内容を確認'];
 const STEP_PATHS: Record<number, string[]> = {
-  1: ['/workDate', '/customerId', '/reporterId', '/workLocationId'],
+  1: ['/workDate', '/customerId', '/reporterId', '/proxyReason', '/workLocationId'],
   2: ['/productId', '/workTypeId', '/lotNo', '/vehicleId'],
   3: ['/workerIds', '/startAt', '/endAt'],
   4: ['/quantity', '/defects', '/remarks'],
@@ -50,6 +51,23 @@ function useTimeCalc(f: WorkForm, masters: FieldMasters | null) {
   }, [f.workDate, f.startTime, f.endTime, f.workerIds.length, masters]);
 }
 
+/** CHG-012: 代理入力の報告者の候補（有効な現場の利用者）。事務所のロールで新しい報告を作るときだけ読む */
+function useReporters(enabled: boolean): Array<{ id: string; displayName: string; loginId: string }> | null {
+  const [rows, setRows] = useState<Array<{ id: string; displayName: string; loginId: string }> | null>(null);
+  useEffect(() => {
+    if (!enabled) return;
+    let cancelled = false;
+    void apiRequest<Array<{ id: string; displayName: string; loginId: string; roles: string[]; status: string }>>('GET', '/users').then((r) => {
+      if (cancelled || !r.ok) return;
+      setRows(r.data.filter((u) => u.status === 'ACTIVE' && u.roles.includes('FIELD')).map((u) => ({ id: u.id, displayName: u.displayName, loginId: u.loginId })));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [enabled]);
+  return rows;
+}
+
 export function WorkWizard() {
   const user = useFieldUser();
   const online = useOnline();
@@ -74,6 +92,8 @@ export function WorkWizard() {
   const [issues, setIssues] = useState<FieldIssue[]>([]);
   const [checked, setChecked] = useState(false);
   const calc = useTimeCalc(w.form, masters);
+  const canProxy = user.roles.includes('OFFICE') && w.server.id === null;
+  const reporters = useReporters(canProxy && online);
 
   if (!canCreateReports(user)) return <NotAllowed />;
   if (w.done !== null) return <DonePanel type="WORK" kind="作業日報" done={w.done} again={BASE} />;
@@ -97,7 +117,7 @@ export function WorkWizard() {
     e.preventDefault();
     if (lookup === null) return;
     const own = STEP_PATHS[step] ?? [];
-    const found = validateWorkStep(step, f, lookup).filter((i) => own.some((p) => i.path === p || i.path.startsWith(`${p}/`)));
+    const found = [...validateWorkStep(step, f, lookup), ...(step === 1 ? validateProxy(f, user.userId) : [])].filter((i) => own.some((p) => i.path === p || i.path.startsWith(`${p}/`)));
     setIssues(found);
     if (found.length === 0) w.goStep(step + 1);
   }
@@ -105,11 +125,11 @@ export function WorkWizard() {
   async function confirm(e: FormEvent): Promise<void> {
     e.preventDefault();
     if (lookup === null) return;
-    const found = validateWorkStep(4, f, lookup);
+    const found = [...validateWorkStep(4, f, lookup), ...validateProxy(f, user.userId)];
     if (!checked) found.push({ path: '/confirmCheck', code: 'required', message: '「内容を確認しました」にチェックしてください。' });
     setIssues(found);
     if (found.length > 0) return;
-    await w.submit(buildWorkDraft(f));
+    await w.submit(buildWorkDraft(f, user.userId));
   }
 
   const hrefOf = (path: string): string | null => {
@@ -175,10 +195,51 @@ export function WorkWizard() {
             </div>
             <div className="fx-field">
               <label htmlFor="f-reporterId">報告者</label>
-              <input id="f-reporterId" readOnly value={f.reporterId === user.userId ? `${user.displayName}（本人）` : '元の報告者（事務所で修正中）'} aria-describedby="h-reporter e-reporterId" />
-              <small id="h-reporter">{f.reporterId === user.userId ? '代理入力は現在対応していません。' : '確定済み報告の修正では報告者は変わりません。'}</small>
+              {canProxy ? (
+                <select
+                  id="f-reporterId"
+                  value={f.reporterId}
+                  onChange={(e) => w.setForm((p) => ({ ...p, reporterId: e.target.value, proxyReason: e.target.value === user.userId ? '' : p.proxyReason }))}
+                  aria-invalid={invalid('/reporterId')}
+                  aria-describedby="h-reporter e-reporterId"
+                >
+                  <option value={user.userId}>{user.displayName}（本人）</option>
+                  {(reporters ?? []).filter((r) => r.id !== user.userId).map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.displayName}（{r.loginId}）の代理で入力
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input id="f-reporterId" readOnly value={f.reporterId === user.userId ? `${user.displayName}（本人）` : (reporters?.find((r) => r.id === f.reporterId)?.displayName ?? '元の報告者（事務所で修正中）')} aria-describedby="h-reporter e-reporterId" />
+              )}
+              <small id="h-reporter">
+                {canProxy
+                  ? '現場の方の代わりに入力するときは、その方を選んでください（代理入力。理由が必要で、確定前に本人確認があります）。'
+                  : f.reporterId === user.userId
+                    ? 'ログインしている本人が報告者になります。'
+                    : '確定済み報告の修正では報告者は変わりません。'}
+              </small>
               <FieldError id="e-reporterId" issue={issueFor(allIssues, '/reporterId')} />
             </div>
+            {canProxy && f.reporterId !== user.userId ? (
+              <div className="fx-field">
+                <label htmlFor="f-proxyReason">
+                  代理入力の理由<span className="fx-req">必須</span>
+                </label>
+                <textarea
+                  id="f-proxyReason"
+                  maxLength={500}
+                  rows={2}
+                  value={f.proxyReason}
+                  onChange={(e) => w.setForm((p) => ({ ...p, proxyReason: e.target.value }))}
+                  aria-invalid={invalid('/proxyReason')}
+                  aria-describedby="e-proxyReason"
+                  placeholder="例: 現場の端末が故障したため、事務所で入力"
+                />
+                <FieldError id="e-proxyReason" issue={issueFor(allIssues, '/proxyReason')} />
+              </div>
+            ) : null}
             <div className="fx-field">
               <label htmlFor="f-customerId">
                 お客様<span className="fx-req">必須</span>
@@ -437,7 +498,15 @@ export function WorkWizard() {
                 <dt>作業日</dt>
                 <dd>{f.workDate}</dd>
                 <dt>報告者</dt>
-                <dd>{f.reporterId === user.userId ? `${user.displayName}（本人）` : '元の報告者（事務所で修正中）'}</dd>
+                <dd>{f.reporterId === user.userId ? `${user.displayName}（本人）` : (reporters?.find((r) => r.id === f.reporterId)?.displayName ?? '元の報告者（事務所で修正中）')}</dd>
+                {canProxy && f.reporterId !== user.userId ? (
+                  <>
+                    <dt>代理入力</dt>
+                    <dd>
+                      {user.displayName} が代理で入力（理由: {f.proxyReason.trim()}）
+                    </dd>
+                  </>
+                ) : null}
                 <dt>お客様</dt>
                 <dd>{nameOf(masters.customers, f.customerId)}</dd>
                 <dt>作業場所</dt>

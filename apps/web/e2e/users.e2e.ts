@@ -1,16 +1,10 @@
-import { test, expect, type Page } from '@playwright/test';
+import { login } from './auth';
+import { test, expect } from '@playwright/test';
 
 // CHG-008 E2E: 利用者管理（ADMIN）。追加 → 新しい利用者でログイン → ロール変更・無効化で既存セッションが使えなくなる → 再有効化・パスワード再設定。
 // 前提: dev-admin（ADMIN）。作成した利用者は最後に無効にする（開発DBに残る）。
 const ADMIN_PASSWORD = process.env['E2E_PASSWORD'] ?? '';
 
-async function login(page: Page, loginId: string, password: string): Promise<void> {
-  await page.goto('/login');
-  await page.getByLabel('ログインID').fill(loginId);
-  await page.getByLabel('パスワード').fill(password);
-  await page.getByRole('button', { name: 'ログイン' }).click();
-  await expect(page).toHaveURL(/\/$/);
-}
 
 test.describe('CHG-008 E2E: 利用者管理', () => {
   test.beforeAll(() => {

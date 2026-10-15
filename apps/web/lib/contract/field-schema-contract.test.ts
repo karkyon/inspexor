@@ -64,7 +64,9 @@ const workCases: Array<[string, unknown]> = [
   ['customerId uuid でない', { ...work, customerId: 'abc' }],
   ['defect 未知field', { ...work, defects: [{ defectTypeId: U, quantity: 1, note: 'x' }] }],
   ['defect quantity 負', { ...work, defects: [{ defectTypeId: U, quantity: -1 }] }],
-  ['未知field', { ...work, proxyReason: '代理' }],
+  ['未知field', { ...work, proxyNote: '代理' }],
+  // CHG-012 代理入力の理由（作成時だけ、500文字まで）
+  ['proxyReason 501文字', { ...work, proxyReason: 'あ'.repeat(501) }],
   ...(['workDate', 'reporterId', 'customerId', 'productId', 'workTypeId', 'workerIds', 'startAt', 'endAt', 'quantity', 'defects'] as const).map(
     (k): [string, unknown] => [`必須欠落 ${k}`, without(work, k)],
   ),
@@ -120,7 +122,8 @@ describe('G3-CONTRACT: CHG-002 の openapi 是正', () => {
     for (const [draft, update] of [['WorkDraft', 'WorkUpdate'], ['DeliveryDraft', 'DeliveryUpdate']] as const) {
       const d = doc.components.schemas[draft];
       const u = doc.components.schemas[update];
-      expect(Object.keys(u?.properties ?? {}).sort()).toEqual([...Object.keys(d?.properties ?? {}), 'expectedVersion'].sort());
+      // CHG-012: proxyReason（代理入力の理由）は作成時だけ
+      expect(Object.keys(u?.properties ?? {}).sort()).toEqual([...Object.keys(d?.properties ?? {}).filter((k) => k !== 'proxyReason'), 'expectedVersion'].sort());
       expect([...(u?.required ?? [])].sort()).toEqual([...(d?.required ?? []), 'expectedVersion'].sort());
     }
   });

@@ -8,7 +8,8 @@
  *  4. 認可: OPERATION_POLICIES（RBAC）。403 FORBIDDEN、拒否は audit に記録（API設計書 監査列）
  *  5. 冪等性: idempotent operation は Idempotency-Key 16–100字必須。422 VALIDATION_ERROR
  *  6. handler 実行。未捕捉例外は 500 INTERNAL_ERROR（詳細は返さない、SEC-010）
- *  7. 成功時は session の lastActivityAt を更新した cookie を再発行（操作中の idle timeout 防止）
+ *  7. 成功時は session の lastActivityAt を更新した cookie を再発行（操作中の idle timeout 防止）。handler が session cookie を出したとき（再認証）はそれを使う
+ *  CHG-012: 認証の後に回数制限（利用者ごと、更新 120回/分・参照 600回/分）。超えたら 429 RATE_LIMITED
  */
 import {
   OPERATION_POLICIES,
@@ -21,10 +22,11 @@ import {
 } from '@inspexor/domain';
 import type { AuditRepository } from '@inspexor/application';
 import { verifyCsrfToken } from '../security/csrf';
-import { readSessionCookie, sessionCookieHeader, clearSessionCookieHeader } from '../auth/session-cookie';
+import { readSessionCookie, sessionCookieHeader, clearSessionCookieHeader, SESSION_COOKIE_NAME } from '../auth/session-cookie';
 import { verifySessionToken, issueSessionToken, refreshLastActivity, type SessionPayload } from '../auth/session-token';
 import { resolveCorrelationId } from './correlation-id';
 import { errorResponse } from './api-response';
+import { rateLimitedResponse, type MemoryRateLimiter } from '../security/rate-limit';
 
 export const IDEMPOTENCY_KEY_HEADER = 'idempotency-key';
 export const IDEMPOTENCY_KEY_MIN = 16;
@@ -35,6 +37,8 @@ export interface Actor {
   readonly sessionId: string;
   readonly displayName: string;
   readonly roles: readonly RoleCode[];
+  /** CHG-012: 最後にパスワード（と確認コード）で認証した時刻（再認証の判定。旧 session はログイン時刻） */
+  readonly authAt: Date;
 }
 
 export interface ApiContext {
@@ -48,6 +52,8 @@ export interface ApiContext {
   /** idempotent operation の場合のみ値が入る */
   readonly idempotencyKey: string | null;
   readonly now: Date;
+  /** CHG-012: 認証済みの session（PUBLIC は null）。再認証で session を作り直すときに使う */
+  readonly session: SessionPayload | null;
 }
 
 export interface ApiHandlerDeps {
@@ -57,6 +63,8 @@ export interface ApiHandlerDeps {
   readonly logError?: (message: string, detail: unknown) => void;
   /** CHG-008: セッションの利用者が今も有効か（無効化・ロール変更・パスワード再設定後は false）。未指定なら確認しない（試験） */
   readonly userGuard?: (session: SessionPayload) => Promise<boolean>;
+  /** CHG-012: 利用者ごとの回数制限。未指定なら数えない（試験） */
+  readonly rateLimiter?: MemoryRateLimiter;
 }
 
 export type ApiHandler = (ctx: ApiContext) => Promise<Response>;
@@ -67,6 +75,7 @@ function toActor(payload: SessionPayload): Actor {
     sessionId: payload.sessionId,
     displayName: payload.displayName,
     roles: payload.roles.filter(isRoleCode),
+    authAt: new Date(payload.authAt ?? payload.issuedAt),
   };
 }
 
@@ -144,6 +153,12 @@ export function createApiHandler(
       return errorResponse(401, 'AUTH_REQUIRED', '認証が必要です。', correlationId);
     }
 
+    // ---- 4b. 回数制限（CHG-012） ----
+    if (deps.rateLimiter !== undefined && actor !== null) {
+      const decision = deps.rateLimiter.consume(request.method.toUpperCase() === 'GET' ? 'read' : 'command', actor.userId, Date.now());
+      if (!decision.ok) return rateLimitedResponse(decision.retryAfterSeconds, correlationId);
+    }
+
     // ---- 5. 冪等性ヘッダ ----
     let idempotencyKey: string | null = null;
     if (policy.idempotent) {
@@ -173,6 +188,7 @@ export function createApiHandler(
         ownerCheckRequired: authz.ownerCheckRequired,
         idempotencyKey,
         now,
+        session,
       });
     } catch (error) {
       logError('unhandled api error', { correlationId, operationId, error: String(error) });
@@ -180,7 +196,8 @@ export function createApiHandler(
     }
 
     // ---- 7. session延長 ----
-    if (session !== null && response.status < 400) {
+    const handlerSetSession = (response.headers.get('set-cookie') ?? '').includes(`${SESSION_COOKIE_NAME}=`);
+    if (session !== null && response.status < 400 && !handlerSetSession) {
       const refreshed = issueSessionToken(refreshLastActivity(session, now), deps.sessionSecret);
       response.headers.append('Set-Cookie', sessionCookieHeader(refreshed, sessionCookieAttributes().maxAge));
     }

@@ -1,7 +1,7 @@
-import { DocIdempotencyRepository, StoreAuditRepository } from '@inspexor/docstore';
+import { appApiDeps } from '../http/app-api-deps';
+import { DocIdempotencyRepository } from '@inspexor/docstore';
 import { getDocStore } from '../db/docstore';
 import { getSessionSecret } from '../auth/session-secret';
-import { appUserGuard } from '../auth/app-user-guard';
 import { AdjustmentService } from './adjustment-service';
 import { BillingService } from './billing-service';
 import { InvoiceService } from './invoice-service';
@@ -12,5 +12,5 @@ export const billingRouteDeps: BillingRouteDeps = {
   invoices: () => new InvoiceService(getDocStore(), getSessionSecret()),
   adjustments: () => new AdjustmentService(getDocStore()),
   idempotency: () => new DocIdempotencyRepository(getDocStore()),
-  api: () => ({ sessionSecret: getSessionSecret(), now: () => new Date(), auditRepository: new StoreAuditRepository(getDocStore()), userGuard: appUserGuard }),
+  api: appApiDeps,
 };

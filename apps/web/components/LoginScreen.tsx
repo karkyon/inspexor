@@ -9,8 +9,8 @@ export function LoginScreen({ onLoginSuccess }: { readonly onLoginSuccess: (data
     <div className="px-page">
       <main className="px-loginwrap">
         <div className="px-login">
-          <section className="px-loginbrand" aria-hidden="true">
-            <div className="px-logo">IX</div>
+          <section className="px-loginbrand" aria-label="INSPEXOR について">
+            <div className="px-logo" aria-hidden="true">IX</div>
             <h1>
               現場の実績を、
               <br />

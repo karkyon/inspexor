@@ -3,6 +3,7 @@
 /**
  * CHG-008 利用者管理（ADMIN: 追加・表示名とロールの変更・無効化/有効化・パスワード再設定・ロック解除、OFFICE/AUDITOR: 参照）。
  * API-030〜033。パスワードは画面で生成でき、利用者に伝えるために一度だけ表示する（保存はハッシュのみ）。
+ * CHG-012: 多要素認証の状態と解除（理由必須、自分以外）。パスワード再設定・解除は再認証（本人確認ダイアログ）が必要。
  */
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { toJstParts } from '@inspexor/domain';
@@ -16,6 +17,8 @@ export interface UserRow {
   readonly roles: string[];
   readonly status: 'ACTIVE' | 'INACTIVE';
   readonly locked: boolean;
+  /** CHG-012 */
+  readonly mfaEnabled?: boolean;
   readonly version: number;
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -64,6 +67,7 @@ function StatusPills({ u }: { u: UserRow }) {
     <>
       <span className={`ix-pill ${u.status === 'ACTIVE' ? 'approved' : 'draft'}`}>{u.status === 'ACTIVE' ? '有効' : '無効'}</span>
       {u.locked ? <span className="ix-pill rejected"> ロック中</span> : null}
+      {u.mfaEnabled === true ? <span className="ix-pill confirmed"> 多要素認証</span> : null}
     </>
   );
 }
@@ -278,6 +282,7 @@ export function UserDetailScreen({ id }: { readonly id: string }) {
   const [roles, setRoles] = useState<string[]>([]);
   const [password, setPassword] = useState('');
   const [reason, setReason] = useState('');
+  const [mfaReason, setMfaReason] = useState('');
   const [fields, setFields] = useState<Fields>([]);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -312,6 +317,7 @@ export function UserDetailScreen({ id }: { readonly id: string }) {
       setNotice(done);
       setPassword('');
       setReason('');
+      setMfaReason('');
       return;
     }
     setFields(res.error.code === 'VERSION_CONFLICT' ? [{ path: '/', message: '他の利用者が更新しました。最新の内容を読み込みました。' }] : (res.error.fields?.map((f) => ({ path: f.path, message: f.message })) ?? [{ path: '/', message: res.error.message }]));
@@ -377,6 +383,33 @@ export function UserDetailScreen({ id }: { readonly id: string }) {
               </button>
             </div>
           </section>
+          {me.features?.adminMfa === true || u.mfaEnabled === true ? (
+            <section className="ix-panel ix-form ix-inner" aria-labelledby="mfa-title">
+              <h2 id="mfa-title">多要素認証</h2>
+              <p>{u.mfaEnabled === true ? '登録済み（認証アプリの確認コードでログインしています）。' : u.roles.includes('ADMIN') ? '未登録（次のログインで登録します）。' : '管理者ロールの利用者だけが使います。'}</p>
+              {u.mfaEnabled === true ? (
+                self ? (
+                  <p className="ix-muted ix-small">自分の多要素認証は解除できません。端末を替えるときは他の管理者に依頼してください。</p>
+                ) : (
+                  <>
+                    <p className="ix-muted ix-small">スマートフォンの紛失・機種変更のときに解除します。解除すると、この利用者のログイン中の画面はログアウトされ、次のログインで登録し直します。</p>
+                    <div className="ix-field">
+                      <label htmlFor="u-mfa-reason">
+                        解除の理由<span className="ix-req">必須</span>
+                      </label>
+                      <input id="u-mfa-reason" value={mfaReason} maxLength={1000} onChange={(e) => setMfaReason(e.target.value)} placeholder="例: スマートフォンの紛失" />
+                    </div>
+                    <div className="ix-actions">
+                      <span />
+                      <button type="button" className="ix-btn danger" disabled={busy || mfaReason.trim() === ''} onClick={() => void run('POST', `/users/${u.id}/reset-mfa`, { expectedVersion: u.version, reason: mfaReason.trim() }, '多要素認証を解除しました。次のログインで登録し直します。')}>
+                        多要素認証を解除
+                      </button>
+                    </div>
+                  </>
+                )
+              ) : null}
+            </section>
+          ) : null}
           <section className="ix-panel ix-form ix-inner" aria-labelledby="st-title">
             <h2 id="st-title">利用の停止・再開</h2>
             {u.locked ? (

@@ -5,11 +5,11 @@ const ALL = Object.keys(OPERATION_POLICIES) as OperationId[];
 const as = (...roles: RoleCode[]) => ({ roles });
 
 describe('rbac: API設計書 §6 認証/権限 準拠', () => {
-  it('37 operation（API-001〜025＋CHG-004 API-026〜028＋CHG-007 API-029＋CHG-008 API-030〜033＋CHG-009 API-034＋CHG-011 API-035〜037）を網羅し apiId が一意', () => {
-    expect(ALL).toHaveLength(37);
+  it('42 operation（API-001〜025＋CHG-004 API-026〜028＋CHG-007 API-029＋CHG-008 API-030〜033＋CHG-009 API-034＋CHG-011 API-035〜037＋CHG-012 API-038〜042）を網羅し apiId が一意', () => {
+    expect(ALL).toHaveLength(42);
     const ids = ALL.map((op) => OPERATION_POLICIES[op].apiId);
-    expect(new Set(ids).size).toBe(37);
-    expect([...ids].sort()).toEqual(Array.from({ length: 37 }, (_, i) => `API-${String(i + 1).padStart(3, '0')}`));
+    expect(new Set(ids).size).toBe(42);
+    expect([...ids].sort()).toEqual(Array.from({ length: 42 }, (_, i) => `API-${String(i + 1).padStart(3, '0')}`));
   });
 
   it('CHG-004: setDeliveryFee は OFFICE/ADMIN のみ', () => {
@@ -26,11 +26,13 @@ describe('rbac: API設計書 §6 認証/権限 準拠', () => {
     }
   });
 
-  it('PUBLIC（login）は未認証でも可', () => {
+  it('PUBLIC（login、CHG-012 の確認コード setupMfa・verifyMfa）は未認証でも可', () => {
     expect(authorizeOperation('login', null)).toEqual({ ok: true, ownerCheckRequired: false });
+    expect(authorizeOperation('setupMfa', null)).toEqual({ ok: true, ownerCheckRequired: false });
+    expect(authorizeOperation('verifyMfa', null)).toEqual({ ok: true, ownerCheckRequired: false });
   });
 
-  it.each(ALL.filter((op) => op !== 'login'))('%s は未認証なら AUTH_REQUIRED', (op) => {
+  it.each(ALL.filter((op) => !['login', 'setupMfa', 'verifyMfa'].includes(op)))('%s は未認証なら AUTH_REQUIRED', (op) => {
     expect(authorizeOperation(op, null)).toEqual({ ok: false, errorCode: 'AUTH_REQUIRED' });
   });
 

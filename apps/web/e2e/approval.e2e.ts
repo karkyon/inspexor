@@ -1,4 +1,5 @@
-import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
+import { login } from './auth';
+import { test, expect, type APIRequestContext } from '@playwright/test';
 import { TODAY } from './today';
 
 // CHG-007 E2E: 承認ワークフロー（SCR-10/11/12、FR-007/017）。前提: 開発環境で APPROVAL_ENABLED=true、worker 稼働、synthetic seed 投入済み。
@@ -7,14 +8,6 @@ import { TODAY } from './today';
 const FIELD_PASSWORD = process.env['E2E_FIELD_PASSWORD'] ?? '';
 const OFFICE_PASSWORD = process.env['E2E_OFFICE_PASSWORD'] ?? '';
 
-async function login(page: Page, loginId: string, password: string): Promise<string> {
-  await page.goto('/login');
-  await page.getByLabel('ログインID').fill(loginId);
-  await page.getByLabel('パスワード').fill(password);
-  await page.getByRole('button', { name: 'ログイン' }).click();
-  await expect(page).toHaveURL(/\/$/);
-  return (await page.evaluate(() => window.sessionStorage.getItem('inspexor_csrf_token'))) ?? '';
-}
 
 async function masters(request: APIRequestContext, type: string): Promise<Array<Record<string, string>>> {
   const r = await request.get(`/api/v1/masters/${type}?pageSize=100`);

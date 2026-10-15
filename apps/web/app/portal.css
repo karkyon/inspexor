@@ -1,5 +1,5 @@
 /* ログイン（SCR-01）・ホーム — 画面UX設計書・ワイヤーフレーム v6.0 のトークン/寸法に準拠（管理画面 ix- / 現場 fx- と同じ配色）。クラスは px- 接頭辞。 */
-:root{--px-nav:#102a43;--px-blue:#1769aa;--px-cyan:#11a3a5;--px-ink:#172b3a;--px-muted:#5d6e7c;--px-line:#dce5eb;--px-green:#15936d;--px-red:#b93636;--px-shadow:0 3px 12px #173a5010;--px-shadow-lg:0 12px 34px #183b5620}
+:root{--px-nav:#102a43;--px-blue:#1769aa;--px-cyan:#11a3a5;--px-ink:#172b3a;--px-muted:#4f5f6b;--px-line:#dce5eb;--px-green:#0d7053;--px-red:#b93636;--px-shadow:0 3px 12px #173a5010;--px-shadow-lg:0 12px 34px #183b5620}
 body:has(.px-page){margin:0}
 .px-page *{box-sizing:border-box}
 .px-page{min-height:100vh;background:#dfe7ec;color:var(--px-ink);font:15px/1.5 "Noto Sans JP",system-ui,sans-serif}
@@ -58,10 +58,24 @@ body:has(.px-page){margin:0}
 .px-card.field i{background:#fff3;color:#fff}.px-card.field span{color:#d6e9f6}.px-card.field em{color:#fff}
 .px-card.records i{background:#e5f0fb;color:var(--px-blue)}
 .px-card.monthly i{background:#dff6ec;color:var(--px-green)}
-.px-card.masters i{background:#fff2d6;color:#9a6200}
+.px-card.masters i{background:#fff2d6;color:#7a4f00}
 .px-foot{margin-top:28px;color:var(--px-muted);font-size:12px;text-align:center}
 .px-loading{padding:40px;text-align:center;color:var(--px-muted)}
 
 @media(max-width:900px){.px-menu{grid-template-columns:1fr}.px-login{grid-template-columns:1fr;min-height:auto;max-width:520px}.px-loginbrand{display:none}.px-loginbox{padding:48px 36px}}
 @media(max-width:600px){.px-loginwrap{padding:0;place-items:stretch}.px-login{border-radius:0;box-shadow:none;max-width:none}.px-loginbox{padding:36px 22px}
 .px-menu{grid-template-columns:1fr}.px-welcome{padding:22px}.px-welcome h1{font-size:21px}.px-clock{display:none}.px-user>span{display:none}.px-viewport{padding:14px 12px 40px}}
+
+/* CHG-012 多要素認証 */
+.px-steptitle{margin:0;font-size:20px}
+.px-steptitle:focus{outline:none}
+.px-qr{display:grid;grid-template-columns:180px 1fr;gap:16px;align-items:center}
+.px-qr svg{width:180px;height:180px;display:block;background:#fff}
+.px-secret{display:inline-block;margin-top:6px;padding:6px 10px;border-radius:6px;background:#eef3f6;font-size:15px;letter-spacing:.06em;word-break:break-all;user-select:all}
+.px-codes{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px 18px;margin:0;padding:12px 12px 12px 36px;border:1px dashed #8aa3b3;border-radius:9px;background:#fbfcfd;font-size:16px}
+.px-check{display:flex;gap:10px;align-items:center;font-weight:700}
+.px-check input{width:22px;height:22px}
+.px-linkrow{display:flex;flex-wrap:wrap;gap:8px 18px}
+.px-textbtn{border:0;background:none;padding:6px 0;color:var(--px-blue);font-weight:700;text-decoration:underline;cursor:pointer;min-height:44px}
+@media(max-width:560px){.px-qr{grid-template-columns:1fr}}
+.px-page a:focus-visible,.px-page button:focus-visible,.px-page input:focus-visible{outline:3px solid #1769aa;outline-offset:2px}

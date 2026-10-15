@@ -1,3 +1,4 @@
+import { login as authLogin } from './auth';
 import { test, expect, type Page } from '@playwright/test';
 import { TODAY } from './today';
 
@@ -7,11 +8,7 @@ const LOGIN_ID = process.env['E2E_FIELD_LOGIN_ID'] ?? 'dev-field';
 const PASSWORD = process.env['E2E_FIELD_PASSWORD'] ?? '';
 
 async function login(page: Page): Promise<void> {
-  await page.goto('/login');
-  await page.getByLabel('ログインID').fill(LOGIN_ID);
-  await page.getByLabel('パスワード').fill(PASSWORD);
-  await page.getByRole('button', { name: 'ログイン' }).click();
-  await expect(page).toHaveURL(/\/$/);
+  await authLogin(page, LOGIN_ID, PASSWORD);
 }
 
 test.describe('G3-E2E: 現場入力（SCR-02〜09）', () => {

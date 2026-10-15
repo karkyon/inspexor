@@ -6,12 +6,55 @@ import { errorResponse, dataResponse } from '../http/api-response';
 import { loginRequestSchema } from './login-request-schema';
 import { issueSessionToken, generateSessionId, type SessionPayload } from './session-token';
 import { sessionCookieHeader } from './session-cookie';
+import { rateLimitedResponse, type LoginRateLimit } from '../security/rate-limit';
+import type { MfaChallengeView } from './mfa-service';
 
 export interface LoginHandlerDeps {
   readonly userRepository: UserRepository;
   readonly passwordHasher: PasswordHasher;
   readonly sessionSecret: string;
   readonly now: () => Date;
+  /** CHG-012: 回数制限（接続元・ログインID）。未指定なら数えない（試験） */
+  readonly rateLimit?: LoginRateLimit;
+  /** CHG-012: 管理者の多要素認証。必要なら確認待ちを返す。未指定なら多要素認証なし */
+  readonly mfa?: { requiredFor(roles: readonly string[]): boolean; challengeFor(userId: string, now: Date): Promise<MfaChallengeView | null> };
+}
+
+/** session を発行して、ログイン成功の応答を返す（ログイン・確認コードの確認で共通） */
+export function loginSuccessResponse(
+  user: { userId: string; displayName: string; roles: readonly string[] },
+  now: Date,
+  sessionSecret: string,
+  correlationId: string,
+  options: { mfa?: boolean; recoveryCodes?: readonly string[] | null } = {},
+): Response {
+  const sessionPayload: SessionPayload = {
+    sessionId: generateSessionId(),
+    userId: user.userId,
+    displayName: user.displayName,
+    roles: [...user.roles],
+    issuedAt: now.toISOString(),
+    lastActivityAt: now.toISOString(),
+    authAt: now.toISOString(),
+    ...(options.mfa === true ? { mfa: true } : {}),
+  };
+  const token = issueSessionToken(sessionPayload, sessionSecret);
+  const csrfToken = issueCsrfToken(sessionPayload.sessionId, sessionSecret);
+  const expiresAt = sessionExpiresAt({ issuedAt: now, lastActivityAt: now }).toISOString();
+  // Session + csrfToken（GAP-009: CSRFトークンをログイン応答で配布）。CHG-012: 多要素認証の登録時だけ回復コードを一度だけ返す
+  return dataResponse(
+    200,
+    {
+      userId: user.userId,
+      displayName: user.displayName,
+      roles: [...user.roles],
+      expiresAt,
+      csrfToken,
+      ...(options.recoveryCodes !== undefined && options.recoveryCodes !== null ? { recoveryCodes: [...options.recoveryCodes] } : {}),
+    },
+    correlationId,
+    sessionCookieHeader(token, sessionCookieAttributes().maxAge),
+  );
 }
 
 export async function handleLoginRequest(request: Request, deps: LoginHandlerDeps): Promise<Response> {
@@ -36,10 +79,17 @@ export async function handleLoginRequest(request: Request, deps: LoginHandlerDep
   }
 
   const now = deps.now();
+  // CHG-012: 回数制限（パスワードの照合より前）
+  if (deps.rateLimit !== undefined) {
+    const decision = await deps.rateLimit(request, parsed.data.loginId, now);
+    if (!decision.ok) return rateLimitedResponse(decision.retryAfterSeconds, correlationId);
+  }
   const loginDeps: LoginDeps = {
     userRepository: deps.userRepository,
     passwordHasher: deps.passwordHasher,
     now,
+    // CHG-012: 多要素認証が必要な利用者は、確認コードまで済んでから失敗回数を戻す
+    ...(deps.mfa !== undefined ? { deferLockoutReset: (u: { roles: readonly string[] }) => (deps.mfa as { requiredFor(r: readonly string[]): boolean }).requiredFor(u.roles) } : {}),
   };
   const result = await login(parsed.data, loginDeps);
 
@@ -49,23 +99,9 @@ export async function handleLoginRequest(request: Request, deps: LoginHandlerDep
     return errorResponse(status, result.errorCode, '認証に失敗しました。', correlationId);
   }
 
-  const sessionPayload: SessionPayload = {
-    sessionId: generateSessionId(),
-    userId: result.userId,
-    displayName: result.displayName,
-    roles: result.roles,
-    issuedAt: now.toISOString(),
-    lastActivityAt: now.toISOString(),
-  };
-  const token = issueSessionToken(sessionPayload, deps.sessionSecret);
-  const csrfToken = issueCsrfToken(sessionPayload.sessionId, deps.sessionSecret);
-  const expiresAt = sessionExpiresAt({ issuedAt: now, lastActivityAt: now }).toISOString();
+  // CHG-012: 管理者の多要素認証。session はまだ出さず、確認待ちを返す
+  const challenge = deps.mfa !== undefined ? await deps.mfa.challengeFor(result.userId, now) : null;
+  if (challenge !== null) return dataResponse(200, challenge, correlationId);
 
-  // Session + csrfToken（GAP-009: CSRFトークンをログイン応答で配布）
-  return dataResponse(
-    200,
-    { userId: result.userId, displayName: result.displayName, roles: result.roles, expiresAt, csrfToken },
-    correlationId,
-    sessionCookieHeader(token, sessionCookieAttributes().maxAge),
-  );
+  return loginSuccessResponse({ userId: result.userId, displayName: result.displayName, roles: result.roles }, now, deps.sessionSecret, correlationId);
 }

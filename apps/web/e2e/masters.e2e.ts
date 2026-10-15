@@ -1,3 +1,4 @@
+import { login as authLogin } from './auth';
 import { test, expect, type Page } from '@playwright/test';
 
 // G2-E2E: SCR-13 マスター管理（API-015〜018 を画面から）。前提: dev-admin と synthetic seed（SYN-*）が投入済み。
@@ -6,11 +7,7 @@ const LOGIN_ID = process.env['E2E_LOGIN_ID'] ?? 'dev-admin';
 const PASSWORD = process.env['E2E_PASSWORD'] ?? '';
 
 async function login(page: Page): Promise<void> {
-  await page.goto('/login');
-  await page.getByLabel('ログインID').fill(LOGIN_ID);
-  await page.getByLabel('パスワード').fill(PASSWORD);
-  await page.getByRole('button', { name: 'ログイン' }).click();
-  await expect(page).toHaveURL(/\/$/);
+  await authLogin(page, LOGIN_ID, PASSWORD);
 }
 
 async function billingEnabled(page: Page): Promise<boolean> {

@@ -74,4 +74,13 @@ describe('login use-case: API-001/SEC-002/SEC-003準拠', () => {
     await login({ loginId: 'taro', password: 'wrong' }, { userRepository: repo, passwordHasher: hasher, now: NOW });
     expect(repo.updateLockoutState).toHaveBeenCalledWith('user-1', { failedAttempts: 5, lockedUntil: new Date('2026-10-07T00:15:00Z') });
   });
+
+  it('CHG-012: deferLockoutReset が true なら成功でも失敗回数を戻さない（多要素認証の確認後に戻す）', async () => {
+    const user = makeUser({ failedAttempts: 2, roles: ['ADMIN'] });
+    const repo = makeRepo(user);
+    const hasher: PasswordHasher = { verify: vi.fn().mockResolvedValue(true) };
+    const result = await login({ loginId: 'taro', password: 'correct' }, { userRepository: repo, passwordHasher: hasher, now: NOW, deferLockoutReset: (u) => u.roles.includes('ADMIN') });
+    expect(result.ok).toBe(true);
+    expect(repo.updateLockoutState).not.toHaveBeenCalled();
+  });
 });

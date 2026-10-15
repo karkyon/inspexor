@@ -1,4 +1,5 @@
-import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
+import { login } from './auth';
+import { test, expect, type APIRequestContext } from '@playwright/test';
 import { MONTH, TODAY } from './today';
 
 // CHG-009 E2E: 請求計算・レビュー・確定（SCR-14、FR-009〜014）。前提: 開発環境で APPROVAL_ENABLED=true・BILLING_ENABLED=true、worker 稼働、synthetic seed 投入済み。
@@ -9,14 +10,6 @@ const MAILPIT = process.env['MAILPIT_URL'] ?? 'http://127.0.0.1:8025';
 const ADMIN_PASSWORD = process.env['E2E_PASSWORD'] ?? '';
 const FIELD_PASSWORD = process.env['E2E_FIELD_PASSWORD'] ?? '';
 
-async function login(page: Page, loginId: string, password: string): Promise<string> {
-  await page.goto('/login');
-  await page.getByLabel('ログインID').fill(loginId);
-  await page.getByLabel('パスワード').fill(password);
-  await page.getByRole('button', { name: 'ログイン' }).click();
-  await expect(page).toHaveURL(/\/$/);
-  return (await page.evaluate(() => window.sessionStorage.getItem('inspexor_csrf_token'))) ?? '';
-}
 
 async function post(req: APIRequestContext, csrf: string, path: string, data: unknown, key?: string): Promise<Record<string, unknown>> {
   const res = await req.post(`/api/v1${path}`, { headers: { 'x-csrf-token': csrf, ...(key !== undefined ? { 'idempotency-key': key } : {}) }, data });

@@ -43,6 +43,11 @@ export interface LoginDeps {
   readonly userRepository: UserRepository;
   readonly passwordHasher: PasswordHasher;
   readonly now: Date;
+  /**
+   * CHG-012: true なら成功時に失敗回数を戻さない（多要素認証の確認コードまで済んだときに戻す）。
+   * パスワードだけで回数が戻ると、確認コードを何度でも試せてしまうため
+   */
+  readonly deferLockoutReset?: (user: UserRecord) => boolean;
 }
 
 export type LoginResult =
@@ -70,6 +75,8 @@ export async function login(input: LoginInput, deps: LoginDeps): Promise<LoginRe
     return { ok: false, errorCode: 'AUTH_REQUIRED' };
   }
 
-  await deps.userRepository.updateLockoutState(user.id, recordSuccessfulAttempt());
+  if (deps.deferLockoutReset?.(user) !== true) {
+    await deps.userRepository.updateLockoutState(user.id, recordSuccessfulAttempt());
+  }
   return { ok: true, userId: user.id, displayName: user.displayName, roles: user.roles };
 }

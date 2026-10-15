@@ -341,6 +341,22 @@ function DecisionNote({ d }: { d: Detail }) {
   );
 }
 
+/** CHG-012: 事務所が代理で入力した報告 */
+function ProxyNote({ d }: { d: Detail }) {
+  const p = (d['proxy'] as { enteredByName: string; reason: string; enteredAt: string } | null | undefined) ?? null;
+  if (p === null) return null;
+  const at = toJstParts(new Date(p.enteredAt));
+  return (
+    <div className="ix-decision" role="note" aria-label="代理入力">
+      <b>代理入力</b>{' '}
+      <span className="ix-small">
+        {p.enteredByName} が {at.date} {at.time} に入力
+      </span>
+      <p className="ix-prewrap">理由: {p.reason}</p>
+    </div>
+  );
+}
+
 /**
  * CHG-007 承認操作（SCR-12、FR-007）。APPROVAL_ENABLED かつ OFFICE/ADMIN のとき。
  *   提出済（SUBMITTED）: 承認（コメント任意）/ 差戻し（理由必須）。承認済（APPROVED）: 取消（理由必須、請求確定前）
@@ -463,6 +479,7 @@ export function RecordDetail({ type, id }: { type: ReportType; id: string }) {
         </section>
         <div className="ix-sidecol">
           <DecisionNote d={d} />
+          <ProxyNote d={d} />
           {approval && canAct ? <ApprovalPanel key={`${d.status}-${d.version}`} type={type} d={d} onChanged={() => void load()} /> : null}
           <PdfPanel type={type} d={d} canAct={canAct} onChanged={() => void load()} />
           {type === 'DELIVERY' && canAct && d.status !== 'DRAFT' && d.status !== 'BILLING_LOCKED' ? <FeePanel key={d.version} d={d} onChanged={() => void load()} /> : null}

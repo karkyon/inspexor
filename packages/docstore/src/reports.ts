@@ -83,6 +83,16 @@ export interface ReportHeaderDoc {
   readonly decision?: RecordDecision | null;
   // ---- CHG-009 請求（BILLING_ENABLED）。請求確定（BILLING_LOCKED）にした請求 run
   readonly billingRunId?: string | null;
+  // ---- CHG-012 代理入力（事務所が現場の報告者の代わりに作成）。本人の入力は無い（null と同じ）
+  readonly proxy?: ReportProxy | null;
+}
+
+/** CHG-012 代理入力の記録（作成時に1回だけ。報告者＝ownerId） */
+export interface ReportProxy {
+  readonly enteredBy: string;
+  readonly enteredByName: string;
+  readonly reason: string;
+  readonly enteredAt: Date;
 }
 
 export interface RecordDecision {

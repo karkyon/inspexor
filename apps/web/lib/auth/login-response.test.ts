@@ -48,4 +48,13 @@ describe('interpretLoginResponse', () => {
     const outcome = interpretLoginResponse(200, { data: { userId: 123 } });
     expect(outcome.kind).toBe('error');
   });
+
+  it('CHG-012: 確認待ち（mfaRequired）は mfa を返す', () => {
+    const outcome = interpretLoginResponse(200, { data: { mfaRequired: true, mfaEnrolled: false, challenge: 'c'.repeat(30), challengeExpiresAt: '2026-10-15T00:05:00Z' } });
+    expect(outcome).toMatchObject({ kind: 'mfa', data: { mfaEnrolled: false } });
+  });
+
+  it('CHG-012: 429 RATE_LIMITED は時間をおく案内', () => {
+    expect(interpretLoginResponse(429, { error: { code: 'RATE_LIMITED' } })).toEqual({ kind: 'error', message: 'しばらく時間をおいてから再度お試しください。' });
+  });
 });

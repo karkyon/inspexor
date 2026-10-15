@@ -1,5 +1,5 @@
 /* 現場入力（SCR-02〜09）— 画面UX設計書・ワイヤーフレーム v6.0 のトークン/寸法に準拠。tablet 主対象、44px target。 */
-:root{--fx-nav:#102a43;--fx-blue:#1769aa;--fx-cyan:#11a3a5;--fx-ink:#172b3a;--fx-muted:#5d6e7c;--fx-line:#dce5eb;--fx-green:#15936d;--fx-amber:#9a6200;--fx-red:#b93636;--fx-shadow:0 3px 12px #173a5010}
+:root{--fx-nav:#102a43;--fx-blue:#1769aa;--fx-cyan:#11a3a5;--fx-ink:#172b3a;--fx-muted:#4f5f6b;--fx-line:#dce5eb;--fx-green:#0d7053;--fx-amber:#8f5900;--fx-red:#b93636;--fx-shadow:0 3px 12px #173a5010}
 body:has(.fx-shell){margin:0}
 .fx-shell *{box-sizing:border-box}
 .fx-shell{min-height:100vh;background:#eef3f6;color:var(--fx-ink);font:15px/1.5 "Noto Sans JP",system-ui,sans-serif}
@@ -38,7 +38,7 @@ body:has(.fx-shell){margin:0}
 .fx-pill.APPROVED,.fx-pill.BILLING_LOCKED{background:#dff6ec;color:#087154}.fx-pill.REJECTED,.fx-pill.REVOKED{background:#fde7e7;color:#a42a2a}
 .fx-wizard{max-width:980px;margin:auto}
 .fx-stepper{background:#fff;border:1px solid var(--fx-line);border-radius:13px;padding:16px;display:flex;margin:0 0 18px;list-style:none}
-.fx-step{flex:1;display:flex;align-items:center;gap:8px;color:#7b8a95;position:relative;font-size:14px}
+.fx-step{flex:1;display:flex;align-items:center;gap:8px;color:#56656f;position:relative;font-size:14px}
 .fx-step:not(:last-child)::after{content:"";flex:1;min-width:12px;height:2px;background:#d9e2e8;margin:0 10px}
 .fx-step i{width:30px;height:30px;border-radius:50%;border:2px solid #c9d5dd;display:grid;place-items:center;font-style:normal;font-weight:800;background:#fff;z-index:1;flex:none}
 .fx-step.on{color:var(--fx-blue);font-weight:800}.fx-step.on i{background:var(--fx-blue);border-color:var(--fx-blue);color:#fff}
@@ -132,3 +132,9 @@ body:has(.fx-shell){margin:0}
 .fx-rejected-form label{font-weight:700}
 .fx-rejected-form input{flex:1 1 220px;min-height:44px;border:1px solid #aebfcb;border-radius:9px;padding:8px 12px;background:#fff}
 .fx-error{color:var(--fx-red);margin:6px 0 0}
+
+/* CHG-012 a11y: 本文へ移動（キーボードで最初に出る）・フォーカスの見える化 */
+.fx-skip{position:absolute;left:8px;top:-60px;z-index:100;padding:10px 16px;border-radius:8px;background:#102a43;color:#fff;font-weight:700;text-decoration:none}
+.fx-skip:focus{top:8px}
+#main:focus{outline:none}
+.fx-shell a:focus-visible,.fx-shell button:focus-visible,.fx-shell input:focus-visible,.fx-shell select:focus-visible,.fx-shell textarea:focus-visible,.fx-shell summary:focus-visible{outline:3px solid #1769aa;outline-offset:2px}

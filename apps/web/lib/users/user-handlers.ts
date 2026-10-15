@@ -8,9 +8,10 @@ import { createApiHandler, type ApiContext, type ApiHandlerDeps } from '../http/
 import { dataResponse, errorResponse } from '../http/api-response';
 import { zodIssueMessageJa, type ZodIssueLike } from '../http/zod-messages';
 import { ROLE_CODES, UserError, type UserAction, type UserService } from './user-service';
+import { reauthRequiredResponse } from '../auth/reauth';
 
 const UUID_RE = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
-const ACTIONS: readonly UserAction[] = ['deactivate', 'activate', 'reset-password', 'unlock'];
+const ACTIONS: readonly UserAction[] = ['deactivate', 'activate', 'reset-password', 'unlock', 'reset-mfa'];
 
 export interface UserRouteDeps {
   readonly service: () => UserService;
@@ -150,6 +151,14 @@ export function userActionHandlers(deps: UserRouteDeps) {
         throw new RequestError(422, 'VALIDATION_ERROR', 'パスワードは再設定のときだけ指定できます。', [{ path: '/password', code: 'unexpected', message: 'この操作では指定できません。' }]);
       }
       const reason = cmd.reason !== undefined && cmd.reason !== '' ? cmd.reason : null;
+      if (action === 'reset-mfa' && reason === null) {
+        throw new RequestError(422, 'VALIDATION_ERROR', '解除の理由を入力してください。', [{ path: '/reason', code: 'required', message: '解除の理由を入力してください。' }]);
+      }
+      // CHG-012 SEC-026: パスワード再設定・多要素認証の解除は、直近10分以内の再認証が必要
+      if (action === 'reset-password' || action === 'reset-mfa') {
+        const reauth = reauthRequiredResponse(ctx);
+        if (reauth !== null) return reauth;
+      }
       return dataResponse(200, await deps.service().act(id, action as UserAction, { expectedVersion: cmd.expectedVersion, reason, password: cmd.password }, ctxOf(ctx)), ctx.correlationId);
     }),
   };

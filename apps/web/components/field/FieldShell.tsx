@@ -8,6 +8,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from '
 import { useRouter } from 'next/navigation';
 import { apiRequest, storeCsrfToken } from '../../lib/api/client';
 import { clearAllDrafts, resumeDrafts } from '../../lib/field/draft-store';
+import { ReauthDialog } from '../ReauthDialog';
 
 export interface FieldUser {
   readonly userId: string;
@@ -63,6 +64,9 @@ export function FieldShell({ children }: { readonly children: ReactNode }) {
   const user = state.status === 'loading' ? null : state.user;
   return (
     <div className="fx-shell">
+      <a className="fx-skip" href="#main">
+        本文へ移動
+      </a>
       <header className="fx-appbar">
         <a href="/field" aria-label="INSPEXOR 現場ホーム">
           <span className="fx-brandmark" aria-hidden="true">IX</span>
@@ -80,7 +84,7 @@ export function FieldShell({ children }: { readonly children: ReactNode }) {
           </div>
         ) : null}
       </header>
-      <main className="fx-viewport" id="main">
+      <main className="fx-viewport" id="main" tabIndex={-1}>
         {state.status === 'loading' ? (
           <p className="fx-muted" aria-live="polite" aria-busy="true">
             読み込み中…
@@ -95,6 +99,7 @@ export function FieldShell({ children }: { readonly children: ReactNode }) {
           <FieldUserContext.Provider value={state.user}>{children}</FieldUserContext.Provider>
         )}
       </main>
+      <ReauthDialog />
     </div>
   );
 }

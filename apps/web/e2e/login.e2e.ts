@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { finishMfa } from './auth';
 
 // 前提: dev-admin が seed 済み。パスワードは環境変数 E2E_PASSWORD（~/.inspexor-dev-admin-password から渡す）。
 const LOGIN_ID = process.env['E2E_LOGIN_ID'] ?? 'dev-admin';
@@ -25,6 +26,7 @@ test.describe('G0-E2E: 認証フロー（API-001/002/003）', () => {
     await page.getByLabel('ログインID').fill(LOGIN_ID);
     await page.getByLabel('パスワード').fill(PASSWORD);
     await page.getByRole('button', { name: 'ログイン' }).click();
+    await finishMfa(page, LOGIN_ID);
     await expect(page.getByText(/ようこそ、.+さん（ADMIN）/)).toBeVisible();
 
     const cookies = await context.cookies();
@@ -49,6 +51,7 @@ test.describe('G0-E2E: 認証フロー（API-001/002/003）', () => {
     await page.getByLabel('ログインID').fill(LOGIN_ID);
     await page.getByLabel('パスワード').fill(PASSWORD);
     await page.getByRole('button', { name: 'ログイン' }).click();
+    await finishMfa(page, LOGIN_ID);
     await expect(page).toHaveURL(/\/$/);
     await expect(page.getByText(/ようこそ、.+さん（ADMIN）/)).toBeVisible();
   });
@@ -58,6 +61,7 @@ test.describe('G0-E2E: 認証フロー（API-001/002/003）', () => {
     await page.getByLabel('ログインID').fill(LOGIN_ID);
     await page.getByLabel('パスワード').fill(PASSWORD);
     await page.getByRole('button', { name: 'ログイン' }).click();
+    await finishMfa(page, LOGIN_ID);
     await expect(page.getByText(/ようこそ/)).toBeVisible();
     const res = await page.request.post('/api/v1/auth/logout');
     expect(res.status()).toBe(403);

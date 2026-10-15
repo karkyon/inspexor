@@ -30,6 +30,9 @@ export function todayJst(): string {
   return toJstParts(new Date()).date;
 }
 
+/** CHG-012: 代理入力の理由は作成（POST）だけ。更新（PATCH）では送らない */
+const withoutProxy = (b: Record<string, unknown>): Record<string, unknown> => Object.fromEntries(Object.entries(b).filter(([k]) => k !== 'proxyReason'));
+
 export function useWizard<F>(options: {
   type: DraftType;
   userId: string;
@@ -126,7 +129,7 @@ export function useWizard<F>(options: {
         const saved =
           s.id === null
             ? await apiRequest<{ id: string; version: number; reportNo: string }>('POST', `/${apiSegment}`, body)
-            : await apiRequest<{ id: string; version: number; reportNo: string }>('PATCH', `/${apiSegment}/${s.id}`, { ...body, expectedVersion: s.version });
+            : await apiRequest<{ id: string; version: number; reportNo: string }>('PATCH', `/${apiSegment}/${s.id}`, { ...withoutProxy(body), expectedVersion: s.version });
         if (!saved.ok) {
           setApiError(saved.error);
           setServerIssues([...(saved.error.fields ?? [])]);

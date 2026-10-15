@@ -92,6 +92,12 @@ export const OPERATION_POLICIES = {
   listBillingAdjustments: { apiId: 'API-035', method: 'GET', path: '/billing-adjustments', access: roles(['OFFICE', 'ADMIN', 'AUDITOR']), idempotent: false },
   createBillingAdjustment: { apiId: 'API-036', method: 'POST', path: '/billing-adjustments', access: roles(['OFFICE', 'ADMIN']), idempotent: true },
   cancelBillingAdjustment: { apiId: 'API-037', method: 'POST', path: '/billing-adjustments/{id}/{action}', access: roles(['OFFICE', 'ADMIN']), idempotent: true },
+  // CHG-012 多要素認証・再認証（ADMIN_MFA_ENABLED、SEC-004 / SEC-026）
+  setupMfa: { apiId: 'API-038', method: 'POST', path: '/auth/mfa/setup', access: PUBLIC, idempotent: false },
+  verifyMfa: { apiId: 'API-039', method: 'POST', path: '/auth/mfa/verify', access: PUBLIC, idempotent: false },
+  reauthenticate: { apiId: 'API-040', method: 'POST', path: '/auth/reauth', access: AUTHENTICATED, idempotent: false },
+  getMfaStatus: { apiId: 'API-041', method: 'GET', path: '/auth/mfa', access: AUTHENTICATED, idempotent: false },
+  regenerateRecoveryCodes: { apiId: 'API-042', method: 'POST', path: '/auth/mfa/recovery-codes', access: roles(['ADMIN']), idempotent: false },
 } as const satisfies Record<string, OperationPolicy>;
 
 export type OperationId = keyof typeof OPERATION_POLICIES;

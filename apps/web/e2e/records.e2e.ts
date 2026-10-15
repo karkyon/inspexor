@@ -1,3 +1,4 @@
+import { login } from './auth';
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { TODAY } from './today';
 
@@ -6,14 +7,6 @@ import { TODAY } from './today';
 const FIELD_PASSWORD = process.env['E2E_FIELD_PASSWORD'] ?? '';
 const OFFICE_PASSWORD = process.env['E2E_OFFICE_PASSWORD'] ?? '';
 
-async function login(page: Page, loginId: string, password: string): Promise<string> {
-  await page.goto('/login');
-  await page.getByLabel('ログインID').fill(loginId);
-  await page.getByLabel('パスワード').fill(password);
-  await page.getByRole('button', { name: 'ログイン' }).click();
-  await expect(page).toHaveURL(/\/$/);
-  return (await page.evaluate(() => window.sessionStorage.getItem('inspexor_csrf_token'))) ?? '';
-}
 
 async function masters(request: APIRequestContext, type: string): Promise<Array<Record<string, string>>> {
   return ((await (await request.get(`/api/v1/masters/${type}?pageSize=100`)).json()) as { data: Array<Record<string, string>> }).data;
@@ -163,5 +156,53 @@ test.describe('CHG-004 E2E: 事務所の報告一覧・詳細・運搬費・確�
     await office.getByRole('button', { name: '日報PDFを再出力' }).click();
     await expect(office.getByRole('status').filter({ hasText: '再出力を受け付けました' })).toBeVisible();
     await officeCtx.close();
+  });
+
+  test('CHG-012 代理入力: 事務所が現場の方を報告者に選ぶと理由が必須 → 確定 → 本人の報告になり、詳細に代理入力が出る', async ({ browser }) => {
+    test.setTimeout(180_000);
+    const ctx = await browser.newContext();
+    const office = await ctx.newPage();
+    const csrf = await login(office, process.env['E2E_OFFICE_LOGIN_ID'] ?? 'dev-office', OFFICE_PASSWORD);
+    const req = office.request;
+    const users = ((await (await req.get('/api/v1/users')).json()) as { data: Array<{ id: string; loginId: string; displayName: string }> }).data;
+    const fieldUser = users.find((u) => u.loginId === (process.env['E2E_FIELD_LOGIN_ID'] ?? 'dev-field'));
+    expect(fieldUser).toBeDefined();
+
+    // 画面: 報告者に現場の方を選ぶと「代理入力の理由」が必須になる
+    await office.goto('/field/work-reports/new');
+    await office.getByLabel('報告者').selectOption({ label: `${fieldUser?.displayName}（${fieldUser?.loginId}）の代理で入力` });
+    await expect(office.getByLabel(/^代理入力の理由/)).toBeVisible();
+    await office.getByRole('button', { name: /次へ/ }).first().click();
+    await expect(office.getByText('代理入力の理由を入力してください。').first()).toBeVisible();
+    await office.getByLabel('報告者').selectOption({ index: 0 });
+    await expect(office.getByLabel(/^代理入力の理由/)).toHaveCount(0);
+
+    // API: 代理で作成 → 確定（ログイン直後なので本人確認は不要）
+    const customer = (await masters(req, 'customers')).find((c) => c['code'] === 'SYN-C01');
+    const product = (await masters(req, 'products')).find((p) => p['code'] === 'SYN-P01');
+    const workType = (await masters(req, 'work-types')).find((w) => w['productId'] === product?.['id']);
+    const worker = (await masters(req, 'workers')).find((w) => w['code'] === 'SYN-W01');
+    const body = {
+      workDate: TODAY, reporterId: fieldUser?.id, customerId: customer?.['id'], productId: product?.['id'], workTypeId: workType?.['id'],
+      lotNo: null, workerIds: [worker?.['id']], startAt: `${TODAY}T00:00:00.000Z`, endAt: `${TODAY}T01:00:00.000Z`, quantity: 20, defects: [],
+    };
+    expect((await req.post('/api/v1/work-reports', { headers: { 'x-csrf-token': csrf }, data: body })).status()).toBe(422);
+    const created = await req.post('/api/v1/work-reports', { headers: { 'x-csrf-token': csrf }, data: { ...body, proxyReason: 'E2E: 現場の端末故障' } });
+    expect(created.status()).toBe(201);
+    const rec = ((await created.json()) as { data: { id: string; reportNo: string } }).data;
+    expect((await req.post(`/api/v1/work-reports/${rec.id}/confirm`, { headers: { 'x-csrf-token': csrf, 'idempotency-key': `e2e-proxy-${rec.id}` }, data: { expectedVersion: 1 } })).status()).toBe(202);
+    await office.goto(`/admin/records/work/${rec.id}`);
+    const note = office.getByRole('note', { name: '代理入力' });
+    await expect(note).toContainText('E2E: 現場の端末故障');
+    await ctx.close();
+
+    // 報告者本人（現場）の報告として見える
+    const fctx = await browser.newContext();
+    const field = await fctx.newPage();
+    await login(field, process.env['E2E_FIELD_LOGIN_ID'] ?? 'dev-field', FIELD_PASSWORD);
+    const d = ((await (await field.request.get(`/api/v1/work-reports/${rec.id}`)).json()) as { data: { reporterId: string; proxy: { reason: string } | null } }).data;
+    expect(d.reporterId).toBe(fieldUser?.id);
+    expect(d.proxy?.reason).toBe('E2E: 現場の端末故障');
+    await fctx.close();
   });
 });
