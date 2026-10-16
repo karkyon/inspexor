@@ -1,4 +1,4 @@
-"""docs/deliverables/*.md → 提案書と同じ配色の A4 縦 PDF（納品用）。
+"""docs/deliverables/*.md → 提案書と同じ配色の A4 縦 PDF（納品用）。画像は md と同じフォルダからの相対パス（例 images/10/xxx.png）。
 使い方: python3 scripts/docs/render_deliverables.py docs/deliverables <出力ディレクトリ>
 必要: pip install markdown playwright（Chromium は CHROMIUM_PATH で指定可）
 """
@@ -54,6 +54,12 @@ code { font-family: Consolas,'DejaVu Sans Mono',monospace; font-size: 8.6pt; bac
 figure { margin: 4mm 0; page-break-inside: avoid; text-align: center; }
 figure svg { width: 100%; height: auto; }
 figcaption { font-size: 8.5pt; color: var(--gray); margin-top: 1.5mm; }
+figure img { max-width: 100%; max-height: 200mm; border: 1px solid var(--line); }
+figure.ipad img { width: 62%; }
+figure.pdf img { width: 70%; }
+.pair { display: flex; gap: 4mm; align-items: flex-start; page-break-inside: avoid; margin: 4mm 0; }
+.pair figure { flex: 1; margin: 0; }
+.pair figure img { width: 100%; }
 strong { color: var(--navy); }
 """
 
@@ -95,7 +101,7 @@ def build(md_path: Path) -> tuple[str, dict]:
   <div class="sys">SANSEI 現場報告システム<small>提案書 SK-2026-08-MINI（2026年9月5日）にもとづく納品資料</small></div>
   <div class="foot"><span>{meta.get('docno','')}</span><span>{meta.get('title','')}</span></div>
 </section>"""
-    doc = f"""<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>{meta.get('title','')}</title><style>{CSS}</style></head>
+    doc = f"""<!doctype html><html lang="ja"><head><meta charset="utf-8"><base href="{md_path.parent.resolve().as_uri()}/"><title>{meta.get('title','')}</title><style>{CSS}</style></head>
 <body>{cover}<section class="toc"><h2>目次</h2>{toc}</section>{html}</body></html>"""
     return doc, meta
 

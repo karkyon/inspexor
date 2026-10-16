@@ -83,6 +83,12 @@ export function useWizard<F>(options: {
     [userId, type],
   );
 
+  /** B-06: 自動保存の予約を取り消す（確定・破棄の後に下書きを保存し直さない） */
+  const cancelAutosave = useCallback(() => {
+    if (timer.current !== null) clearTimeout(timer.current);
+    timer.current = null;
+  }, []);
+
   const setForm = useCallback(
     (updater: (prev: F) => F) => {
       setFormState((prev) => {
@@ -149,13 +155,14 @@ export function useWizard<F>(options: {
           setServerIssues([...(confirmed.error.fields ?? [])]);
           return;
         }
+        cancelAutosave();
         clearDraft(userId, type);
         setDone({ id: s.id ?? saved.data.id, reportNo: confirmed.data.reportNo, status: confirmed.data.status });
       } finally {
         setBusy(false);
       }
     },
-    [apiSegment, persist, userId, type],
+    [apiSegment, persist, userId, type, cancelAutosave],
   );
 
   /** 409 時: server の最新内容で置き換える（自動上書きはしない＝利用者の操作で実行） */
@@ -168,26 +175,29 @@ export function useWizard<F>(options: {
       return;
     }
     if (res.data['status'] !== 'DRAFT') {
+      cancelAutosave();
       clearDraft(userId, type);
       setDone({ id, reportNo: String(res.data['reportNo']), status: String(res.data['status']) });
       return;
     }
     const f = options.detailToForm(res.data);
     const s = { id, version: Number(res.data['version']), reportNo: String(res.data['reportNo']) };
+    cancelAutosave();
     setFormState(f);
     setServer(s);
     setApiError(null);
     setServerIssues([]);
     persist(f, s, latest.current.step);
-  }, [apiSegment, options, persist, userId, type]);
+  }, [apiSegment, options, persist, userId, type, cancelAutosave]);
 
   const discard = useCallback(() => {
+    cancelAutosave();
     clearDraft(userId, type);
     setFormState(options.initial());
     setServer({ id: null, version: null, reportNo: null });
     setLastSaved(null);
     window.history.pushState(null, '', `${basePath}?step=1`);
-  }, [userId, type, options, basePath]);
+  }, [userId, type, options, basePath, cancelAutosave]);
 
   return {
     loaded,

@@ -151,6 +151,12 @@ test.describe('G3-E2E: 現場入力（SCR-02〜09）', () => {
     const download = await page.request.get((await page.getByRole('link', { name: '日報PDFをダウンロード' }).getAttribute('href')) ?? '');
     expect(download.headers()['content-disposition']).toMatch(/^attachment;/);
     expect((await download.body()).subarray(0, 5).toString()).toBe('%PDF-');
+
+    // B-06: チェック直後に確定しても、確定後に端末下書きが保存し直されない（自動保存の予約は確定時に取り消す）
+    await page.waitForTimeout(1500);
+    await page.getByRole('link', { name: '現場ホームへ' }).click();
+    await expect(page.getByRole('heading', { level: 1, name: /お疲れさまです/ })).toBeVisible();
+    await expect(page.getByRole('link', { name: /作業日報の下書きを再開/ })).toHaveCount(0);
   });
 
   test('オフライン: バナー表示・下書き継続・確定ボタン無効、復帰で有効（EV-OFFLINE）', async ({ page, context }) => {
