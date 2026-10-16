@@ -205,7 +205,7 @@ export const SHEETS: readonly SheetSpec[] = [
     columns: [
       { header: 'ログインID', kind: 'text', required: true, note: '3〜100文字の英数字と . _ @ -', example: 'test.field01' },
       { header: '表示名', kind: 'text', required: true, note: '', example: '試験 現場一郎' },
-      { header: '区分', kind: 'text', required: true, note: '現場・事務・管理者・監査（複数はカンマ区切り）', example: '現場' },
+      { header: '区分', kind: 'text', required: true, note: '現場・事務所・管理者・監査（複数はカンマ区切り）', example: '現場' },
     ],
   },
 ];
@@ -399,7 +399,7 @@ async function run(store: DocStore, book: Workbook, options: ImportOptions): Pro
         const loginId = refs['ログインID'] ?? '';
         const roleText = refs['区分'] ?? '';
         const roles = [...new Set(roleText.split(/[,、，\s]+/).filter((x) => x !== '').map((r) => ROLE_MAP[r] ?? `?${r}`))];
-        if (roles.some((r) => r.startsWith('?'))) messages.push(`「区分」は 現場・事務・管理者・監査 のどれかです（${roleText}）。`);
+        if (roles.some((r) => r.startsWith('?'))) messages.push(`「区分」は 現場・事務所・管理者・監査 のどれかです（${roleText}）。`);
         if (loginId !== '' && !/^[A-Za-z0-9][A-Za-z0-9._@-]{2,99}$/.test(loginId)) messages.push('「ログインID」は3〜100文字の英数字と . _ @ - で入力してください。');
         if (seenKeys.has(`users|${loginId}`)) messages.push('同じログインIDが2回あります。');
         seenKeys.add(`users|${loginId}`);

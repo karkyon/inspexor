@@ -9,6 +9,7 @@ import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { toJstParts } from '@inspexor/domain';
 import { apiRequest } from '../../lib/api/client';
 import { useAdminUser } from './AdminShell';
+import { ROLE_LABEL } from '../../lib/auth/role-label';
 
 export interface UserRow {
   readonly id: string;
@@ -24,7 +25,6 @@ export interface UserRow {
   readonly updatedAt: string;
 }
 
-export const ROLE_LABEL: Readonly<Record<string, string>> = { FIELD: '現場', OFFICE: '事務', ADMIN: '管理者', AUDITOR: '監査' };
 const ROLE_HELP: Readonly<Record<string, string>> = {
   FIELD: '作業日報・運搬実績の入力（自分の報告のみ）',
   OFFICE: '全報告の確認・修正・PDF再出力・月次集計',
@@ -85,7 +85,7 @@ export function UsersScreen({ notice }: { readonly notice?: string | undefined }
         <div>
           <small className="ix-muted">設定</small>
           <h1>利用者管理</h1>
-          <p>ログインできる人と、使える画面（ロール）を管理します。利用をやめた人は削除せず無効にします。</p>
+          <p>ログインできる人と、使える画面（区分）を管理します。利用をやめた人は削除せず無効にします。</p>
         </div>
         {isAdmin ? (
           <a className="ix-btn primary" href="/admin/users/new">
@@ -116,7 +116,7 @@ export function UsersScreen({ notice }: { readonly notice?: string | undefined }
                 <tr>
                   <th>ログインID</th>
                   <th>表示名</th>
-                  <th>ロール</th>
+                  <th>区分</th>
                   <th>状態</th>
                   <th>更新日時</th>
                 </tr>
@@ -153,7 +153,7 @@ function RoleChecks({ value, onChange, disabled }: { value: string[]; onChange: 
   return (
     <fieldset className="ix-field" disabled={disabled}>
       <span>
-        ロール<span className="ix-req">必須</span>
+        区分<span className="ix-req">必須</span>
       </span>
       <div className="ix-checklist">
         {ROLES.map((r) => (
@@ -348,7 +348,7 @@ export function UserDetailScreen({ id }: { readonly id: string }) {
         className="ix-panel ix-form"
         onSubmit={(e) => {
           e.preventDefault();
-          void run('PATCH', `/users/${u.id}`, { expectedVersion: u.version, displayName: displayName.trim(), roles }, '保存しました。ロールを変えた場合、その利用者は再ログインが必要です。');
+          void run('PATCH', `/users/${u.id}`, { expectedVersion: u.version, displayName: displayName.trim(), roles }, '保存しました。区分を変えた場合、その利用者は再ログインが必要です。');
         }}
       >
         <h2>基本情報</h2>
@@ -386,7 +386,7 @@ export function UserDetailScreen({ id }: { readonly id: string }) {
           {me.features?.adminMfa === true || u.mfaEnabled === true ? (
             <section className="ix-panel ix-form ix-inner" aria-labelledby="mfa-title">
               <h2 id="mfa-title">多要素認証</h2>
-              <p>{u.mfaEnabled === true ? '登録済み（認証アプリの確認コードでログインしています）。' : u.roles.includes('ADMIN') ? '未登録（次のログインで登録します）。' : '管理者ロールの利用者だけが使います。'}</p>
+              <p>{u.mfaEnabled === true ? '登録済み（認証アプリの確認コードでログインしています）。' : u.roles.includes('ADMIN') ? '未登録（次のログインで登録します）。' : '管理者の区分の利用者だけが使います。'}</p>
               {u.mfaEnabled === true ? (
                 self ? (
                   <p className="ix-muted ix-small">自分の多要素認証は解除できません。端末を替えるときは他の管理者に依頼してください。</p>

@@ -157,7 +157,7 @@ export function RecordsScreen() {
         </div>
       </form>
 
-      <section className="ix-datatable" aria-labelledby="records-title" aria-busy={rows === null}>
+      <section className="ix-datatable compact" aria-labelledby="records-title" aria-busy={rows === null}>
         <h2 id="records-title" className="ix-visually-hidden">
           報告
         </h2>
@@ -203,8 +203,8 @@ export function RecordsScreen() {
                         <a href={`/admin/records/${r.type === 'WORK' ? 'work' : 'delivery'}/${r.id}`}>{r.reportNo}</a>
                         {r.revisionNo > 1 ? <small className="ix-muted"> 版{r.revisionNo}</small> : null}
                       </td>
-                      <td>{label(names, 'customers', r.customerId)}</td>
-                      <td>{r.productIds.length > 1 ? `${first} ほか${r.productIds.length - 1}品番` : first}</td>
+                      <td className="wrap">{label(names, 'customers', r.customerId)}</td>
+                      <td className="wrap">{r.productIds.length > 1 ? `${first} ほか${r.productIds.length - 1}品番` : first}</td>
                       <td className="num">{r.quantity.toLocaleString('ja-JP')}個</td>
                       <td className="num">{r.tripCount === null ? '—' : `${r.tripCount}回`}</td>
                       <td className="num">{r.type === 'DELIVERY' ? yenLabel(r.deliveryFeeYen) : '—'}</td>

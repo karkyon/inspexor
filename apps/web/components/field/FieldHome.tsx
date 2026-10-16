@@ -154,7 +154,7 @@ export function FieldHome() {
             {y}年{m}月{d}日（{dow}）
           </small>
           <h1>{user.displayName}さん、お疲れさまです</h1>
-          <p>{creatable ? '今日はどの実績を登録しますか？' : 'このロールでは実績の登録はできません（閲覧のみ）。'}</p>
+          <p>{creatable ? '今日はどの実績を登録しますか？' : 'この区分では実績の登録はできません（閲覧のみ）。'}</p>
         </div>
         <div className="fx-clock" aria-hidden="true">
           {jst.time}

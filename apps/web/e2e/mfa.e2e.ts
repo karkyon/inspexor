@@ -47,7 +47,7 @@ test.describe('CHG-012 E2E: 管理者の多要素認証', () => {
     await expect(other.getByRole('button', { name: '続ける' })).toBeDisabled();
     await other.getByLabel('回復コードを安全な場所に保存しました').check();
     await other.getByRole('button', { name: '続ける' }).click();
-    await expect(other.getByText(/ようこそ、E2E 管理者さん（ADMIN）/)).toBeVisible();
+    await expect(other.getByText(/ようこそ、E2E 管理者さん（管理者）/)).toBeVisible();
 
     // ---- ログアウト → 確認コードでログイン（同じ区間のコードは使えないので次の区間）
     await other.getByRole('button', { name: 'ログアウト' }).click();
@@ -61,7 +61,7 @@ test.describe('CHG-012 E2E: 管理者の多要素認証', () => {
     if (wait > 0) await other.waitForTimeout(wait);
     await other.getByLabel('確認コード（6桁）').fill(hotp(secret, Math.max(next, Math.floor(Date.now() / 30_000))));
     await other.getByRole('button', { name: 'ログイン', exact: true }).click();
-    await expect(other.getByText(/ようこそ、E2E 管理者さん（ADMIN）/)).toBeVisible();
+    await expect(other.getByText(/ようこそ、E2E 管理者さん（管理者）/)).toBeVisible();
 
     // ---- 回復コードでログイン
     await other.getByRole('button', { name: 'ログアウト' }).click();
@@ -72,7 +72,7 @@ test.describe('CHG-012 E2E: 管理者の多要素認証', () => {
     await other.getByRole('button', { name: '認証アプリを使えない（回復コードを使う）' }).click();
     await other.getByLabel('回復コード').fill(codes[0] as string);
     await other.getByRole('button', { name: 'ログイン', exact: true }).click();
-    await expect(other.getByText(/ようこそ、E2E 管理者さん（ADMIN）/)).toBeVisible();
+    await expect(other.getByText(/ようこそ、E2E 管理者さん（管理者）/)).toBeVisible();
 
     // ---- アカウント画面: 残り9個 → 再発行（ログイン直後なので本人確認は不要）
     await other.goto('/admin/account');

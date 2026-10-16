@@ -75,7 +75,7 @@ test.describe('CHG-009 E2E: 請求', () => {
     await page.getByLabel(/^お客様/).selectOption({ label: `${code} E2E請求先（月末締め）` });
     await page.getByLabel(/^請求月/).fill(MONTH);
     await page.getByRole('button', { name: '請求を計算する' }).click();
-    await expect(page).toHaveURL(/\/admin\/billing\/[0-9a-f-]{36}$/);
+    await expect(page).toHaveURL(/\/admin\/billing\/[0-9a-f-]{36}$/, { timeout: 30_000 }); // 開発サーバーは初回表示時に画面を組み立てるため長めに待つ（g34 の初回失敗）
     await expect(page.getByRole('heading', { level: 1, name: /請求計算・レビュー/ })).toBeVisible();
     await expect(page.locator('.ix-pagehead .ix-pill')).toHaveText('要確認');
     const totals = page.getByRole('region', { name: '請求の合計' });
@@ -110,7 +110,7 @@ test.describe('CHG-009 E2E: 請求', () => {
     // ---- CHG-011 請求書: 一覧の請求書番号から請求書画面へ
     const invoiceNo = `INV-${MONTH.replace('-', '')}-${code}-001`;
     await row.getByRole('link', { name: invoiceNo }).click();
-    await expect(page).toHaveURL(/\/admin\/invoices\/[0-9a-f-]{36}$/);
+    await expect(page).toHaveURL(/\/admin\/invoices\/[0-9a-f-]{36}$/, { timeout: 30_000 }); // 開発サーバーは初回表示時に画面を組み立てるため長めに待つ（g34 の初回失敗）
     await expect(page.getByRole('heading', { level: 1, name: new RegExp(invoiceNo) })).toBeVisible();
     await expect(page.locator('.ix-pagehead .ix-pill')).toHaveText('未発行');
     await expect(page.getByRole('region', { name: '請求書の金額' })).toContainText('¥8,844');

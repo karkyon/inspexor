@@ -87,8 +87,8 @@ export function DonePanel({ kind, type, done, again }: { kind: string; type: 'WO
 export function NotAllowed() {
   return (
     <section className="fx-card" role="alert" style={{ padding: 24 }}>
-      <h1>このロールでは実績を登録できません</h1>
-      <p>運搬・作業の登録は現場（FIELD）・事務（OFFICE）ロールで行えます。</p>
+      <h1>この区分では実績を登録できません</h1>
+      <p>運搬・作業の登録は現場・事務所の区分で行えます。</p>
       <a href="/field">現場ホームへ戻る</a>
     </section>
   );

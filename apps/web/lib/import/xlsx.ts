@@ -65,7 +65,7 @@ export const SAMPLE_DATA: Readonly<Record<string, ReadonlyArray<Readonly<Record<
   利用者: [
     { ログインID: 'test.field01', 表示名: '試験 現場1', 区分: '現場' },
     { ログインID: 'test.field02', 表示名: '試験 現場2', 区分: '現場' },
-    { ログインID: 'test.office01', 表示名: '試験 事務1', 区分: '事務' },
+    { ログインID: 'test.office01', 表示名: '試験 事務1', 区分: '事務所' },
   ],
 };
 

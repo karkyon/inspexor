@@ -9,6 +9,7 @@ import { useRouter, usePathname } from 'next/navigation';
 import { apiRequest, storeCsrfToken } from '../../lib/api/client';
 import { clearAllDrafts } from '../../lib/field/draft-store';
 import { ReauthDialog } from '../ReauthDialog';
+import { roleText } from '../../lib/auth/role-label';
 
 export interface AdminFeatures {
   readonly approval: boolean;
@@ -51,6 +52,7 @@ interface NavItem {
   /** CHG-011: このメニューを選択中にする他の path（請求書 /admin/invoices は「請求」） */
   readonly also?: readonly string[];
   readonly href: string;
+  /** 画面幅 900px 以下で名称の代わりに出す短い表示（K-02: 開発用の画面番号は出さない） */
   readonly code: string;
   readonly label: string;
   /** CHG-007: この機能が有効なときだけ出す */
@@ -60,12 +62,12 @@ interface NavItem {
 }
 
 const NAV: readonly NavItem[] = [
-  { prefix: '/admin/dashboard', href: '/admin/dashboard', code: 'SCR-10', label: 'ダッシュボード', feature: 'approval' },
-  { prefix: '/admin/records', href: '/admin/records', code: 'SCR-11', label: '報告一覧' },
+  { prefix: '/admin/dashboard', href: '/admin/dashboard', code: 'ダッシュ', label: 'ダッシュボード', feature: 'approval' },
+  { prefix: '/admin/records', href: '/admin/records', code: '一覧', label: '報告一覧' },
   { prefix: '/admin/monthly', href: '/admin/monthly', code: '集計', label: '月次集計' },
-  { prefix: '/admin/billing', also: ['/admin/invoices'], href: '/admin/billing', code: 'SCR-14', label: '請求', feature: 'billing' },
-  { prefix: '/admin/masters', href: '/admin/masters/products', code: 'SCR-13', label: 'マスター管理' },
-  { prefix: '/admin/users', href: '/admin/users', code: 'USER', label: '利用者管理' },
+  { prefix: '/admin/billing', also: ['/admin/invoices'], href: '/admin/billing', code: '請求', label: '請求', feature: 'billing' },
+  { prefix: '/admin/masters', href: '/admin/masters/products', code: 'マスタ', label: 'マスター管理' },
+  { prefix: '/admin/users', href: '/admin/users', code: '利用者', label: '利用者管理' },
   { prefix: '/admin/account', href: '/admin/account', code: 'MFA', label: '多要素認証', feature: 'adminMfa', roles: ['ADMIN'] },
 ];
 
@@ -132,7 +134,7 @@ export function AdminShell({ children }: { readonly children: ReactNode }) {
             );
           })}
           <a className="ix-navitem" href="/">
-            <span>HOME</span>
+            <span>ホーム</span>
             <b>ホーム</b>
           </a>
         </nav>
@@ -147,7 +149,7 @@ export function AdminShell({ children }: { readonly children: ReactNode }) {
               <span>
                 {user.displayName}
                 <br />
-                <small>{user.roles.join(' / ')}</small>
+                <small>{roleText(user.roles)}</small>
               </span>
               <button type="button" className="ix-btn" onClick={() => void logout()}>
                 ログアウト
@@ -163,7 +165,7 @@ export function AdminShell({ children }: { readonly children: ReactNode }) {
           ) : state.status === 'forbidden' ? (
             <section className="ix-panel" role="alert">
               <h1>この画面を表示する権限がありません</h1>
-              <p>事務所の画面は事務・管理者・監査のロールで利用できます。</p>
+              <p>事務所の画面は事務所・管理者・監査の区分で利用できます。</p>
               <a href="/">ホームへ戻る</a>
             </section>
           ) : (

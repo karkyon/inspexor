@@ -108,7 +108,7 @@ describe('CHG-013 マスタ・利用者の一括登録', () => {
       expect.stringMatching(/^品番:3:「精算区分」は 数量・時間 のどれかです/),
       expect.stringMatching(/^品番:4:.*「品名」を入力してください。.*「ロット必須」は ○ または × で入力してください/),
       expect.stringMatching(/^作業者:4:同じシートに同じキーの行が2回あります/),
-      expect.stringMatching(/^利用者:2:.*「区分」は 現場・事務・管理者・監査.*ログインID/),
+      expect.stringMatching(/^利用者:2:.*「区分」は 現場・事務所・管理者・監査.*ログインID/),
     ]);
     // 1件も書き込んでいない（エラーの無い行も）
     expect(await idOf('customers', '-', 'TEST-C09')).toBeNull();

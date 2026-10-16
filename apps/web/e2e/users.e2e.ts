@@ -38,7 +38,7 @@ test.describe('CHG-008 E2E: 利用者管理', () => {
     const ctx = await browser.newContext();
     const other = await ctx.newPage();
     await login(other, loginId, pw1);
-    await expect(other.getByText(/ようこそ、E2E 利用者さん（FIELD）/)).toBeVisible();
+    await expect(other.getByText(/ようこそ、E2E 利用者さん（現場）/)).toBeVisible();
     expect((await other.request.get('/api/v1/me')).status()).toBe(200);
 
     // ロールを変更すると、その利用者の既存セッションは使えない（再ログインが必要）
@@ -64,7 +64,7 @@ test.describe('CHG-008 E2E: 利用者管理', () => {
     await page.getByRole('button', { name: 'パスワードを再設定' }).click();
     await expect(page.getByRole('status')).toContainText('パスワードを再設定しました');
     await login(other, loginId, pw2);
-    await expect(other.getByText(/ようこそ、E2E 利用者さん（FIELD \/ OFFICE）/)).toBeVisible();
+    await expect(other.getByText(/ようこそ、E2E 利用者さん（現場・事務所）/)).toBeVisible();
 
     // 後片付け: 無効にする
     await page.getByRole('button', { name: '無効にする' }).click();

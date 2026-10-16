@@ -10,8 +10,8 @@ body:has(.ix-shell){margin:0}
 .ix-brand{display:flex;gap:11px;align-items:center;padding:0 8px 20px}
 .ix-brandmark{width:40px;height:40px;border-radius:12px;background:linear-gradient(145deg,#26c6b9,#1683c6);display:grid;place-items:center;font-weight:900}
 .ix-brand b{font-size:19px;letter-spacing:.05em}.ix-brand small{display:block;color:#a9c0d2}
-.ix-navitem{display:grid;grid-template-columns:56px 1fr;align-items:center;color:#c6d5df!important;text-decoration:none;padding:9px;border-radius:10px;margin:2px 0}
-.ix-navitem span{font-size:10px;color:#87a5b9}.ix-navitem b{font-size:12px}
+.ix-navitem{display:grid;grid-template-columns:1fr;align-items:center;color:#c6d5df!important;text-decoration:none;padding:9px;border-radius:10px;margin:2px 0}
+.ix-navitem span{display:none;font-size:10px;color:#c6d5df}.ix-navitem b{font-size:13px}
 .ix-navitem.active,.ix-navitem:hover{background:#ffffff16;color:#fff!important}
 .ix-content{min-width:0}
 .ix-appbar{height:66px;background:#fff;border-bottom:1px solid var(--ix-line);display:flex;align-items:center;padding:0 26px;position:sticky;top:0;z-index:20}
@@ -46,6 +46,9 @@ body:has(.ix-shell){margin:0}
 .ix-datatable th,.ix-datatable td{padding:11px 15px;border-bottom:1px solid var(--ix-line);text-align:left;white-space:nowrap}
 .ix-datatable th{background:#f5f7f9;color:var(--ix-muted);font-size:11px}
 .ix-datatable .num{text-align:right}
+/* K-01: 長い名称の列は折り返し、幅 1366 の画面でも全列を表示する */
+.ix-datatable td.wrap{white-space:normal;min-width:8em;max-width:15em;word-break:auto-phrase;overflow-wrap:break-word}
+.ix-datatable.compact th,.ix-datatable.compact td{padding:10px 11px}
 .ix-datatable>footer{display:flex;justify-content:space-between;align-items:center;padding:12px 18px}
 .ix-datatable>footer button{border:1px solid var(--ix-line);background:#fff;border-radius:6px;min-width:36px;min-height:36px;margin:0 4px}
 .ix-datatable>p,.ix-empty{padding:24px 18px;margin:0}
@@ -76,7 +79,7 @@ body:has(.ix-shell){margin:0}
 .ix-dialog{border:0;border-radius:14px;padding:24px;max-width:520px;width:calc(100% - 32px);box-shadow:0 12px 34px #183b5640}
 .ix-dialog::backdrop{background:#0d243780}
 .ix-dialog textarea{width:100%;min-height:90px;border:1px solid #aebfcb;border-radius:9px;padding:10px}
-@media(max-width:900px){.ix-shell{grid-template-columns:78px 1fr}.ix-brand b,.ix-brand small,.ix-navitem b{display:none}.ix-navitem{grid-template-columns:1fr;text-align:center}.ix-viewport{padding:14px}.ix-masterlayout{grid-template-columns:1fr}.ix-masternav{display:flex;overflow:auto}.ix-masternav a{min-width:140px}.ix-formgrid{grid-template-columns:1fr}}
+@media(max-width:900px){.ix-shell{grid-template-columns:78px 1fr}.ix-brand b,.ix-brand small,.ix-navitem b{display:none}.ix-navitem span{display:block}.ix-navitem{grid-template-columns:1fr;text-align:center}.ix-viewport{padding:14px}.ix-masterlayout{grid-template-columns:1fr}.ix-masternav{display:flex;overflow:auto}.ix-masternav a{min-width:140px}.ix-formgrid{grid-template-columns:1fr}}
 @media(max-width:600px){.ix-shell{display:block}.ix-sidenav{position:fixed;z-index:50;left:0;right:0;bottom:0;top:auto;height:70px;display:flex;padding:7px}.ix-brand{display:none}.ix-sidenav nav{display:flex}.ix-navitem{min-width:80px;padding:6px}.ix-appbar{height:58px;padding:0 12px}.ix-user span{display:none}.ix-viewport{padding:9px 9px 80px}.ix-pagehead{flex-direction:column;align-items:flex-start}.ix-pagehead h1{font-size:21px}.ix-searchbar{flex-wrap:wrap}}
 .ix-masterlayout>*{min-width:0}
 .ix-dialog label{display:block;margin:14px 0 6px;font-weight:700}

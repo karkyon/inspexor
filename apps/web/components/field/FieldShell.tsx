@@ -9,6 +9,7 @@ import { useRouter } from 'next/navigation';
 import { apiRequest, storeCsrfToken } from '../../lib/api/client';
 import { clearAllDrafts, resumeDrafts } from '../../lib/field/draft-store';
 import { ReauthDialog } from '../ReauthDialog';
+import { roleText } from '../../lib/auth/role-label';
 
 export interface FieldUser {
   readonly userId: string;
@@ -76,7 +77,7 @@ export function FieldShell({ children }: { readonly children: ReactNode }) {
         {user !== null ? (
           <div className="fx-user">
             <span>
-              {user.displayName}（{user.roles.join(' / ')}）
+              {user.displayName}（{roleText(user.roles)}）
             </span>
             <button type="button" onClick={() => void logout()}>
               ログアウト
@@ -92,7 +93,7 @@ export function FieldShell({ children }: { readonly children: ReactNode }) {
         ) : state.status === 'forbidden' ? (
           <section className="fx-card" role="alert" style={{ padding: 24 }}>
             <h1>この画面を表示する権限がありません</h1>
-            <p>現場入力は現場・事務・管理者のロールで利用できます。</p>
+            <p>現場入力は現場・事務所・管理者の区分で利用できます。</p>
             <a href="/">ホームへ戻る</a>
           </section>
         ) : (

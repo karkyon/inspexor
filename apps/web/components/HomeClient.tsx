@@ -10,6 +10,7 @@ import { LoginScreen } from './LoginScreen';
 import { LogoutButton } from './LogoutButton';
 import { interpretMeResponse, type MeData } from '../lib/auth/me-response';
 import { storeCsrfToken } from '../lib/api/client';
+import { roleText } from '../lib/auth/role-label';
 
 const ADMIN_AREA_ROLES = ['OFFICE', 'ADMIN', 'AUDITOR'];
 const FIELD_AREA_ROLES = ['FIELD', 'OFFICE', 'ADMIN'];
@@ -93,7 +94,7 @@ function HomeMenu({ user, onLoggedOut }: { readonly user: MeData; readonly onLog
   const admin = user.roles.some((r) => ADMIN_AREA_ROLES.includes(r));
   const fieldCreates = user.roles.includes('FIELD') || user.roles.includes('OFFICE');
   const masterEdit = user.roles.includes('ADMIN');
-  const roles = user.roles.join(' / ');
+  const roles = roleText(user.roles);
 
   return (
     <div className="px-page">

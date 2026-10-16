@@ -1,88 +1,72 @@
-# INSPEXOR — 開発環境構築手順書
+# INSPEXOR — 三成興業様 作業日報デジタル化システム
 
-三成興業向け業務統合システム「INSPEXOR」のローカル開発環境構築手順。
-本書は `INSPEXOR_開発スタック定義書_v5.1.md` / `INSPEXOR_インフラ・運用設計書_v5.1.md` を正本として作成した手順書であり、
-以後の実装は `Claude向け_INSPEXOR_Gate0-9連続実装指示_v5.1.md` の Gate 0 から順に進める。
+提案書 SK-2026-08-MINI（2026年9月5日）にもとづく、作業日報・運搬実績の入力、日報PDF、報告一覧・修正、月次集計、マスタ管理のシステム。
+現場は iPad、事務所はパソコンのブラウザで使う。データは Firestore、PDF は Cloud Storage、本番は Cloud Run（asia-northeast1）。
 
-## 前提
+お客様向けの資料は `docs/deliverables/`（要件定義書 02 〜 画面設計書 10）、変更の記録は `docs/chg/`（CHG-001〜）、API 仕様は `docs/spec/openapi.yaml`。
 
-- リポジトリは現時点で未着手（コード0、tracked filesなし）。本書はGate 0着手前の環境準備を対象とする。
-- 対象OS: 開発機のOSは問わないが、Docker / Node.js 22 / pnpmが動作すること。
+## 構成
 
-## 手順
-
-### 1. ツールの導入
-```bash
-# mise を使う場合（推奨）
-mise install        # .mise.toml の node=22 / pnpm=9 を導入
-
-# あるいは手動で
-nvm install          # .nvmrc の 22 を導入
-npm install -g pnpm@9
+```
+apps/web            Next.js（App Router）— 画面・REST API（/api/v1）・ログイン
+apps/worker         帳票（PDF）の作成・メール送信・outbox の処理。開発は常駐、本番は Cloud Scheduler が毎分起動
+packages/domain     時間計算・入力規則・状態・請求計算など（フレームワーク非依存）
+packages/application  処理の手順（use case）
+packages/docstore   Firestore と試験用の MemoryDocStore、Cloud Storage／ローカルディスク
+packages/contracts  OpenAPI の契約
+packages/ui         画面部品
+infra/firestore     複合索引・TTL・Security Rules
+scripts/gcp         本番の構築・更新（deploy-prod.sh）
+scripts/firestore   エミュレータの起動、索引・ルールの適用
+scripts/docs        納品資料（Markdown）→ PDF
 ```
 
-### 2. 既存ポート・コンテナの棚卸し（必須・スキップ不可）
-インフラ・運用設計書「local port」節により、特定のhost path/portを仕様として固定してはいけない。
-着手時に必ず棚卸しを行い、空きportを確認してから `.env.local` に記録する。
-```bash
-pnpm ports:audit   # scripts/audit-ports.sh を実行
-```
+本番では、提案書の範囲外の機能（承認・請求・管理者の多要素認証・日報メールの自動送信）を機能フラグで無効にしている（`.env.example` 参照）。
 
-### 3. 環境変数の設定
-```bash
-cp .env.example .env.local
-```
-`.env.local` を編集し、手順2で確認した空きport（`DB_HOST_PORT` 等）と、`DATABASE_URL` / `AUTH_SECRET` を設定する。
-Gmail連携・帳票テンプレートID・Sentry DSN等は現段階では空欄でよい（G0では未使用）。
+## 開発環境（Cloud Shell）
 
-### 4. 依存関係のインストール
+前提: Node.js 22、pnpm 9、gcloud（開発用プロジェクト `inspexor-jadeworks-dev` に接続できること）、Docker（Mailpit 用）。
+
 ```bash
 pnpm install --frozen-lockfile
+cp .env.example apps/web/.env.local      # AUTH_SECRET などを入れる
+(cd apps/web && npx tsx --env-file=.env.local scripts/seed-dev-users.ts)   # 開発用の管理者・現場・事務所（パスワードは ~/.inspexor-dev-*-password に出力）
+(cd apps/web && npx tsx --env-file=.env.local scripts/seed-masters.ts)     # 開発用の合成マスタ（SYN-*、E2E が使う）
+pnpm dev                                  # web（http://localhost:3000）
+(cd apps/worker && npx tsx --env-file=../web/.env.local src/index.ts)    # worker（別のターミナル）
 ```
-※ 初回はlockfileが存在しないため `pnpm install` で生成し、以後は `--frozen-lockfile` を用いる。
 
-### 5. ローカルDB（PostgreSQL16）の起動
+マスタ・利用者・試験用の報告は Excel から一括登録できる（手順書 `docs/deliverables/08_テストデータ・マスタ登録手順書.md`）。
+
+## 試験
+
 ```bash
-pnpm db:up      # docker compose -p inspexor-dev up -d db
+# 単体
+(cd packages/domain && npx vitest run); (cd packages/application && npx vitest run); (cd packages/docstore && npx vitest run)
+node apps/web/scripts/patch-tsconfig.cjs apps/web && (cd apps/web && npx tsc --noEmit && npx vitest run); git checkout -- apps/web/tsconfig.json
+# 結合（Firestore エミュレータ 127.0.0.1:8085、Mailpit）
+bash scripts/firestore/start-emulator.sh && docker compose up -d mailpit
+(cd apps/web && FIRESTORE_EMULATOR_HOST=127.0.0.1:8085 npx vitest run --config vitest.integration.config.ts)
+(cd apps/worker && FIRESTORE_EMULATOR_HOST=127.0.0.1:8085 npx vitest run --config vitest.integration.config.ts)
+# 画面操作（開発環境の dev サーバーに対して、直列）
+(cd apps/web && E2E_PASSWORD=… E2E_FIELD_PASSWORD=… E2E_OFFICE_PASSWORD=… npx playwright test)
 ```
-`docker compose -p inspexor-dev` のプロジェクト名で起動する（インフラ設計書準拠、container_nameは固定しない）。
 
-### 6. 起動確認
+## 変更の反映（batch 方式）
+
+変更は1つの batch（`gNN.sh`）にまとめ、Cloud Shell で実行する。batch は 書込み → 内容の照合 → 型検査・単体・結合 → commit → 開発で E2E → push → 本番の更新・確認 の順に進み、途中で止まっても再実行すれば続きから進む。
+
 ```bash
-docker compose -p inspexor-dev ps
-pnpm dev          # apps/web を起動
-pnpm dev:worker   # apps/worker を起動（別ターミナル）
+mv ~/gNN.sh ~/inspexor/ && cd ~/inspexor && bash gNN.sh
 ```
 
-### 7. 品質チェックコマンドの確認
-以下が実行できることを確認する（この時点では対象コードが空のため通過するだけで良い）。
+パスワードは `~/.inspexor-dev-{admin,field,office}-password`・`~/.inspexor-prod-admin-password`（権限600）のファイルで扱い、画面やログには出さない。
+
+## 本番
+
 ```bash
-pnpm lint
-pnpm typecheck
-pnpm test
+bash scripts/gcp/deploy-prod.sh          # image の作成と Cloud Run・Scheduler・Firestore の設定（何度実行しても同じ状態）
+bash scripts/gcp/diag-prod.sh            # 状態の確認
 ```
 
-## 構成（開発スタック定義書 2章 monorepo準拠）
-
-```
-apps/web           Next.js App Router — UI / REST API / 認証
-apps/worker        PDF生成・メール送信・outbox consumer
-packages/domain    entities/value/state/計算（フレームワーク非依存）
-packages/application  use case / transaction port
-packages/db        Prisma / migration / repository（DB設計書・schema.sqlが正本）
-packages/contracts  openapi.yaml から生成するAPI契約
-packages/ui         デザインシステム（画面UX設計書準拠）
-packages/config     型付きenv設定
-infra/terraform     GCP IaC（Cloud Run/SQL/Tasks/Storage）
-tests/e2e           Playwright（15画面×role×responsive）
-tests/contract      OpenAPI/event/schemaのcontract test
-docs/adr            技術決定のADR
-```
-
-各パッケージの責務・禁止事項は各ディレクトリの `README.md` を参照。
-
-## この後の進め方
-
-環境構築が完了したら、`Claude向け_INSPEXOR_Gate0-9連続実装指示_v5.1.md` に従い、
-DOC-00の順で全設計書を読了し `spec-inventory.json` / `implementation-plan.md` を作成したうえで Gate 0 (`G0-INVENTORY`) から着手する。
-各Gateは対象ID・変更予定・migration・リスク・禁止事項の宣言 → 実装 → 全Exit greenの確認、を経てからのみ次に進む。
+運用・バックアップ・障害時の対応は `docs/deliverables/07_運用・保守手順書.md`。

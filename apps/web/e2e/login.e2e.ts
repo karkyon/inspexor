@@ -27,7 +27,7 @@ test.describe('G0-E2E: 認証フロー（API-001/002/003）', () => {
     await page.getByLabel('パスワード').fill(PASSWORD);
     await page.getByRole('button', { name: 'ログイン' }).click();
     await finishMfa(page, LOGIN_ID);
-    await expect(page.getByText(/ようこそ、.+さん（ADMIN）/)).toBeVisible();
+    await expect(page.getByText(/ようこそ、.+さん（管理者）/)).toBeVisible();
 
     const cookies = await context.cookies();
     const session = cookies.find((c) => c.name === '__Secure-inspexor.session');
@@ -37,7 +37,7 @@ test.describe('G0-E2E: 認証フロー（API-001/002/003）', () => {
     expect(session?.sameSite).toBe('Lax');
 
     await page.reload();
-    await expect(page.getByText(/ようこそ、.+さん（ADMIN）/)).toBeVisible();
+    await expect(page.getByText(/ようこそ、.+さん（管理者）/)).toBeVisible();
 
     await page.getByRole('button', { name: 'ログアウト' }).click();
     await expect(page.getByText('ログインしてください。')).toBeVisible();
@@ -53,7 +53,7 @@ test.describe('G0-E2E: 認証フロー（API-001/002/003）', () => {
     await page.getByRole('button', { name: 'ログイン' }).click();
     await finishMfa(page, LOGIN_ID);
     await expect(page).toHaveURL(/\/$/);
-    await expect(page.getByText(/ようこそ、.+さん（ADMIN）/)).toBeVisible();
+    await expect(page.getByText(/ようこそ、.+さん（管理者）/)).toBeVisible();
   });
 
   test('CSRFトークン無しのlogout APIは403', async ({ page, request }) => {
