@@ -2,13 +2,15 @@
 # INSPEXOR 本番の構築・更新（CHG-006 g25）。何度実行してもよい（作成済みのものはそのまま使う）。
 #   使い方: bash scripts/gcp/deploy-prod.sh
 #   環境変数（任意）: PROD_PROJECT（既定 inspexor-jadeworks-prod）/ DEV_PROJECT（課金アカウントの参照元、既定 inspexor-jadeworks-dev）
+#                     WORKER_SCHEDULE（worker の定期起動。既定 */15 * * * *。CHG-016）
 #                     BILLING_ACCOUNT（例 0123AB-4567CD-89EF01。未指定なら DEV_PROJECT と同じ課金アカウント）
 #
 # 構成（提案書 P.12・CHG-006 §4。すべて東京 asia-northeast1）
 #   Cloud Run  inspexor-web（公開・0台から起動）/ inspexor-worker（IAM 認証・0台から起動・同時1件）
 #   Firestore  (default) Native。索引・TTL・Security Rules（全拒否）・削除保護
 #   Cloud Storage  <PROJECT>-documents（帳票 PDF。公開禁止）/ <PROJECT>-backups（Firestore 日次書き出し。30日で削除）
-#   Cloud Scheduler  worker を1分ごとに起動 / Firestore を毎日 03:15 に書き出し
+#   Cloud Scheduler  worker を15分ごとに起動（取りこぼしの保険。通常は web が確定直後に起動）/ Firestore を毎日 03:15 に書き出し
+#                    一時停止中の job は、作り直した後も一時停止のまま（CHG-016。再開は gcloud scheduler jobs resume）
 #   Secret Manager  AUTH_SECRET（本番用に新規生成。値は表示しない）
 #   予算アラート  月 ¥2,000（50%・90%・100% で通知）
 #   Cloud Run Job  inspexor-diag（worker image で Firestore・Cloud Storage・Chromium の所要時間を測る。業務データは作らない）
@@ -25,6 +27,7 @@ WORKER_SA="inspexor-worker@$P.iam.gserviceaccount.com"
 SCHED_SA="inspexor-scheduler@$P.iam.gserviceaccount.com"
 BUILD_SA="inspexor-build@$P.iam.gserviceaccount.com"
 SECRET=inspexor-auth-secret
+WORKER_SCHEDULE="${WORKER_SCHEDULE:-*/15 * * * *}"
 TAG="$(git -C "$ROOT" rev-parse --short=12 HEAD)"
 IMG="$R-docker.pkg.dev/$P/$AR_REPO"
 WEB_IMAGE="$IMG/web:$TAG"
@@ -157,12 +160,20 @@ echo "worker: $WORKER_URL（IAM 認証）"
 echo "=== [9/10] Cloud Scheduler"
 sched() {
   local name="$1"; shift
-  # 設定を確実に揃えるため、既存なら作り直す（job の履歴以外に失うものは無い）
-  q gcloud scheduler jobs describe "$name" --location="$R" --project="$P" && gcloud scheduler jobs delete "$name" --location="$R" --project="$P" --quiet > /dev/null
+  local state
+  # 設定を確実に揃えるため、既存なら作り直す（job の履歴以外に失うものは無い）。
+  # CHG-016: 一時停止中（利用開始前などで費用を止めている）なら、作り直した後も一時停止に戻す
+  state="$(gcloud scheduler jobs describe "$name" --location="$R" --project="$P" --format='value(state)' 2>/dev/null || true)"
+  [ -n "$state" ] && gcloud scheduler jobs delete "$name" --location="$R" --project="$P" --quiet > /dev/null
   gcloud scheduler jobs create http "$name" --location="$R" --project="$P" "$@" > /dev/null
-  echo "$name: 設定済み"
+  if [ "$state" = "PAUSED" ]; then
+    gcloud scheduler jobs pause "$name" --location="$R" --project="$P" > /dev/null
+    echo "$name: 設定済み（一時停止のまま。再開: gcloud scheduler jobs resume $name --location=$R --project=$P）"
+  else
+    echo "$name: 設定済み"
+  fi
 }
-sched inspexor-worker-run --schedule="* * * * *" --time-zone=Asia/Tokyo --uri="$WORKER_URL/run" --http-method=POST \
+sched inspexor-worker-run --schedule="$WORKER_SCHEDULE" --time-zone=Asia/Tokyo --uri="$WORKER_URL/run" --http-method=POST \
   --oidc-service-account-email="$SCHED_SA" --oidc-token-audience="$WORKER_URL" --attempt-deadline=320s
 sched inspexor-firestore-export --schedule="15 3 * * *" --time-zone=Asia/Tokyo \
   --uri="https://firestore.googleapis.com/v1/projects/$P/databases/(default):exportDocuments" --http-method=POST \

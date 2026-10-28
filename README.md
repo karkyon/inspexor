@@ -9,7 +9,7 @@
 
 ```
 apps/web            Next.js（App Router）— 画面・REST API（/api/v1）・ログイン
-apps/worker         帳票（PDF）の作成・メール送信・outbox の処理。開発は常駐、本番は Cloud Scheduler が毎分起動
+apps/worker         帳票（PDF）の作成・メール送信・outbox の処理。開発は常駐、本番は確定直後に web が起動し、取りこぼしは Cloud Scheduler が15分ごとに拾う
 packages/domain     時間計算・入力規則・状態・請求計算など（フレームワーク非依存）
 packages/application  処理の手順（use case）
 packages/docstore   Firestore と試験用の MemoryDocStore、Cloud Storage／ローカルディスク

@@ -3,7 +3,7 @@
  *   WORKER_URL 未設定（開発の常駐 worker）なら何もしない。
  *   認証は Cloud Run の metadata server から worker 宛の ID token を取得する（web のサービスアカウントに run.invoker を付与）。
  *   worker は仕事が無くなるまで処理してから応答するため、応答は待たない（要求が送られるまで最大 waitMs 待って返す）。
- *   失敗しても業務処理は成功のまま（Cloud Scheduler が1分ごとに worker を起動するため、遅れて処理される）。
+ *   失敗しても業務処理は成功のまま（Cloud Scheduler が15分ごとに worker を起動するため（CHG-016）、遅れて処理される）。
  */
 
 export interface KickDeps {

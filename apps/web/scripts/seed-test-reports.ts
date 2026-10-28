@@ -46,7 +46,7 @@ try {
     masterPrefix: opt('--master-prefix') ?? (customers.every((c) => c.startsWith('TEST-')) ? 'TEST-' : ''),
   });
   console.log(`作成しました: 作業日報 ${r.work} 件・運搬実績 ${r.delivery} 件（${r.days} 日分）。報告番号 ${r.reportNos[0] ?? ''} 〜 ${r.reportNos[r.reportNos.length - 1] ?? ''}`);
-  console.log('帳票（PDF）は worker が順に作ります（開発: 起動中の worker、本番: 毎分の起動）。');
+  console.log('帳票（PDF）は worker が順に作ります（開発: 起動中の worker、本番: 確定直後の起動と15分ごとの起動）。');
 } catch (err) {
   console.error('作成に失敗:', err instanceof Error ? err.message : err);
   process.exitCode = 1;

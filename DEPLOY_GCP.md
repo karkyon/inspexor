@@ -11,7 +11,7 @@
 | データ | Firestore (default) | Native、索引・TTL・Security Rules（全拒否）、削除保護 |
 | 帳票 PDF | Cloud Storage `<PROJECT>-documents` | 公開禁止・均一アクセス。web は署名付き URL の検証後に読み出して返す |
 | バックアップ | Cloud Scheduler → Firestore 書き出し | 毎日 03:15、`<PROJECT>-backups`、30日で削除 |
-| worker の起動 | web（確定・帳票操作の直後）＋ Cloud Scheduler（1分ごと） | どちらも ID token で認証 |
+| worker の起動 | web（確定・帳票操作の直後）＋ Cloud Scheduler（15分ごと。取りこぼしの保険。CHG-016） | どちらも ID token で認証。一時停止中の Scheduler は `deploy-prod.sh` を流しても一時停止のまま |
 | 費用の監視 | 予算アラート | 月 ¥2,000（50%・90%・100%） |
 
 サービスアカウントは役割ごとに分ける（web / worker / scheduler / build）。開発用プロジェクト `inspexor-jadeworks-dev` とは別プロジェクト `inspexor-jadeworks-prod`。
@@ -34,6 +34,18 @@ GOOGLE_CLOUD_QUOTA_PROJECT=inspexor-jadeworks-prod APP_ENV=prod FIRESTORE_PROJEC
 ```
 
 開発用の合成データ（`seed-dev-users.ts` / `seed-masters.ts`）は本番に入れない（APP_ENV=local/dev でしか動かない）。
+
+## 利用開始前の費用の停止・再開（CHG-016）
+
+利用開始前など、使っていない間は定期起動を止める（Firestore・Cloud Storage は使った分だけの課金、Cloud Run は 0台）。`deploy-prod.sh` を流しても一時停止のまま残る。
+
+```bash
+P=inspexor-jadeworks-prod; R=asia-northeast1
+gcloud scheduler jobs pause  inspexor-worker-run       --project=$P --location=$R   # 停止
+gcloud scheduler jobs pause  inspexor-firestore-export --project=$P --location=$R
+gcloud scheduler jobs resume inspexor-worker-run       --project=$P --location=$R   # 再開（本番に業務データ・試験データを入れる前）
+gcloud scheduler jobs resume inspexor-firestore-export --project=$P --location=$R
+```
 
 ## 確認
 

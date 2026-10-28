@@ -1,7 +1,8 @@
 /**
  * worker エントリポイント（CHG-006: Firestore）。
  *   WORKER_MODE=poll（既定、開発）: 常駐して WORKER_POLL_MS ごとに outbox / 帳票 / メールを処理
- *   WORKER_MODE=http（本番 Cloud Run）: POST /run で仕事が無くなるまで処理して応答する。Cloud Scheduler が1分ごとに起動する
+ *   WORKER_MODE=http（本番 Cloud Run）: POST /run で仕事が無くなるまで処理して応答する（仕事が無ければすぐ応答）。
+ *                                     web が確定直後に起動し、Cloud Scheduler が15分ごとに取りこぼしを拾う（CHG-016）
  *                                     （Cloud Run の IAM で認証。使わない時は 0 台）
  *
  *   FIRESTORE_PROJECT_ID 必須（FIRESTORE_DATABASE_ID 任意、FIRESTORE_EMULATOR_HOST で試験用エミュレータ）
