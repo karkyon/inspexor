@@ -1,0 +1,2 @@
+# gitleaks の誤検出の除外（2026-11-10）: 試験用の二重送信防止の番号 IDEM_KEY='idem-key-0123456789'。秘密情報ではない
+b1feeabae4f439b56c1e3ddef89ca3499023fed5:apps/web/lib/http/api-handler.test.ts:generic-api-key:16
