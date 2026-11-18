@@ -16,6 +16,8 @@ export interface FieldUser {
   readonly displayName: string;
   readonly roles: readonly string[];
   readonly csrfToken?: string;
+  /** /me の features（INVENTORY_ENABLED など。無効なら在庫の欄を出さない） */
+  readonly features?: { readonly inventory?: boolean };
 }
 
 const FieldUserContext = createContext<FieldUser | null>(null);

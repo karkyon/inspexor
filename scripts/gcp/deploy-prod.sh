@@ -137,7 +137,7 @@ else
 fi
 
 echo "=== [8/10] Cloud Run（worker → web）"
-COMMON_ENV="FIRESTORE_PROJECT_ID=$P,STORAGE_BUCKET=$DOC_BUCKET,DAILY_MAIL_ENABLED=false,APP_ENV=prod"
+COMMON_ENV="FIRESTORE_PROJECT_ID=$P,STORAGE_BUCKET=$DOC_BUCKET,DAILY_MAIL_ENABLED=false,INVENTORY_ENABLED=${INVENTORY_ENABLED:-false},APP_ENV=prod"
 gcloud run deploy inspexor-worker --project="$P" --region="$R" --image="$WORKER_IMAGE" \
   --service-account="$WORKER_SA" --no-allow-unauthenticated \
   --min-instances=0 --max-instances=1 --concurrency=1 --cpu=1 --memory=1Gi --timeout=300 --cpu-boost \

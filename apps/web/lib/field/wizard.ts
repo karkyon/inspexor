@@ -44,6 +44,12 @@ export interface WorkForm {
   remarks: string;
   /** CHG-012 代理入力の理由（事務所が他の報告者で作成するとき） */
   proxyReason: string;
+  /** CHG-018 在庫（INVENTORY_ENABLED・在庫を管理する品番のときだけ使う。STEP4） */
+  boxCount: string;
+  replenishBoxes: string;
+  deliveredQuantity: string;
+  deliveredDate: string;
+  acknowledgeAdjustShort: boolean;
 }
 
 export const DELIVERY_FEE_MAX = 9_999_999;
@@ -58,7 +64,7 @@ export function emptyDeliveryForm(today: string): DeliveryForm {
 }
 
 export function emptyWorkForm(today: string, reporterId: string): WorkForm {
-  return { workDate: today, reporterId, customerId: '', productId: '', workTypeId: '', lotNo: '', workerIds: [], startTime: '', endTime: '', quantity: '', defects: {}, workLocationId: '', vehicleId: '', remarks: '', proxyReason: '' };
+  return { workDate: today, reporterId, customerId: '', productId: '', workTypeId: '', lotNo: '', workerIds: [], startTime: '', endTime: '', quantity: '', defects: {}, workLocationId: '', vehicleId: '', remarks: '', proxyReason: '', boxCount: '', replenishBoxes: '', deliveredQuantity: '', deliveredDate: '', acknowledgeAdjustShort: false };
 }
 
 /** CHG-004 以前の端末下書き（新項目なし）を読み込んだときの補完 */
@@ -67,7 +73,7 @@ export function normalizeDeliveryForm(f: DeliveryForm): DeliveryForm {
 }
 
 export function normalizeWorkForm(f: WorkForm): WorkForm {
-  return { ...f, workLocationId: f.workLocationId ?? '', vehicleId: f.vehicleId ?? '', remarks: f.remarks ?? '', proxyReason: f.proxyReason ?? '' };
+  return { ...f, workLocationId: f.workLocationId ?? '', vehicleId: f.vehicleId ?? '', remarks: f.remarks ?? '', proxyReason: f.proxyReason ?? '', boxCount: f.boxCount ?? '', replenishBoxes: f.replenishBoxes ?? '', deliveredQuantity: f.deliveredQuantity ?? '', deliveredDate: f.deliveredDate ?? '', acknowledgeAdjustShort: f.acknowledgeAdjustShort === true };
 }
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -231,7 +237,8 @@ function endInstant(f: WorkForm): string {
   return jstToInstant(f.workDate, f.endTime === '00:00' ? '24:00' : f.endTime);
 }
 
-export function buildWorkDraft(f: WorkForm, selfId?: string) {
+/** inventory: 在庫の欄を送るか（INVENTORY_ENABLED かつ在庫を管理する品番）。送らない場合は inventory: null */
+export function buildWorkDraft(f: WorkForm, selfId?: string, withInventory = false) {
   return {
     workDate: f.workDate,
     reporterId: f.reporterId,
@@ -249,8 +256,20 @@ export function buildWorkDraft(f: WorkForm, selfId?: string) {
     workLocationId: f.workLocationId === '' ? null : f.workLocationId,
     vehicleId: f.vehicleId === '' ? null : f.vehicleId,
     remarks: f.remarks.trim() === '' ? null : f.remarks.trim(),
+    inventory: withInventory ? inventoryOf(f) : null,
     // CHG-012 代理入力（作成時だけ送る。更新では useWizard が外す）
     ...(selfId !== undefined && f.reporterId !== selfId ? { proxyReason: f.proxyReason.trim() } : {}),
+  };
+}
+
+function inventoryOf(f: WorkForm) {
+  const dq = intOf(f.deliveredQuantity) ?? 0;
+  return {
+    boxCount: intOf(f.boxCount) ?? 0,
+    replenishBoxes: intOf(f.replenishBoxes) ?? 0,
+    deliveredQuantity: dq,
+    deliveredDate: dq > 0 && f.deliveredDate !== '' ? f.deliveredDate : null,
+    acknowledgeAdjustShort: f.acknowledgeAdjustShort,
   };
 }
 
@@ -258,6 +277,7 @@ export function buildWorkDraft(f: WorkForm, selfId?: string) {
 export function workDetailToForm(d: Record<string, unknown>, toJstTime: (iso: string) => { date: string; time: string }): WorkForm {
   const start = toJstTime(d['startAt'] as string);
   const end = toJstTime(d['endAt'] as string);
+  const inv = (d['inventory'] ?? null) as { boxCount: number; replenishBoxes?: number; deliveredQuantity?: number; deliveredDate?: string | null; acknowledgeAdjustShort?: boolean } | null;
   return {
     workDate: d['workDate'] as string,
     reporterId: d['reporterId'] as string,
@@ -275,6 +295,11 @@ export function workDetailToForm(d: Record<string, unknown>, toJstTime: (iso: st
     vehicleId: (d['vehicleId'] as string | null) ?? '',
     remarks: (d['remarks'] as string | null) ?? '',
     proxyReason: '',
+    boxCount: inv === null ? '' : String(inv.boxCount),
+    replenishBoxes: inv === null || !inv.replenishBoxes ? '' : String(inv.replenishBoxes),
+    deliveredQuantity: inv === null || !inv.deliveredQuantity ? '' : String(inv.deliveredQuantity),
+    deliveredDate: inv === null ? '' : (inv.deliveredDate ?? ''),
+    acknowledgeAdjustShort: inv?.acknowledgeAdjustShort === true,
   };
 }
 

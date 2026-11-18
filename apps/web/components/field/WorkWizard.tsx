@@ -16,6 +16,8 @@ import { nameOf, useFieldMasters, type FieldMasters } from './useFieldMasters';
 import { useOnline } from './useOnline';
 import { todayJst, useWizard } from './useWizard';
 import { ConflictBanner, DonePanel, NotAllowed } from './WizardCommon';
+import { InventoryBlock } from './InventoryBlock';
+import { suggestBoxes } from '../../lib/field/inventory-effect';
 
 const BASE = '/field/work-reports/new';
 const TITLES = ['日付・報告者・お客様', '品番・作業内容', '作業者・作業時間', '数量・不良', '登録内容を確認'];
@@ -129,7 +131,11 @@ export function WorkWizard() {
     if (!checked) found.push({ path: '/confirmCheck', code: 'required', message: '「内容を確認しました」にチェックしてください。' });
     setIssues(found);
     if (found.length > 0) return;
-    await w.submit(buildWorkDraft(f, user.userId));
+    const prod = masters?.products.find((p) => p.id === f.productId);
+    const invOn = user.features?.inventory === true && prod?.inventoryManaged === true;
+    // 箱数が未入力（下書きの再開など）なら目安（処理数量÷入数）にする。0 のままだと調整用在庫から名目数ぶんを補充してしまう
+    const sendForm = invOn && f.boxCount === '' ? { ...f, boxCount: String(suggestBoxes(Number(f.quantity) || 0, prod?.unitsPerBox ?? 1)) } : f;
+    await w.submit(buildWorkDraft(sendForm, user.userId, invOn));
   }
 
   const hrefOf = (path: string): string | null => {
@@ -463,6 +469,9 @@ export function WorkWizard() {
               <small id="h-remarks">{REMARKS_MAX}文字まで（例: 特記事項なし）</small>
               <FieldError id="e-remarks" issue={issueFor(allIssues, '/remarks')} />
             </div>
+            {user.features?.inventory === true && masters.products.find((p) => p.id === f.productId)?.inventoryManaged === true ? (
+              <InventoryBlock form={f} setForm={w.setForm} productName={nameOf(masters.products, f.productId)} quantity={quantity} defectTotal={defectTotal} issues={allIssues} online={online} />
+            ) : null}
             <div className="fx-finalsummary" aria-live="polite">
               <div>
                 <small>実作業時間</small>
@@ -530,6 +539,16 @@ export function WorkWizard() {
                 <dd>
                   {quantity.toLocaleString('ja-JP')}個 / {defectTotal.toLocaleString('ja-JP')}個（{rate}%）
                 </dd>
+                {user.features?.inventory === true && masters.products.find((p) => p.id === f.productId)?.inventoryManaged === true ? (
+                  <>
+                    <dt>在庫</dt>
+                    <dd>
+                      箱数 {f.boxCount === '' ? '（目安で登録）' : `${f.boxCount}箱`}
+                      {Number(f.replenishBoxes) > 0 ? ` ／ 1箱回す ${f.replenishBoxes}箱` : ''}
+                      {Number(f.deliveredQuantity) > 0 ? ` ／ 納入 ${Number(f.deliveredQuantity).toLocaleString('ja-JP')}個（${f.deliveredDate === '' ? '納入日未入力' : f.deliveredDate}）` : ''}
+                    </dd>
+                  </>
+                ) : null}
                 <dt>備考</dt>
                 <dd className="fx-prewrap">{f.remarks.trim() === '' ? '—' : f.remarks.trim()}</dd>
               </dl>

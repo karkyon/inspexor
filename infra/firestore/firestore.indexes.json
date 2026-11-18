@@ -171,6 +171,34 @@
           "order": "DESCENDING"
         }
       ]
+    },
+    {
+      "collectionGroup": "inventoryMovements",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "productId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "seq",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "inventoryMovements",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "sourceReportId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "sourceRevisionNo",
+          "order": "ASCENDING"
+        }
+      ]
     }
   ],
   "fieldOverrides": [

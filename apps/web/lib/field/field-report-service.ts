@@ -18,6 +18,11 @@
 import { randomUUID } from 'node:crypto';
 import {
   computeBusinessTime,
+  defaultBoxes,
+  InventoryInputError,
+  InventoryLotShortError,
+  planReportInventory,
+  type Movement,
   formatReportNo,
   resolveRecordTransition,
   type RecordRole,
@@ -33,7 +38,10 @@ import {
   appendAudit,
   C,
   enqueueOutbox,
+  hasOpening,
+  InventoryRejectedError,
   readCounter,
+  registerMovements,
   reportPath,
   REPORT_COLLECTION,
   revisionPath,
@@ -46,6 +54,7 @@ import {
   type Filter,
   type RecordDecision,
   type ReportHeaderDoc,
+  type ReportInventoryDoc,
   type ReportProxy,
   type UserDoc,
   type WorkCurrent,
@@ -335,7 +344,13 @@ function workRevisionDoc(input: WorkDraftInput, v: WorkValidated, meta: { revisi
     workLocationId: input.workLocationId ?? null,
     vehicleId: input.vehicleId ?? null,
     remarks: input.remarks ?? null,
+    inventory: inventoryDocOf(input.inventory),
   };
+}
+
+function inventoryDocOf(i: WorkDraftInput['inventory']): ReportInventoryDoc | null {
+  if (i === null || i === undefined) return null;
+  return { boxCount: i.boxCount, replenishBoxes: i.replenishBoxes ?? 0, deliveredQuantity: i.deliveredQuantity ?? 0, deliveredDate: i.deliveredDate ?? null, acknowledgeAdjustShort: i.acknowledgeAdjustShort === true };
 }
 
 function deliveryRevisionDoc(input: DeliveryDraftInput, items: DeliveryRevisionDoc['items'], meta: { revisionNo: number; parentRevisionId: string | null }): DeliveryRevisionDoc {
@@ -441,6 +456,7 @@ function workDetail(header: Header, revisionId: string, rev: WorkRevisionDoc): R
     workLocationId: rev.workLocationId,
     vehicleId: rev.vehicleId,
     remarks: rev.remarks,
+    inventory: rev.inventory == null ? null : { boxCount: rev.inventory.boxCount, replenishBoxes: rev.inventory.replenishBoxes ?? 0, deliveredQuantity: rev.inventory.deliveredQuantity ?? 0, deliveredDate: rev.inventory.deliveredDate ?? null, acknowledgeAdjustShort: rev.inventory.acknowledgeAdjustShort === true },
     decision: decisionOut(header),
     proxy: proxyOut(header),
   };
@@ -519,7 +535,11 @@ function summaryOf(type: FieldReportType, header: Header | ReportHeaderDoc & { i
 // ------------------------------------------------------------------ service
 
 export class FieldReportService {
-  constructor(private readonly store: DocStore) {}
+  constructor(
+    private readonly store: DocStore,
+    /** inventoryEnabled: INVENTORY_ENABLED（在庫管理有り版の本番は true）。無効なら日報の確定で在庫を動かさない */
+    private readonly options: { readonly inventoryEnabled?: boolean } = {},
+  ) {}
 
   async get(type: FieldReportType, id: string, actor: FieldActor): Promise<Record<string, unknown>> {
     const header = await readHeader(this.store, type, id);
@@ -724,11 +744,79 @@ export class FieldReportService {
     });
   }
 
+  /**
+   * CHG-018 在庫: 在庫を管理する品番で、開始残高が登録済みで、作業日が開始日以降の日報だけ取引を作る。
+   * 前の版の取引は取り消して作り直す（取消しは元と同じ業務日・同じロット）。戻り値は監査用の件数（作らなければ null）。
+   */
+  private async registerInventory(tx: DocTransaction, id: string, header: Header, input: WorkDraftInput, v: WorkValidated, rev: WorkRevisionDoc, ctx: FieldContext): Promise<Record<string, unknown> | null> {
+    const product = await tx.get<MasterDoc & { name?: string; inventoryManaged?: boolean; unitsPerBox?: number | null; adjustStockManaged?: boolean }>(`${C.products}/${input.productId}`);
+    if (product === null || product.inventoryManaged !== true) return null;
+    const unitsPerBox = product.unitsPerBox ?? null;
+    const defectDocs = await tx.getMany<{ name?: string; code?: string }>(v.defects.map((d) => `${C.defectTypes}/${d.defectTypeId}`));
+    const reporter = await tx.get<{ displayName?: string }>(`${C.users}/${input.reporterId}`);
+    const ngBy: Record<string, number> = {};
+    v.defects.forEach((d, i) => {
+      const nm = defectDocs[i]?.name ?? defectDocs[i]?.code ?? d.defectTypeId;
+      ngBy[nm] = (ngBy[nm] ?? 0) + d.quantity;
+    });
+    const defectTotal = v.defects.reduce((a, d) => a + d.quantity, 0);
+    const inv = input.inventory ?? null;
+    const lotKey = `${input.workDate}|${header.reportNo}|1`;
+    const md = `${Number(input.workDate.slice(5, 7))}/${Number(input.workDate.slice(8))}`;
+    const hours = Math.round(((rev.regularMinutes + rev.overtimeMinutes) / 60) * 100) / 100;
+    let touched = 0;
+    try {
+      const res = await registerMovements(
+        tx,
+        input.productId,
+        (existing: readonly Movement[]) => {
+          const opening = existing.filter((m) => m.type === 'OPENING' && !existing.some((x) => x.reversalOf === m.id)).map((m) => m.businessDate).sort()[0];
+          const hadBefore = existing.some((m) => m.meta.reportId === id);
+          // 開始残高の登録前、または作業日が開始日より前は在庫の欄を使わない（前の版が取引を作っていれば取り消すだけ）
+          if (!hasOpening(existing) || opening === undefined || input.workDate < opening) return hadBefore ? planReportInventory(existing, { productId: input.productId, reportId: id, revisionNo: rev.revisionNo, businessDate: input.workDate, lotKey, lotLabel: `${md} 選別分（${header.reportNo}）`, actual: 0, defectTotal: 0, boxes: 0, unitsPerBox: unitsPerBox ?? 1, adjustManaged: false }) : [];
+          if (unitsPerBox === null) throw new InventoryInputError('この品番の1箱の入数が未登録です。品番マスタで登録してください。');
+          return planReportInventory(existing, {
+            productId: input.productId,
+            reportId: id,
+            revisionNo: rev.revisionNo,
+            businessDate: input.workDate,
+            lotKey,
+            lotLabel: `${md} 選別分（${header.reportNo}）`,
+            actual: input.quantity,
+            defectTotal,
+            boxes: inv?.boxCount ?? defaultBoxes(input.quantity, unitsPerBox),
+            unitsPerBox,
+            adjustManaged: product.adjustStockManaged === true,
+            replenishBoxes: inv?.replenishBoxes,
+            deliveredQuantity: inv?.deliveredQuantity,
+            deliveredDate: inv?.deliveredDate ?? undefined,
+            meta: { ngBy, lotNo: input.lotNo ?? '', ...(reporter?.displayName ? { writer: reporter.displayName } : {}), hours },
+          });
+        },
+        { actorId: ctx.actor.userId, now: ctx.now, correlationId: ctx.correlationId, sourceKind: 'REPORT', sourceReportId: id, sourceRevisionId: header.latestRevisionId, sourceRevisionNo: rev.revisionNo, acknowledgeAdjustShort: inv?.acknowledgeAdjustShort === true },
+      );
+      touched = res.movements.length;
+    } catch (e) {
+      if (e instanceof InventoryRejectedError) {
+        throw new FieldError(422, e.code, e.message, [{ path: '/inventory', code: e.code === 'INVENTORY_LOT_SHORT' ? 'lot_short' : 'adjust_short', message: e.message }], { issues: e.issues.map((i) => ({ kind: i.kind, businessDate: i.businessDate, lotKey: i.lotKey ?? null, quantity: i.quantity })) });
+      }
+      if (e instanceof InventoryLotShortError) {
+        throw new FieldError(422, 'INVENTORY_LOT_SHORT', e.message, [{ path: '/inventory/deliveredQuantity', code: 'lot_short', message: e.message }], { available: e.available, requested: e.requested });
+      }
+      if (e instanceof InventoryInputError) {
+        throw new FieldError(422, 'VALIDATION_ERROR', e.message, [{ path: '/inventory', code: 'invalid', message: e.message }]);
+      }
+      throw e;
+    }
+    return { movements: touched };
+  }
+
   /** confirm は caller（handler）が Idempotency を管理し、ここは 1 transaction で確定する */
   async confirm(type: FieldReportType, id: string, expectedVersion: number, ctx: FieldContext): Promise<RecordSummary> {
     return this.store.runTransaction(async (tx) => {
       let businessDate: string;
       let auditExtra: Record<string, unknown>;
+      let auditInventory: Record<string, unknown> | null = null;
       let header: Header;
       let revisionNo: number;
       const write: Array<() => void> = [];
@@ -739,6 +827,9 @@ export class FieldReportService {
         const input = revisionToWorkInput(d.revision);
         const v = await validateWork(tx, input, d.revision.reporterId);
         const rev: WorkRevisionDoc = { ...workRevisionDoc(input, v, { revisionNo: d.revision.revisionNo, parentRevisionId: d.revision.parentRevisionId }), confirmedAt: ctx.now };
+        // CHG-018 在庫: 日報の確定と同じ transaction で取引を作る（失敗すれば日報の確定も取り消し）
+        const inv = this.options.inventoryEnabled === true ? await this.registerInventory(tx, id, header, input, v, rev, ctx) : null;
+        if (inv !== null) auditInventory = inv;
         write.push(() => {
           tx.set(revisionPath('WORK', id, header.latestRevisionId), rev);
           tx.update(reportPath('WORK', id), {
@@ -801,7 +892,7 @@ export class FieldReportService {
           targetType: LABEL[type].target,
           targetId: id,
           beforeData: { status: 'DRAFT', version: header.version },
-          afterData: { status: 'CONFIRMED', version, revisionId: header.latestRevisionId, revisionNo, ...auditExtra },
+          afterData: { status: 'CONFIRMED', version, revisionId: header.latestRevisionId, revisionNo, ...auditExtra, ...(auditInventory !== null ? { inventory: auditInventory } : {}) },
           correlationId: ctx.correlationId,
           occurredAt: ctx.now,
         },
@@ -1041,6 +1132,7 @@ function revisionToWorkInput(r: WorkRevisionDoc): WorkDraftInput {
     workLocationId: r.workLocationId,
     vehicleId: r.vehicleId,
     remarks: r.remarks,
+    inventory: r.inventory == null ? null : { boxCount: r.inventory.boxCount, replenishBoxes: r.inventory.replenishBoxes ?? 0, deliveredQuantity: r.inventory.deliveredQuantity ?? 0, deliveredDate: r.inventory.deliveredDate ?? null, acknowledgeAdjustShort: r.inventory.acknowledgeAdjustShort === true },
   };
 }
 

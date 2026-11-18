@@ -1,4 +1,5 @@
 import { FirestoreDocStore, type DocStore } from '@inspexor/docstore';
+import { createTestStore } from '@inspexor/docstore/testing';
 
 /**
  * CHG-006: アプリの DocStore（Cloud Firestore）。
@@ -10,6 +11,11 @@ const globalForStore = globalThis as unknown as { inspexorDocStore?: DocStore | 
 
 export function getDocStore(): DocStore {
   if (globalForStore.inspexorDocStore === undefined) {
+    // ブラウザの E2E 専用（本番では使えない）: メモリ上の DocStore。データは app/api/e2e-seed で投入する
+    if (process.env['E2E_MEMORY_STORE'] === '1' && process.env['APP_ENV'] !== 'prod') {
+      globalForStore.inspexorDocStore = createTestStore('e2e').store;
+      return globalForStore.inspexorDocStore;
+    }
     const projectId = process.env['FIRESTORE_PROJECT_ID'];
     if (!projectId) throw new Error('FIRESTORE_PROJECT_ID is not set');
     const databaseId = process.env['FIRESTORE_DATABASE_ID'];

@@ -138,3 +138,8 @@ body:has(.fx-shell){margin:0}
 .fx-skip:focus{top:8px}
 #main:focus{outline:none}
 .fx-shell a:focus-visible,.fx-shell button:focus-visible,.fx-shell input:focus-visible,.fx-shell select:focus-visible,.fx-shell textarea:focus-visible,.fx-shell summary:focus-visible{outline:3px solid #1769aa;outline-offset:2px}
+/* CHG-018 在庫の欄（作業日報 STEP4） */
+.fx-invblock{border:1px solid #c7d6e0;border-radius:12px;padding:14px 16px;margin:16px 0;background:#f7fafc;display:flex;flex-direction:column;gap:12px}
+.fx-invblock h3{margin:0;font-size:1.05rem}
+.fx-warnbox{border:1px solid #d9a441;background:#fff7e6;border-radius:10px;padding:10px 14px}
+.fx-warnbox p{margin:0 0 8px}

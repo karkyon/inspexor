@@ -19,3 +19,4 @@ export * from './billing-period';
 export * from './billing-engine';
 export * from './invoice';
 export * from './security-policy';
+export * from './inventory';

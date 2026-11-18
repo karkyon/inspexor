@@ -1,0 +1,496 @@
+{
+  "document": "INSPEXOR 在庫管理 golden（在庫管理有り版 v2.0）",
+  "generatedFrom": "SANSEI 試作画面 1.1 の在庫計算（INV）。本番の packages/domain への移植は、この値をすべて満たすこと",
+  "date": "2026-11-18",
+  "note": "数量はすべて個数。lotKey は「検品日|報告番号|行番号」（実例は「日付|実例」）。日付は業務日",
+  "cases": [
+    {
+      "id": "INV-04",
+      "title": "箱の誤差（1箱250個の箱に248個／251個）",
+      "input": {
+        "unitsPerBox": 250,
+        "adjustManaged": true,
+        "opening": {
+          "adjust": 50
+        },
+        "inspections": [
+          {
+            "date": "2026-09-02",
+            "selected": 248,
+            "defects": 0,
+            "boxes": 1
+          },
+          {
+            "date": "2026-09-03",
+            "selected": 251,
+            "defects": 0,
+            "boxes": 1
+          }
+        ]
+      },
+      "expected": {
+        "after248": {
+          "adjust": 48,
+          "lotQuantity": 250,
+          "movementTypes": [
+            "INSPECT:248",
+            "FILL:2"
+          ]
+        },
+        "after251": {
+          "adjust": 49,
+          "lotQuantityTotal": 500,
+          "movementTypes": [
+            "INSPECT:251",
+            "SURPLUS:1"
+          ]
+        }
+      }
+    },
+    {
+      "id": "INV-05",
+      "title": "不良の補充（5箱・選別1,250・不良5）",
+      "input": {
+        "unitsPerBox": 250,
+        "adjustManaged": true,
+        "opening": {
+          "adjust": 30
+        },
+        "inspections": [
+          {
+            "date": "2026-09-02",
+            "selected": 1250,
+            "defects": 5,
+            "boxes": 5
+          }
+        ]
+      },
+      "expected": {
+        "deposit": 1250,
+        "adjust": 25,
+        "lots": [
+          {
+            "lotKey": "2026-09-02|WR-A|1",
+            "lotDate": "2026-09-02",
+            "quantity": 1250
+          }
+        ],
+        "movements": [
+          {
+            "type": "INSPECT",
+            "from": "EXT:INTAKE",
+            "to": "LOT",
+            "quantity": 1245,
+            "lotKey": "2026-09-02|WR-A|1",
+            "date": "2026-09-02"
+          },
+          {
+            "type": "NG",
+            "from": "EXT:INTAKE",
+            "to": "EXT:NG",
+            "quantity": 5,
+            "date": "2026-09-02"
+          },
+          {
+            "type": "FILL",
+            "from": "ADJ",
+            "to": "LOT",
+            "quantity": 5,
+            "lotKey": "2026-09-02|WR-A|1",
+            "date": "2026-09-02"
+          }
+        ],
+        "defectsStayOutside": true
+      }
+    },
+    {
+      "id": "INV-06",
+      "title": "調整用在庫の不足（不良300・調整用262）",
+      "input": {
+        "unitsPerBox": 250,
+        "adjustManaged": true,
+        "opening": {
+          "adjust": 262
+        },
+        "inspections": [
+          {
+            "date": "2026-09-02",
+            "selected": 1250,
+            "defects": 300,
+            "boxes": 5
+          }
+        ]
+      },
+      "expected": {
+        "adjustAfter": -38,
+        "issues": [
+          {
+            "kind": "ADJ_NEGATIVE",
+            "date": "2026-09-02",
+            "quantity": -38
+          }
+        ],
+        "rule": "確定前に「-38個になります」で停止。確認のチェックがあるときだけ記録し、在庫の画面に矛盾として残す"
+      }
+    },
+    {
+      "id": "INV-07",
+      "title": "同じ日・別ロットのうち1つだけ訂正（L2 500→750）",
+      "input": {
+        "lots": [
+          {
+            "lotKey": "2026-09-01|WR-A|1",
+            "selected": 1000
+          },
+          {
+            "lotKey": "2026-09-01|WR-B|1",
+            "selected": 500
+          }
+        ],
+        "revise": {
+          "lotKey": "2026-09-01|WR-B|1",
+          "selected": 750
+        }
+      },
+      "expected": {
+        "lots": [
+          {
+            "lotKey": "2026-09-01|WR-A|1",
+            "lotDate": "2026-09-01",
+            "quantity": 1000
+          },
+          {
+            "lotKey": "2026-09-01|WR-B|1",
+            "lotDate": "2026-09-01",
+            "quantity": 750
+          }
+        ],
+        "movementCountAfter": 4,
+        "reversalsReference": [
+          "M00002"
+        ]
+      }
+    },
+    {
+      "id": "INV-08",
+      "title": "繰り返しの修正でも残高が増えない／不良を2増やすと調整用が2減る（実例 9/3）",
+      "input": {
+        "base": "実例（8月・9月）",
+        "revise": {
+          "date": "2026-09-03",
+          "defectsPlus": 2
+        }
+      },
+      "expected": {
+        "septemberEnd": {
+          "before": {
+            "deposit": 1250,
+            "adjust": 112
+          },
+          "afterDefectsPlus2": {
+            "deposit": 1250,
+            "adjust": 110
+          }
+        }
+      }
+    },
+    {
+      "id": "INV-09",
+      "title": "振替 → 取消し → 再振替、同じ取引の二重の取消しは監査で検出",
+      "input": {
+        "replenishQuantity": 250
+      },
+      "expected": {
+        "afterReverse": {
+          "deposit": 1250,
+          "adjust": 0,
+          "lots": [
+            {
+              "lotKey": "2026-09-01|WR-A|1",
+              "lotDate": "2026-09-01",
+              "quantity": 1250
+            }
+          ]
+        },
+        "afterReplenishAgain": {
+          "deposit": 1000,
+          "adjust": 250,
+          "lots": [
+            {
+              "lotKey": "2026-09-01|WR-A|1",
+              "lotDate": "2026-09-01",
+              "quantity": 1000
+            }
+          ]
+        },
+        "reversalPointsTo": true,
+        "doubleReversalAuditOk": false,
+        "doubleReversalAuditErrors": [
+          "同じ取引を2回取り消している"
+        ]
+      }
+    },
+    {
+      "id": "INV-R1",
+      "title": "実例の再現（MN139931 の 7/31・8月・9月）",
+      "input": {
+        "sources": [
+          "丸五ゴム在庫管理分.pdf（8月の手書き。判読値）",
+          "９月分（現場用）.xlsx「パッキン（原紙）①・③」"
+        ],
+        "movementCount": 146,
+        "unitsPerBox": 250
+      },
+      "expected": {
+        "auditOk": true,
+        "issues": 0,
+        "balances": [
+          {
+            "date": "2026-07-31",
+            "deposit": 2000,
+            "adjust": 28,
+            "lots": [
+              {
+                "lotKey": "2026-07-31|実例",
+                "lotDate": "2026-07-31",
+                "quantity": 2000
+              }
+            ]
+          },
+          {
+            "date": "2026-08-03",
+            "deposit": 1250,
+            "adjust": 23,
+            "lots": [
+              {
+                "lotKey": "2026-08-03|実例",
+                "lotDate": "2026-08-03",
+                "quantity": 1250
+              }
+            ]
+          },
+          {
+            "date": "2026-08-06",
+            "deposit": 1000,
+            "adjust": 252,
+            "lots": [
+              {
+                "lotKey": "2026-08-06|実例",
+                "lotDate": "2026-08-06",
+                "quantity": 1000
+              }
+            ]
+          },
+          {
+            "date": "2026-08-07",
+            "deposit": 1500,
+            "adjust": 238,
+            "lots": [
+              {
+                "lotKey": "2026-08-07|実例",
+                "lotDate": "2026-08-07",
+                "quantity": 1500
+              }
+            ]
+          },
+          {
+            "date": "2026-08-19",
+            "deposit": 1500,
+            "adjust": 221,
+            "lots": [
+              {
+                "lotKey": "2026-08-19|実例",
+                "lotDate": "2026-08-19",
+                "quantity": 1500
+              }
+            ]
+          },
+          {
+            "date": "2026-08-20",
+            "deposit": 0,
+            "adjust": 221,
+            "lots": []
+          },
+          {
+            "date": "2026-08-21",
+            "deposit": 1250,
+            "adjust": 214,
+            "lots": [
+              {
+                "lotKey": "2026-08-21|実例",
+                "lotDate": "2026-08-21",
+                "quantity": 1250
+              }
+            ]
+          },
+          {
+            "date": "2026-08-31",
+            "deposit": 1500,
+            "adjust": 185,
+            "lots": [
+              {
+                "lotKey": "2026-08-31|実例",
+                "lotDate": "2026-08-31",
+                "quantity": 1500
+              }
+            ]
+          },
+          {
+            "date": "2026-09-01",
+            "deposit": 1250,
+            "adjust": 184,
+            "lots": [
+              {
+                "lotKey": "2026-09-01|実例",
+                "lotDate": "2026-09-01",
+                "quantity": 1250
+              }
+            ]
+          },
+          {
+            "date": "2026-09-02",
+            "deposit": 0,
+            "adjust": 184,
+            "lots": []
+          },
+          {
+            "date": "2026-09-30",
+            "deposit": 1250,
+            "adjust": 112,
+            "lots": [
+              {
+                "lotKey": "2026-09-30|実例",
+                "lotDate": "2026-09-30",
+                "quantity": 1250
+              }
+            ]
+          }
+        ],
+        "deliveryAllocation": [
+          {
+            "deliveredOn": "2026-08-03",
+            "fromLotDate": "2026-07-31",
+            "quantity": 2000
+          },
+          {
+            "deliveredOn": "2026-08-04",
+            "fromLotDate": "2026-08-03",
+            "quantity": 1250
+          },
+          {
+            "deliveredOn": "2026-08-05",
+            "fromLotDate": "2026-08-04",
+            "quantity": 1250
+          },
+          {
+            "deliveredOn": "2026-08-06",
+            "fromLotDate": "2026-08-05",
+            "quantity": 1250
+          },
+          {
+            "deliveredOn": "2026-08-07",
+            "fromLotDate": "2026-08-06",
+            "quantity": 1000
+          },
+          {
+            "deliveredOn": "2026-08-17",
+            "fromLotDate": "2026-08-07",
+            "quantity": 1500
+          },
+          {
+            "deliveredOn": "2026-08-18",
+            "fromLotDate": "2026-08-17",
+            "quantity": 1500
+          },
+          {
+            "deliveredOn": "2026-08-19",
+            "fromLotDate": "2026-08-18",
+            "quantity": 1500
+          },
+          {
+            "deliveredOn": "2026-08-20",
+            "fromLotDate": "2026-08-19",
+            "quantity": 1500
+          },
+          {
+            "deliveredOn": "2026-08-24",
+            "fromLotDate": "2026-08-21",
+            "quantity": 1250
+          }
+        ],
+        "months": [
+          {
+            "month": "2026-08",
+            "countBy": "INSPECTION_MONTH",
+            "openAdj": 28,
+            "closeAdj": 185,
+            "closeDeposit": 1500,
+            "takeBack": 20499,
+            "selected": 20499,
+            "ngTotal": 92,
+            "ngBy": {},
+            "delivered": 20250,
+            "rows": 32
+          },
+          {
+            "month": "2026-08",
+            "countBy": "DELIVERY_MONTH",
+            "openAdj": 28,
+            "closeAdj": 185,
+            "closeDeposit": 1500,
+            "takeBack": 20499,
+            "selected": 20499,
+            "ngTotal": 92,
+            "ngBy": {},
+            "delivered": 20750,
+            "rows": 31
+          },
+          {
+            "month": "2026-09",
+            "countBy": "INSPECTION_MONTH",
+            "openAdj": 185,
+            "closeAdj": 112,
+            "closeDeposit": 1250,
+            "takeBack": 23500,
+            "selected": 23500,
+            "ngTotal": 73,
+            "ngBy": {
+              "破れ": 30,
+              "融合不良": 34,
+              "加硫": 9
+            },
+            "delivered": 23500,
+            "rows": 31
+          },
+          {
+            "month": "2026-09",
+            "countBy": "DELIVERY_MONTH",
+            "openAdj": 185,
+            "closeAdj": 112,
+            "closeDeposit": 1250,
+            "takeBack": 23500,
+            "selected": 23500,
+            "ngTotal": 73,
+            "ngBy": {
+              "破れ": 30,
+              "融合不良": 34,
+              "加硫": 9
+            },
+            "delivered": 23750,
+            "rows": 30
+          }
+        ],
+        "fpr": {
+          "openAdj": 0,
+          "closeAdj": 0,
+          "closeDeposit": 0,
+          "takeBack": 7920,
+          "selected": 7920,
+          "ngTotal": 0,
+          "ngBy": {},
+          "delivered": 7920
+        }
+      }
+    }
+  ]
+}

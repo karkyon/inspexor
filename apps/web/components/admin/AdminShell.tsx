@@ -17,6 +17,8 @@ export interface AdminFeatures {
   readonly dailyMail: boolean;
   /** CHG-012 管理者の多要素認証 */
   readonly adminMfa?: boolean;
+  /** CHG-018 在庫管理（SCR-19） */
+  readonly inventory?: boolean;
 }
 
 export interface AdminUser {
@@ -66,6 +68,7 @@ const NAV: readonly NavItem[] = [
   { prefix: '/admin/records', href: '/admin/records', code: '一覧', label: '報告一覧' },
   { prefix: '/admin/monthly', href: '/admin/monthly', code: '集計', label: '月次集計' },
   { prefix: '/admin/billing', also: ['/admin/invoices'], href: '/admin/billing', code: '請求', label: '請求', feature: 'billing' },
+  { prefix: '/admin/inventory', href: '/admin/inventory', code: '在庫', label: '在庫', feature: 'inventory' },
   { prefix: '/admin/masters', href: '/admin/masters/products', code: 'マスタ', label: 'マスター管理' },
   { prefix: '/admin/users', href: '/admin/users', code: '利用者', label: '利用者管理' },
   { prefix: '/admin/account', href: '/admin/account', code: 'MFA', label: '多要素認証', feature: 'adminMfa', roles: ['ADMIN'] },

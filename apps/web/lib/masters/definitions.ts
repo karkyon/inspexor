@@ -172,6 +172,11 @@ export const MASTER_DEFS: Readonly<Record<MasterType, MasterDef>> = {
       { api: 'name', column: 'name', kind: 'text', required: true, max: 200 },
       { api: 'settlementType', column: 'settlement_type', kind: 'enum', required: true, enumValues: ['QUANTITY', 'TIME'] },
       { api: 'lotRequired', column: 'lot_required', kind: 'bool', required: false, defaultValue: false },
+      // CHG-015・CHG-018 在庫管理（SK-2026-08-MINI-09 4章）
+      { api: 'inventoryManaged', column: 'inventory_managed', kind: 'bool', required: false, defaultValue: false },
+      { api: 'unitsPerBox', column: 'units_per_box', kind: 'int', required: false, min: 1, max: 99999 },
+      { api: 'adjustStockManaged', column: 'adjust_stock_managed', kind: 'bool', required: false, defaultValue: false },
+      { api: 'adjustLowThreshold', column: 'adjust_low_threshold', kind: 'int', required: false, min: 0, max: 99999, defaultValue: 20 },
       active,
     ],
   },
