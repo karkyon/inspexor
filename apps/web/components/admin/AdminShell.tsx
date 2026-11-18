@@ -119,13 +119,13 @@ export function AdminShell({ children }: { readonly children: ReactNode }) {
         本文へ移動
       </a>
       <aside className="ix-sidenav" aria-label="メインメニュー">
-        <div className="ix-brand">
+        <a className="ix-brand" href="/" aria-label="INSPEXOR ホームへ">
           <div className="ix-brandmark" aria-hidden="true">IX</div>
           <div>
             <b>INSPEXOR</b>
             <small>業務管理システム</small>
           </div>
-        </div>
+        </a>
         <nav>
           {visibleNav(user).map((n) => {
             const active = matches(n, pathname);
@@ -146,6 +146,12 @@ export function AdminShell({ children }: { readonly children: ReactNode }) {
         <header className="ix-appbar">
           <b>{NAV.find((n) => matches(n, pathname))?.label ?? '管理'}</b>
           <div className="ix-spacer" />
+          {user !== null ? (
+            <div className="ix-appnav">
+              <a className="ix-btn" href="/">ホーム</a>
+              {user.roles.some((r) => r === 'OFFICE' || r === 'ADMIN') ? <a className="ix-btn" href="/field">現場入力へ</a> : null}
+            </div>
+          ) : null}
           {user !== null ? (
             <div className="ix-user">
               <i aria-hidden="true">{user.displayName.slice(0, 1)}</i>

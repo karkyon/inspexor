@@ -167,3 +167,7 @@ fieldset.ix-field{border:0;padding:0;margin:0;min-width:0}
 /* CHG-018 在庫画面: ラジオを視覚的に隠す（キーボード操作・読み上げは有効のまま） */
 .ix-sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);border:0}
 .ix-btn:has(.ix-sr:focus-visible){outline:3px solid #1f6feb;outline-offset:2px}
+
+.ix-appnav{display:flex;gap:8px;margin-right:14px}
+a.ix-brand{text-decoration:none;color:inherit}
+@media(max-width:600px){.ix-appnav .ix-btn{padding:8px 10px}}

@@ -77,6 +77,15 @@ export function FieldShell({ children }: { readonly children: ReactNode }) {
         </a>
         <div className="fx-spacer" />
         {user !== null ? (
+          <nav className="fx-appnav" aria-label="画面の移動">
+            <a href="/">ホーム</a>
+            <a href="/field">現場ホーム</a>
+            {canCreateReports(user) ? <a href="/field/work-reports/new">作業日報</a> : null}
+            {canCreateReports(user) ? <a href="/field/deliveries/new">運搬実績</a> : null}
+            {user.roles.some((r) => r === 'OFFICE' || r === 'ADMIN') ? <a href="/admin/records">事務所画面</a> : null}
+          </nav>
+        ) : null}
+        {user !== null ? (
           <div className="fx-user">
             <span>
               {user.displayName}（{roleText(user.roles)}）

@@ -143,3 +143,8 @@ body:has(.fx-shell){margin:0}
 .fx-invblock h3{margin:0;font-size:1.05rem}
 .fx-warnbox{border:1px solid #d9a441;background:#fff7e6;border-radius:10px;padding:10px 14px}
 .fx-warnbox p{margin:0 0 8px}
+
+.fx-appnav{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.fx-appnav a{padding:8px 12px;min-height:44px;border-radius:9px;font-size:14px;font-weight:700;border:1px solid #ffffff33}
+.fx-appnav a:hover,.fx-appnav a:focus-visible{background:#ffffff22}
+@media(max-width:767px){.fx-appbar{height:auto;min-height:60px;flex-wrap:wrap;padding:8px 12px}.fx-appbar>a b{display:none}.fx-appnav{order:3;width:100%}.fx-appnav a{flex:1;text-align:center;justify-content:center}}
