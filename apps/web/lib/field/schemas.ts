@@ -75,6 +75,18 @@ const workShape = {
   workLocationId: nullableUuid(),
   vehicleId: nullableUuid(),
   remarks: nullableText(500),
+  // CHG-015・CHG-018 在庫（INVENTORY_ENABLED かつ在庫を管理する品番のときだけ使う。STEP4）
+  inventory: z
+    .object({
+      boxCount: z.number().int().min(0).max(99_999),
+      replenishBoxes: z.number().int().min(0).max(999).optional(),
+      deliveredQuantity: z.number().int().min(0).max(9_999_999).optional(),
+      deliveredDate: date().nullable().optional(),
+      acknowledgeAdjustShort: z.boolean().optional(),
+    })
+    .strict()
+    .nullable()
+    .optional(),
 };
 
 /** CHG-012 代理入力の理由（報告者がログイン中の本人以外のとき必須。作成時だけ） */

@@ -41,6 +41,9 @@ export const C = {
   invoices: 'invoices',
   // CHG-011 遅延訂正の調整（次の請求に反映）
   billingAdjustments: 'billingAdjustments',
+  // CHG-015・CHG-018 在庫管理（INVENTORY_ENABLED）
+  inventoryMovements: 'inventoryMovements',
+  inventoryBalances: 'inventoryBalances',
   // CHG-012 ログインの回数制限（TTL expiresAt）
   rateLimits: 'rateLimits',
 } as const;

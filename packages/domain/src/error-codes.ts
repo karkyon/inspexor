@@ -31,6 +31,8 @@ export type ErrorCode =
   | 'TEMPLATE_INVALID'
   | 'DEPENDENCY_UNAVAILABLE'
   | 'RATE_LIMITED'
+  | 'INVENTORY_LOT_SHORT'
+  | 'INVENTORY_ADJUST_SHORT'
   | 'INTERNAL_ERROR';
 
 export interface ErrorDictionaryEntry {
@@ -56,6 +58,9 @@ export const ERROR_DICTIONARY: Readonly<Record<ErrorCode, ErrorDictionaryEntry>>
   TEMPLATE_INVALID: { httpStatus: 422, retryable: false, evidence: 'derived' },
   DEPENDENCY_UNAVAILABLE: { httpStatus: 503, retryable: true, evidence: 'documented' },
   RATE_LIMITED: { httpStatus: 429, retryable: true, evidence: 'documented' },
+  // CHG-018 在庫管理（SK-2026-08-MINI-09 13.4）
+  INVENTORY_LOT_SHORT: { httpStatus: 422, retryable: false, evidence: 'documented' },
+  INVENTORY_ADJUST_SHORT: { httpStatus: 422, retryable: false, evidence: 'documented' },
   INTERNAL_ERROR: { httpStatus: 500, retryable: true, evidence: 'documented' },
 };
 

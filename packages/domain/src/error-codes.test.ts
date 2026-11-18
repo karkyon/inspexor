@@ -6,11 +6,11 @@ const EXPECTED_CODES: readonly ErrorCode[] = [
   'VALIDATION_ERROR', 'VERSION_CONFLICT', 'STATE_CONFLICT', 'IDEMPOTENCY_CONFLICT',
   'MASTER_INACTIVE', 'RULE_NOT_FOUND', 'RULE_AMBIGUOUS', 'SOURCE_CHANGED',
   'RECIPIENT_EMPTY', 'TEMPLATE_INVALID', 'DEPENDENCY_UNAVAILABLE', 'RATE_LIMITED',
-  'INTERNAL_ERROR',
+  'INVENTORY_LOT_SHORT', 'INVENTORY_ADJUST_SHORT', 'INTERNAL_ERROR',
 ];
 
-describe('error-codes: 用語・状態・コード定義書 17件準拠', () => {
-  it('17コードすべてが辞書に存在する', () => {
+describe('error-codes: 用語・状態・コード定義書 17件＋在庫管理 2件', () => {
+  it('19コードすべて（17＋在庫2）が辞書に存在する', () => {
     expect(Object.keys(ERROR_DICTIONARY).sort()).toEqual([...EXPECTED_CODES].sort());
   });
 
@@ -25,7 +25,7 @@ describe('error-codes: 用語・状態・コード定義書 17件準拠', () => 
     const documented: readonly ErrorCode[] = [
       'AUTH_REQUIRED', 'FORBIDDEN', 'ACCOUNT_LOCKED', 'CSRF_INVALID',
       'VALIDATION_ERROR', 'VERSION_CONFLICT', 'STATE_CONFLICT', 'IDEMPOTENCY_CONFLICT',
-      'DEPENDENCY_UNAVAILABLE', 'RATE_LIMITED', 'INTERNAL_ERROR',
+      'DEPENDENCY_UNAVAILABLE', 'RATE_LIMITED', 'INTERNAL_ERROR', 'INVENTORY_LOT_SHORT', 'INVENTORY_ADJUST_SHORT',
     ];
     for (const code of documented) {
       expect(lookupErrorCode(code).evidence).toBe('documented');

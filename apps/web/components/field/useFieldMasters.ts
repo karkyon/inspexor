@@ -19,6 +19,11 @@ export interface MasterRow {
   readonly sortOrder?: number;
   readonly holidayDate?: string;
   readonly settlementType?: string;
+  /** CHG-018 在庫（品番） */
+  readonly inventoryManaged?: boolean;
+  readonly unitsPerBox?: number | null;
+  readonly adjustStockManaged?: boolean;
+  readonly adjustLowThreshold?: number;
 }
 
 export interface FieldMasters {

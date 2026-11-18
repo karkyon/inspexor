@@ -164,3 +164,6 @@ fieldset.ix-field{border:0;padding:0;margin:0;min-width:0}
 .ix-skip:focus{top:8px}
 #main:focus{outline:none}
 .ix-shell a:focus-visible,.ix-shell button:focus-visible,.ix-shell input:focus-visible,.ix-shell select:focus-visible,.ix-shell textarea:focus-visible,.ix-shell summary:focus-visible{outline:3px solid #1769aa;outline-offset:2px}
+/* CHG-018 在庫画面: ラジオを視覚的に隠す（キーボード操作・読み上げは有効のまま） */
+.ix-sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);border:0}
+.ix-btn:has(.ix-sr:focus-visible){outline:3px solid #1f6feb;outline-offset:2px}

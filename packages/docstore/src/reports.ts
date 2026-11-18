@@ -129,6 +129,16 @@ export interface WorkRevisionDoc {
   readonly workLocationId: string | null;
   readonly vehicleId: string | null;
   readonly remarks: string | null;
+  /** CHG-018 在庫（在庫を管理する品番の日報のみ）。確定時に取引（inventoryMovements）を作る */
+  readonly inventory?: ReportInventoryDoc | null;
+}
+
+export interface ReportInventoryDoc {
+  readonly boxCount: number;
+  readonly replenishBoxes?: number | null;
+  readonly deliveredQuantity?: number | null;
+  readonly deliveredDate?: string | null;
+  readonly acknowledgeAdjustShort?: boolean | null;
 }
 
 export interface DeliveryRevisionDoc {

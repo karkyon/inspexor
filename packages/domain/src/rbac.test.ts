@@ -5,11 +5,25 @@ const ALL = Object.keys(OPERATION_POLICIES) as OperationId[];
 const as = (...roles: RoleCode[]) => ({ roles });
 
 describe('rbac: API設計書 §6 認証/権限 準拠', () => {
-  it('42 operation（API-001〜025＋CHG-004 API-026〜028＋CHG-007 API-029＋CHG-008 API-030〜033＋CHG-009 API-034＋CHG-011 API-035〜037＋CHG-012 API-038〜042）を網羅し apiId が一意', () => {
-    expect(ALL).toHaveLength(42);
+  it('49 operation（API-001〜042＋CHG-018 在庫 API-047〜053。API-043〜046 は従事行 CHG-014 に予約）を網羅し apiId が一意', () => {
+    expect(ALL).toHaveLength(49);
     const ids = ALL.map((op) => OPERATION_POLICIES[op].apiId);
-    expect(new Set(ids).size).toBe(42);
-    expect([...ids].sort()).toEqual(Array.from({ length: 42 }, (_, i) => `API-${String(i + 1).padStart(3, '0')}`));
+    expect(new Set(ids).size).toBe(49);
+    const expected = [...Array.from({ length: 42 }, (_, i) => i + 1), ...Array.from({ length: 7 }, (_, i) => 47 + i)].map((n) => `API-${String(n).padStart(3, '0')}`);
+    expect([...ids].sort()).toEqual(expected);
+  });
+
+  it('CHG-018 在庫: 参照は OFFICE/ADMIN/AUDITOR、登録・取消しは OFFICE/ADMIN のみ。FIELD は呼べない', () => {
+    for (const op of ['listInventory', 'listInventoryMovements', 'getInventoryMonthly', 'exportInventoryMonthly'] as const) {
+      expect(authorizeOperation(op, { roles: ['AUDITOR'] }).ok).toBe(true);
+      expect(authorizeOperation(op, { roles: ['FIELD'] })).toEqual({ ok: false, errorCode: 'FORBIDDEN' });
+    }
+    for (const op of ['registerInventory', 'reverseInventoryMovement'] as const) {
+      expect(authorizeOperation(op, { roles: ['OFFICE'] }).ok).toBe(true);
+      expect(authorizeOperation(op, { roles: ['ADMIN'] }).ok).toBe(true);
+      expect(authorizeOperation(op, { roles: ['FIELD'] })).toEqual({ ok: false, errorCode: 'FORBIDDEN' });
+      expect(authorizeOperation(op, { roles: ['AUDITOR'] })).toEqual({ ok: false, errorCode: 'FORBIDDEN' });
+    }
   });
 
   it('CHG-004: setDeliveryFee は OFFICE/ADMIN のみ', () => {
@@ -87,9 +101,9 @@ describe('rbac: API設計書 §6 認証/権限 準拠', () => {
     expect(authorizeOperation('createMaster', as('OFFICE', 'ADMIN')).ok).toBe(true);
   });
 
-  it('冪等性 yes は設計書の7操作＋CHG-011 の調整登録・取消', () => {
+  it('冪等性 yes は設計書の7操作＋CHG-011 の調整登録・取消＋CHG-018 の在庫の登録・取消し', () => {
     expect(ALL.filter((op) => OPERATION_POLICIES[op].idempotent).sort()).toEqual(
-      ['cancelBillingAdjustment', 'confirmDeliveryReport', 'confirmWorkReport', 'createBillingAdjustment', 'createBillingRun', 'documentAction', 'transitionBillingRun', 'transitionInvoice', 'transitionRecord'],
+      ['cancelBillingAdjustment', 'confirmDeliveryReport', 'confirmWorkReport', 'createBillingAdjustment', 'createBillingRun', 'documentAction', 'registerInventory', 'reverseInventoryMovement', 'transitionBillingRun', 'transitionInvoice', 'transitionRecord'],
     );
   });
 });

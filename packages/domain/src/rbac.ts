@@ -98,6 +98,14 @@ export const OPERATION_POLICIES = {
   reauthenticate: { apiId: 'API-040', method: 'POST', path: '/auth/reauth', access: AUTHENTICATED, idempotent: false },
   getMfaStatus: { apiId: 'API-041', method: 'GET', path: '/auth/mfa', access: AUTHENTICATED, idempotent: false },
   regenerateRecoveryCodes: { apiId: 'API-042', method: 'POST', path: '/auth/mfa/recovery-codes', access: roles(['ADMIN']), idempotent: false },
+  // CHG-015・CHG-018 在庫管理（INVENTORY_ENABLED）。API-043〜046 は作業者別の従事行（CHG-014）に予約
+  listInventory: { apiId: 'API-047', method: 'GET', path: '/inventory', access: roles(['OFFICE', 'ADMIN', 'AUDITOR']), idempotent: false },
+  listInventoryMovements: { apiId: 'API-048', method: 'GET', path: '/inventory/{productId}/movements', access: roles(['OFFICE', 'ADMIN', 'AUDITOR']), idempotent: false },
+  registerInventory: { apiId: 'API-049', method: 'POST', path: '/inventory/{productId}/{action}', access: roles(['OFFICE', 'ADMIN']), idempotent: true },
+  exportInventoryMonthly: { apiId: 'API-050', method: 'GET', path: '/inventory/monthly/export', access: roles(['OFFICE', 'ADMIN', 'AUDITOR']), idempotent: false },
+  getInventoryMonthly: { apiId: 'API-051', method: 'GET', path: '/inventory/{productId}/monthly', access: roles(['OFFICE', 'ADMIN', 'AUDITOR']), idempotent: false },
+  reverseInventoryMovement: { apiId: 'API-052', method: 'POST', path: '/inventory/{productId}/movements/{movementId}/reverse', access: roles(['OFFICE', 'ADMIN']), idempotent: true },
+  getInventoryPreview: { apiId: 'API-053', method: 'GET', path: '/work-reports/inventory-preview', access: roles(['FIELD', 'OFFICE', 'ADMIN']), idempotent: false },
 } as const satisfies Record<string, OperationPolicy>;
 
 export type OperationId = keyof typeof OPERATION_POLICIES;
