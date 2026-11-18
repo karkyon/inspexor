@@ -4,7 +4,7 @@
  * 作業日報 STEP4 の在庫の欄（CHG-018、SK-2026-08-MINI-09 5章・モック「在庫あり」）。
  * 在庫を管理する品番・INVENTORY_ENABLED・利用開始の残高の登録済みのときだけ出す。箱数・1箱回す・納入（日付は作業日と別）・確定前の見込みを示す。
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { apiRequest } from '../../lib/api/client';
 import { computeInventoryEffect, suggestBoxes } from '../../lib/field/inventory-effect';
 import type { WorkForm } from '../../lib/field/wizard';
@@ -13,7 +13,7 @@ import type { FieldIssue } from '@inspexor/domain';
 
 interface Balance {
   readonly unitsPerBox: number;
-  readonly adjustManaged: boolean;
+  readonly adjustStockManaged: boolean;
   readonly adjustLowThreshold: number;
   readonly deposit: number;
   readonly adjust: number;
@@ -36,6 +36,8 @@ export function InventoryBlock(props: {
   const { form: f, setForm } = props;
   const [bal, setBal] = useState<Balance | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // 箱数を本人が入力・編集した（または保存済みの値がある）なら、数量が変わっても自動では書き換えない
+  const boxTouched = useRef(f.boxCount !== '');
 
   useEffect(() => {
     if (!props.online) return;
@@ -52,11 +54,12 @@ export function InventoryBlock(props: {
     };
   }, [f.productId, f.workDate, props.online]);
 
-  // 箱数は既定で「処理数量 ÷ 入数」（四捨五入）。入力済みなら変えない
+  // 箱数は、本人が触るまで「処理数量 ÷ 入数」（四捨五入）に自動で合わせる。数量が未入力の間は空欄のまま
   useEffect(() => {
-    if (bal === null || !bal.hasOpening || f.boxCount !== '') return;
-    setForm((p) => (p.boxCount !== '' ? p : { ...p, boxCount: String(suggestBoxes(props.quantity, bal.unitsPerBox)) }));
-  }, [bal, f.boxCount, props.quantity, setForm]);
+    if (bal === null || !bal.hasOpening || boxTouched.current) return;
+    const next = props.quantity > 0 ? String(suggestBoxes(props.quantity, bal.unitsPerBox)) : '';
+    setForm((p) => (p.boxCount === next ? p : { ...p, boxCount: next }));
+  }, [bal, props.quantity, setForm]);
 
   if (error !== null) return <p className="fx-note" role="alert">{error}</p>;
   if (bal === null) return null;
@@ -78,25 +81,28 @@ export function InventoryBlock(props: {
   }
   const boxCount = num(f.boxCount);
   const dq = num(f.deliveredQuantity);
-  const eff = computeInventoryEffect({ unitsPerBox: bal.unitsPerBox, adjustManaged: bal.adjustManaged, adjustLowThreshold: bal.adjustLowThreshold, deposit: bal.deposit, adjust: bal.adjust, quantity: props.quantity, defectTotal: props.defectTotal, boxCount, replenishBoxes: num(f.replenishBoxes), deliveredQuantity: dq });
+  const eff = computeInventoryEffect({ unitsPerBox: bal.unitsPerBox, adjustManaged: bal.adjustStockManaged, adjustLowThreshold: bal.adjustLowThreshold, deposit: bal.deposit, adjust: bal.adjust, quantity: props.quantity, defectTotal: props.defectTotal, boxCount, replenishBoxes: num(f.replenishBoxes), deliveredQuantity: dq });
   const set = <K extends keyof WorkForm>(key: K, value: WorkForm[K]): void => setForm((p) => ({ ...p, [key]: value }));
 
   return (
     <section className="fx-invblock" aria-label="在庫">
       <h3>在庫（{props.productName}）</h3>
       <p className="fx-note">
-        いまの残高: 預かり在庫 <b>{fmt(bal.deposit)}</b>個{bal.adjustManaged ? <> ／ 調整用在庫 <b>{fmt(bal.adjust)}</b>個</> : null}（{f.workDate} 時点）
+        いまの残高: 預かり在庫 <b>{fmt(bal.deposit)}</b>個{bal.adjustStockManaged ? <> ／ 調整用在庫 <b>{fmt(bal.adjust)}</b>個</> : null}（{f.workDate} 時点）
       </p>
       <div className="fx-twocol">
         <div className="fx-field">
           <label htmlFor="f-boxCount">
             箱数<span className="fx-req">必須</span>
           </label>
-          <input id="f-boxCount" type="number" inputMode="numeric" min={0} max={99999} value={f.boxCount} onChange={(e) => set('boxCount', e.target.value)} aria-describedby="h-boxCount e-boxCount" />
+          <input id="f-boxCount" type="number" inputMode="numeric" min={0} max={99999} value={f.boxCount} onChange={(e) => {
+              boxTouched.current = true;
+              set('boxCount', e.target.value);
+            }} aria-describedby="h-boxCount e-boxCount" />
           <small id="h-boxCount">1箱 {fmt(bal.unitsPerBox)}個。目安 {fmt(eff.suggestedBoxes)}箱（処理数量÷入数）</small>
           <FieldError id="e-boxCount" issue={issueFor(props.issues, '/inventory/boxCount')} />
         </div>
-        {bal.adjustManaged ? (
+        {bal.adjustStockManaged ? (
           <div className="fx-field">
             <label htmlFor="f-replenishBoxes">
               1箱回す（調整用在庫へ）<span className="fx-opt">任意</span>
@@ -129,7 +135,7 @@ export function InventoryBlock(props: {
           <small>預かり在庫（確定後）</small>
           <b>{fmt(eff.depositAfter)}個</b>
         </div>
-        {bal.adjustManaged ? (
+        {bal.adjustStockManaged ? (
           <div>
             <small>調整用在庫（確定後）</small>
             <b>{fmt(eff.adjustAfter)}個</b>

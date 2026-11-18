@@ -109,7 +109,8 @@ describe('在庫の登録と参照', () => {
 
   it('納入: preview は保存しない。確定すると古いロットから引き当て、監査に残る', async () => {
     const pv = await json(await post('office', pMN, 'delivery', { businessDate: '2026-09-02', quantity: 1000, preview: true }));
-    expect(pv.data).toMatchObject({ preview: true, afterDeposit: 500, blocked: null });
+    expect(pv.data).toMatchObject({ depositDelta: -1000, adjustDelta: 0, issues: [] });
+    expect(Object.keys(pv.data as object).sort()).toEqual(['adjustDelta', 'allocations', 'depositDelta', 'issues', 'movements']);
     expect(pv.data.movements).toHaveLength(1);
     expect((await get('office', 'inventory')).data[0].deposit).toBe(1500);
     const ok = await json(await post('office', pMN, 'delivery', { businessDate: '2026-09-02', quantity: 1000 }));
@@ -188,5 +189,16 @@ describe('API-053 日報の入力画面用の在庫プレビュー', () => {
     expect((await inventoryPreviewHandlers(deps).GET(req('field', 'GET', 'work-reports/inventory-preview'))).status).toBe(400);
     expect((await inventoryPreviewHandlers(deps).GET(req('field', 'GET', `work-reports/inventory-preview?productId=${pMN}&x=1`))).status).toBe(400);
     expect((await inventoryListHandlers(deps).GET(req('field', 'GET', 'inventory'))).status).toBe(403);
+  });
+});
+
+describe('API-049 preview は query（?preview=true）でも本文でも指定できる', () => {
+  it('query の preview=true は保存せず見込みを返す', async () => {
+    const before = ((await json(await inventoryListHandlers(deps).GET(req('office', 'GET', 'inventory')))).data as Array<Record<string, unknown>>).find((b) => b['productId'] === pMN);
+    const res = await inventoryActionHandlers(deps).POST(req('office', 'POST', `inventory/${pMN}/delivery?preview=true`, { businessDate: '2026-09-09', quantity: 10 }, KEY()));
+    expect(res.status).toBe(200);
+    expect(((await json(res)).data as Record<string, unknown>)['depositDelta']).toBe(-10);
+    const after = ((await json(await inventoryListHandlers(deps).GET(req('office', 'GET', 'inventory')))).data as Array<Record<string, unknown>>).find((b) => b['productId'] === pMN);
+    expect(after?.['deposit']).toBe(before?.['deposit']);
   });
 });

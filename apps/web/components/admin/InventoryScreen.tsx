@@ -155,7 +155,7 @@ export function InventoryScreen() {
                   <td>
                     {!b.hasOpening ? <span className="ix-pill">開始時の残高が未登録</span> : null}
                     {b.issues.length > 0 ? <span className="ix-pill ix-red">問題点 {b.issues.length}件</span> : null}
-                    {b.adjustLow && b.issues.length === 0 ? <span className="ix-pill ix-amber">調整用が少ない</span> : null}
+                    {b.hasOpening && b.adjustLow && b.issues.length === 0 ? <span className="ix-pill ix-amber">調整用が少ない</span> : null}
                     {b.hasOpening && b.issues.length === 0 && !b.adjustLow ? '正常' : null}
                   </td>
                 </tr>
@@ -467,7 +467,7 @@ function RegisterTab({ b, onChanged }: { b: Balance; onChanged: () => Promise<vo
         <button type="button" className="ix-btn" onClick={(e) => void submit(e, true)}>
           見込みを確認
         </button>
-        <button type="submit" className="ix-btn primary" disabled={preview === null}>
+        <button type="submit" className="ix-btn primary" disabled={preview === null || preview.issues.some((i) => i.kind === 'LOT_NEGATIVE')}>
           登録する
         </button>
       </div>

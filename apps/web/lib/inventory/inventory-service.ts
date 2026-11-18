@@ -229,14 +229,14 @@ export class InventoryService {
         throw mapDomainError(e);
       }
       const pv = previewIssues(existing, planned);
+      // OpenAPI InventoryPreview: movements・allocations・issues・depositDelta・adjustDelta（保存しない）
+      const delta = (bucket: string): number => planned.reduce((a, p) => a + (p.toBucket === bucket ? p.quantity : 0) - (p.fromBucket === bucket ? p.quantity : 0), 0);
       return {
-        preview: true,
-        businessDate: input.businessDate,
         movements: planned.map(previewRow),
-        afterDeposit: pv.after?.deposit ?? null,
-        afterAdjust: pv.after?.adjust ?? null,
+        allocations: planned.filter((p) => p.type === 'DELIVERY' && p.lotKey).map((p) => ({ lotKey: p.lotKey as string, lotDate: p.lotDate ?? '', quantity: p.quantity })),
         issues: pv.issues.map(toIssueView),
-        blocked: pv.issues.some((i) => i.kind === 'LOT_NEGATIVE') ? 'INVENTORY_LOT_SHORT' : pv.issues.length > 0 && input.acknowledgeAdjustShort !== true ? 'INVENTORY_ADJUST_SHORT' : null,
+        depositDelta: delta('LOT'),
+        adjustDelta: delta('ADJ'),
       };
     }
     try {

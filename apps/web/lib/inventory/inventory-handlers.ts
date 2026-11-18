@@ -178,13 +178,14 @@ export function inventoryActionHandlers(deps: InventoryRouteDeps) {
       const productId = productIdOf(ctx.request);
       const action = segmentsAfterInventory(ctx.request)[1] ?? '';
       if (!(REGISTER_ACTIONS as readonly string[]).includes(action)) throw new InventoryError(404, 'VALIDATION_ERROR', '未定義の操作です。', [{ path: '/action', code: 'enum', message: `${REGISTER_ACTIONS.join(' / ')} のいずれかです。` }]);
-      query(ctx.request, []);
+      // OpenAPI の Preview は query（?preview=true）。本文の preview も受け付ける
+      const previewQuery = query(ctx.request, ['preview']).get('preview') === 'true';
       const raw = await readJson(ctx.request);
       const body = parseBody(registerSchema, raw);
-      const input = { ...body, ...(body.lots ? { lots: body.lots.map((l) => ({ lotDate: l.lotDate, quantity: l.quantity, ...(l.lotLabel ? { lotLabel: l.lotLabel } : {}) })) } : {}) };
+      const input = { ...body, ...(previewQuery ? { preview: true } : {}), ...(body.lots ? { lots: body.lots.map((l) => ({ lotDate: l.lotDate, quantity: l.quantity, ...(l.lotLabel ? { lotLabel: l.lotLabel } : {}) })) } : {}) };
       const run = (): Promise<Record<string, unknown>> => deps.service().register(productId, action as RegisterAction, input, ctxOf(ctx));
       // preview は保存しない（冪等の記録を作らない）
-      if (body.preview === true) return dataResponse(200, await run(), ctx.correlationId);
+      if (body.preview === true || previewQuery) return dataResponse(200, await run(), ctx.correlationId);
       return idempotent(deps, ctx, `POST /inventory/${productId}/${action}`, raw, 201, run);
     }),
   };
